@@ -1,42 +1,48 @@
 import requests
 import time
-import os
+from datetime import datetime, timedelta, timezone
 
-# --- [1. ตั้งค่าการแจ้งเตือน LINE ] ---
-CHANNEL_ACCESS_TOKEN = 'XdQ6URjJAXTkVc1Hden2J2TtiO9hvRqSrv2yerkSwfaZNCzRVhkSe41oHrk2498tUAZm3uMJthaSRrj1U8ofkpqIjUmrvLAW9EQrNd8Bmsz2tMdaiPTK6uLkUXZwaJbOPx3RFE9UJt0vnnnuDiQTPQdB04t89/1O/w1cDnyilFU='
+# --- [ ⚙️ ตั้งค่าการใช้งาน ] ---
+LINE_TOKEN = 'XdQ6URjJAXTkVc1Hden2J2TtiO9hvRqSrv2yerkSwfaZNCzRVhkSe41oHrk2498tUAZm3uMJthaSRrj1U8ofkpqIjUmrvLAW9EQrNd8Bmsz2tMdaiPTK6uLkUXZwaJbOPx3RFE9UJt0vnnnuDiQTPQdB04t89/1O/w1cDnyilFU='
 USER_ID = 'U202dfbbd9d73297f3918492a766716e2'
-PROFIT_THRESHOLD = 0.5  
+PROFIT_THRESHOLD = 0.5  # กำไรขั้นต่ำที่แจ้งเตือน (%)
+ALERT_COOLDOWN = 300    # พักแจ้งเตือน 5 นาที
 
+# กำหนดคู่เงิน (ใช้ชื่อที่สอดคล้องกับ TradingView API ของ Bitkub)
 COINS = {
-    'XRP': {'bitkub': 'XRP_THB', 'binance': 'XRPUSDT', 'transfer_fee': 0.25}, 
-    'XLM': {'bitkub': 'XLM_THB', 'binance': 'XLMUSDT', 'transfer_fee': 0.02},
-    'LTC': {'bitkub': 'LTC_THB', 'binance': 'LTCUSDT', 'transfer_fee': 0.001},
-    'DOGE': {'bitkub': 'DOGE_THB', 'binance': 'DOGEUSDT', 'transfer_fee': 5.0}
+    'XRP':  {'bk_sym': 'XRP_THB',  'bn_sym': 'XRPUSDT',  'transfer_fee': 0.25}, 
+    'XLM':  {'bk_sym': 'XLM_THB',  'bn_sym': 'XLMUSDT',  'transfer_fee': 0.02},
+    'LTC':  {'bk_sym': 'LTC_THB',  'bn_sym': 'LTCUSDT',  'transfer_fee': 0.001},
+    'DOGE': {'bk_sym': 'DOGE_THB', 'bn_sym': 'DOGEUSDT', 'transfer_fee': 5.0}
 }
 
 last_alert_time = {coin: 0 for coin in COINS}
-ALERT_COOLDOWN = 300 
 
-def send_line_message(text):
+def get_thai_time():
+    """แสดงเวลาไทย GMT+7 สำหรับ Server ต่างประเทศ"""
+    return datetime.now(timezone.utc) + timedelta(hours=7)
+
+def send_line(text):
     url = 'https://api.line.me/v2/bot/message/push'
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {CHANNEL_ACCESS_TOKEN}'
-    }
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {LINE_TOKEN}'}
     data = {'to': USER_ID, 'messages': [{'type': 'text', 'text': text}]}
     try:
         requests.post(url, headers=headers, json=data, timeout=5)
     except: pass
 
-def get_bitkub_price(symbol):
+def get_bitkub_price_tv(symbol):
+    """ดึงราคาที่แม่นยำผ่าน TradingView History API (เหมือนแอป Bitkub)"""
     try:
         now = int(time.time())
+        # ดึงข้อมูลย้อนหลัง 2 นาทีเพื่อให้ได้ราคาล่าสุดที่เสถียร
         url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=1&from={now-120}&to={now}"
         res = requests.get(url, timeout=5).json()
-        if res.get('s') == 'ok': return float(res['c'][-1])
+        if res.get('s') == 'ok':
+            return float(res['c'][-1]) # ราคาปิดล่าสุด
     except: return None
 
 def get_binance_price(symbol):
+    """ดึงราคาจาก Binance (ใช้ราคา Ask เพื่อคำนวณต้นทุนซื้อ)"""
     try:
         url = f"https://api.binance.com/api/v3/ticker/bookTicker?symbol={symbol}"
         res = requests.get(url, timeout=5).json()
@@ -45,57 +51,60 @@ def get_binance_price(symbol):
 
 def monitor():
     capital_thb = 10000.0  
-    print("🚀 Bot Started! Monitoring prices...")
-    send_line_message("🤖 บอทเฝ้าราคาเริ่มทำงานแล้ว!\nแสดงผล: % นำหน้า บาท")
+    start_time = get_thai_time().strftime('%H:%M:%S')
+    print(f"🚀 Bot Started at {start_time} (TH Time)")
+    send_line(f"🤖 บอทเฝ้าราคาเริ่มทำงานแล้ว!\nเวลา: {start_time}")
 
     while True:
         try:
-            usdt_thb = get_bitkub_price('USDT_THB') or 31.05
+            # ดึงราคา USDT/THB จาก Bitkub เพื่อคำนวณต้นทุน
+            usdt_thb = get_bitkub_price_tv('USDT_THB') or 31.08
             
-            print("\n" * 2) 
-            print(f"=== ARBITRAGE DASHBOARD (CAPITAL: {capital_thb:,.0f} THB) ===")
-            print(f"{'COIN':<5} | {'BINANCE':<9} | {'BITKUB':<8} | {'NET PROFIT (% / BAHT)'}")
+            thai_now = get_thai_time()
+            print("\n" + "="*75)
+            print(f" ARBITRAGE DASHBOARD | {thai_now.strftime('%d/%m/%Y %H:%M:%S')}")
+            print(f" CAPITAL: {capital_thb:,.0f} THB | USDT/THB: {usdt_thb:.2f}")
+            print("-" * 75)
+            print(f"{'COIN':<5} | {'BINANCE(฿)':<10} | {'BITKUB(฿)':<10} | {'NET PROFIT'}")
             print("-" * 75)
 
-            for coin, sym in COINS.items():
-                bk_price = get_bitkub_price(sym['bitkub'])
-                bn_price_usdt = get_binance_price(sym['binance'])
+            for coin, info in COINS.items():
+                bk_price = get_bitkub_price_tv(info['bk_sym'])
+                bn_price_usdt = get_binance_price(info['bn_sym'])
                 
                 if bk_price and bn_price_usdt:
                     bn_price_thb = bn_price_usdt * usdt_thb
                     
-                    buying_power_usdt = (capital_thb * 0.9975) / usdt_thb
-                    coin_amount = ((buying_power_usdt - 1.0) * 0.999) / bn_price_usdt
-                    final_thb = ((coin_amount - sym['transfer_fee']) * bk_price) * 0.9975
+                    # คำนวณกำไรสุทธิ (หัก Fee เทรด 2 ฝั่ง และ Fee โอน)
+                    buy_usdt = (capital_thb * 0.9975) / usdt_thb
+                    buy_coin = ((buy_usdt - 1.0) * 0.999) / bn_price_usdt
+                    sell_thb = ((buy_coin - info['transfer_fee']) * bk_price) * 0.9975
                     
-                    net_profit_baht = final_thb - capital_thb - 20 
-                    profit_pct = (net_profit_baht / capital_thb) * 100
+                    profit_baht = sell_thb - capital_thb - 20 # เผื่อ Slippage 20 บาท
+                    profit_pct = (profit_baht / capital_thb) * 100
                     
-                    status_icon = "🔥" if profit_pct > 0 else "  "
+                    status_icon = "❌"
+                    if profit_pct > 0: status_icon = "✅"
+                    if profit_pct >= PROFIT_THRESHOLD: status_icon = "🔥"
                     
-                    # --- จุดที่แก้ไข: ปิดปีกกาให้ครบและสลับตำแหน่งตามสั่ง ---
-                    profit_display = f"({profit_pct:>+6.2f}%) {net_profit_baht:>+8.2f} THB"
-                    
-                    print(f"{coin:<5} | {bn_price_thb:>9.2f} | {bk_price:>8.2f} | {status_icon} {profit_display}")
+                    print(f"{coin:<5} | {bn_price_thb:>10.2f} | {bk_price:>10.2f} | {status_icon} {profit_pct:>+6.2f}% ({profit_baht:>+7.1f}฿)")
 
-                    current_time = time.time()
+                    # ระบบแจ้งเตือน LINE
+                    current_ts = time.time()
                     if profit_pct >= PROFIT_THRESHOLD:
-                        if current_time - last_alert_time[coin] > ALERT_COOLDOWN:
-                            alert_msg = (
-                                f"💰 เจอช่องกำไร! [{coin}]\n"
-                                f"กำไรสุทธิ: {profit_pct:.2f}% ({net_profit_baht:.2f} บาท)\n"
-                                f"Bitkub: {bk_price} | Binance: {bn_price_thb:.2f}"
-                            )
-                            send_line_message(alert_msg)
-                            last_alert_time[coin] = current_time 
+                        if current_ts - last_alert_time[coin] > ALERT_COOLDOWN:
+                            msg = (f"💰 เจอช่องกำไร! [{coin}]\n"
+                                   f"กำไร: {profit_pct:.2f}% ({profit_baht:.2f} บาท)\n"
+                                   f"Bitkub: {bk_price} | Binance: {bn_price_thb:.2f}\n"
+                                   f"เวลา: {thai_now.strftime('%H:%M:%S')}")
+                            send_line(msg)
+                            last_alert_time[coin] = current_ts
 
-            print("-" * 75)
-            print(f"USDT/THB: {usdt_thb:.2f} | Update: {time.strftime('%H:%M:%S')}")
-            time.sleep(10) 
+            time.sleep(15) # หน่วงเวลา 15 วินาทีต่อรอบ
 
         except Exception as e:
-            print(f"Error: {e}")
-            time.sleep(5)
+            print(f"⚠️ Error: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
     monitor()
