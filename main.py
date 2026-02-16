@@ -4,8 +4,8 @@ import os
 
 # --- [1. ตั้งค่าการแจ้งเตือน LINE ] ---
 CHANNEL_ACCESS_TOKEN = 'XdQ6URjJAXTkVc1Hden2J2TtiO9hvRqSrv2yerkSwfaZNCzRVhkSe41oHrk2498tUAZm3uMJthaSRrj1U8ofkpqIjUmrvLAW9EQrNd8Bmsz2tMdaiPTK6uLkUXZwaJbOPx3RFE9UJt0vnnnuDiQTPQdB04t89/1O/w1cDnyilFU='
-USER_ID = '@110vzffz'
-PROFIT_THRESHOLD = 0.5  
+USER_ID ='U202dfbbd9d73297f3918492a766716e2'
+PROFIT_THRESHOLD = 0.5 
 
 COINS = {
     'XRP': {'bitkub': 'XRP_THB', 'binance': 'XRPUSDT', 'transfer_fee': 0.25}, 
