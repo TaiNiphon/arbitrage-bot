@@ -3,8 +3,8 @@ import time
 from datetime import datetime, timedelta, timezone
 
 # --- [ ⚙️ ตั้งค่าการใช้งาน ] ---
-LINE_TOKEN = 'XdQ6URjJAXTkVc1Hden2J2TtiO9hvRqSrv2yerkSwfaZNCzRVhkSe41oHrk2498tUAZm3uMJthaSRrj1U8ofkpqIjUmrvLAW9EQrNd8Bmsz2tMdaiPTK6uLkUXZwaJbOPx3RFE9UJt0vnnnuDiQTPQdB04t89/1O/w1cDnyilFU='
-USER_ID = 'U202dfbbd9d73297f3918492a766716e2'
+LINE_TOKEN = "u2vnwJhXwbuCvJr3AmEuc8gSSq3O6nU+WWxCS2UheRhAJKUm4ng70Xs/caUMwNbC6vy9HM5maaWkmjYJul3Xjak/9TbmdHc/hmIoulZTa2YcILhEe7hh/PulVIMololrYBqURtmBrSZCAh3lE5UwtwdB04t89/1O/w1cDnyilFU="
+USER_ID = "U133bb54dab3b44ce14f33a621dc05976"
 PROFIT_THRESHOLD = 0.5  # กำไรขั้นต่ำที่แจ้งเตือน (%)
 ALERT_COOLDOWN = 300    # พักแจ้งเตือน 5 นาที
 
