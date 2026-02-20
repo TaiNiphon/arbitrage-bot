@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- [ ⚙️ ตั้งค่าการใช้งาน ] ---
 LINE_TOKEN = "u2vnwJhXwbuCvJr3AmEuc8gSSq3O6nU+WWxCS2UheRhAJKUm4ng70Xs/caUMwNbC6vy9HM5maaWkmjYJul3Xjak/9TbmdHc/hmIoulZTa2YcILhEe7hh/PulVIMololrYBqURtmBrSZCAh3lE5UwtwdB04t89/1O/w1cDnyilFU="
-USER_ID = "U133bb54dab3b44ce14f33a621dc05976"
+USER_ID = "Ua88ba52b810900b7ba8df4c08b376496"
 PROFIT_THRESHOLD = 0.5  # กำไรขั้นต่ำที่แจ้งเตือน (%)
 ALERT_COOLDOWN = 300    # พักแจ้งเตือน 5 นาที
 
