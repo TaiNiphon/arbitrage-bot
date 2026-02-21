@@ -4,16 +4,20 @@ import time
 import hmac
 import hashlib
 import json
+import logging
 
-# --- ดึงค่าจากระบบ Railway Variables ---
+# --- Setup Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# --- CONFIGURATION ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET", "").encode()
 SYMBOL = os.getenv("SYMBOL", "THB_XRP")
 SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB")
 PROFIT_TARGET = 0.0155 
-
 API_HOST = "https://api.bitkub.com"
 
+# --- Functions ---
 def generate_signature(payload):
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(API_SECRET, msg=json_payload.encode(), digestmod=hashlib.sha256).hexdigest()
@@ -26,56 +30,86 @@ def get_wallet():
     payload = {"ts": int(time.time())}
     payload["sig"] = generate_signature(payload)
     try:
-        res = requests.post(url, headers=get_header(), json=payload).json()
-        return res.get('result', {})
-    except: return {}
+        res = requests.post(url, headers=get_header(), json=payload, timeout=10)
+        return res.json().get('result', {})
+    except Exception as e:
+        logging.error(f"Wallet Error: {e}")
+        return {}
 
 def place_order(side, amount, rate):
     url = f"{API_HOST}/api/market/place-{side}"
-    payload = {"sym": SYMBOL, "amt": amount, "rat": rate, "typ": "limit", "ts": int(time.time())}
+    # XRP ราคาใช้ทศนิยม 4 ตำแหน่ง, จำนวนใช้ 8 ตำแหน่ง
+    payload = {
+        "sym": SYMBOL, 
+        "amt": round(amount, 8), 
+        "rat": round(rate, 4), 
+        "typ": "limit", 
+        "ts": int(time.time())
+    }
     payload["sig"] = generate_signature(payload)
-    return requests.post(url, headers=get_header(), json=payload).json()
+    try:
+        res = requests.post(url, headers=get_header(), json=payload, timeout=10)
+        return res.json()
+    except Exception as e:
+        logging.error(f"Order Error: {e}")
+        return {"error": 1}
 
 def get_market_data():
-    url = f"https://api.bitkub.com/tradingview/history?symbol={SYMBOL_STR}&resolution=1&from={int(time.time())-86400}&to={int(time.time())}"
+    now = int(time.time())
+    url = f"https://api.bitkub.com/tradingview/history?symbol={SYMBOL_STR}&resolution=1&from={now-86400}&to={now}"
     try:
-        res = requests.get(url, timeout=10).json()
-        if res.get('s') == 'ok':
-            return max(res['h']), min(res['l']), res['c'][-1]
-    except: pass
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        if data.get('s') == 'ok':
+            return max(data['h']), min(data['l']), data['c'][-1]
+    except Exception as e:
+        logging.error(f"Market Data Error: {e}")
     return None, None, None
 
+# --- Main Bot Loop ---
 holding_token = False
 last_buy_price = 0
 
-print(f"--- BITKUB BOT STARTED (Pair: {SYMBOL}) ---")
+logging.info(f"--- BITKUB BOT STARTED (Pair: {SYMBOL}) ---")
 
 while True:
     try:
         high_24h, low_24h, current_price = get_market_data()
-        if high_24h is None:
-            time.sleep(10)
-            continue
-        mid_price = (high_24h + low_24h) / 2
         
+        if current_price is None:
+            time.sleep(30)
+            continue
+
+        mid_price = (high_24h + low_24h) / 2
+        logging.info(f"Price: {current_price} | Mid: {mid_price:.4f} | Holding: {holding_token}")
+
         if not holding_token:
             if current_price <= mid_price:
                 wallet = get_wallet()
-                thb_balance = wallet.get('THB', 0)
+                thb_balance = float(wallet.get('THB', 0))
                 if thb_balance >= 10:
-                    print(f"Buying {SYMBOL} at {current_price} with {thb_balance} THB")
+                    logging.info(f">>> Buying {SYMBOL} at {current_price}")
                     order = place_order("bid", thb_balance, current_price)
                     if order.get('error') == 0:
-                        last_buy_price, holding_token = current_price, True
+                        last_buy_price = current_price
+                        holding_token = True
+                    else:
+                        logging.error(f"Buy Order Failed: {order}")
         else:
             sell_target = last_buy_price * (1 + PROFIT_TARGET)
             if current_price >= sell_target:
                 wallet = get_wallet()
-                coin_balance = wallet.get(SYMBOL.split('_')[1], 0)
+                coin_ticker = SYMBOL.split('_')[1] # XRP
+                coin_balance = float(wallet.get(coin_ticker, 0))
                 if coin_balance > 0:
-                    print(f"Selling {SYMBOL} at {current_price} for profit")
+                    logging.info(f">>> Selling {SYMBOL} at {current_price} (Target: {sell_target:.4f})")
                     order = place_order("ask", coin_balance, current_price)
-                    if order.get('error') == 0: holding_token = False
+                    if order.get('error') == 0:
+                        holding_token = False
+                    else:
+                        logging.error(f"Sell Order Failed: {order}")
+
     except Exception as e:
-        print(f"Error: {e}")
-    time.sleep(10)
+        logging.error(f"Loop Error: {e}")
+    
+    time.sleep(30)
