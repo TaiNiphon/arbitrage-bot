@@ -5,10 +5,30 @@ import hmac
 import hashlib
 import json
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ตั้งค่า Log ให้ละเอียดเพื่อดูบน Railway
+# --- 1. ตั้งค่า Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
+# --- 2. ระบบ Dummy Server สำหรับ Railway Health Check ---
+def run_dummy_server():
+    class HealthCheckHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running")
+        def log_message(self, format, *args): return
+
+    port = int(os.environ.get("PORT", 8080))
+    logging.info(f"Starting Health Check Server on port {port}")
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# เริ่ม Server ใน Background
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+# --- 3. ดึงค่า Configuration จาก Railway Variables ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET", "").encode()
 SYMBOL = os.getenv("SYMBOL", "THB_XRP")
@@ -16,6 +36,7 @@ SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB")
 PROFIT_TARGET = 0.0155 
 API_HOST = "https://api.bitkub.com"
 
+# --- 4. ฟังก์ชันจัดการ API ---
 def generate_signature(payload):
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(API_SECRET, msg=json_payload.encode(), digestmod=hashlib.sha256).hexdigest()
@@ -36,7 +57,6 @@ def get_wallet():
 
 def place_order(side, amount, rate):
     url = f"{API_HOST}/api/market/place-{side}"
-    # XRP: ราคา 4 ตำแหน่ง, จำนวน 8 ตำแหน่ง
     payload = {
         "sym": SYMBOL, 
         "amt": round(float(amount), 8), 
@@ -64,27 +84,26 @@ def get_market_data():
         logging.error(f"Market Data Error: {e}")
     return None, None, None
 
-# --- จุดเริ่มต้นการทำงาน ---
+# --- 5. Main Loop ---
 holding_token = False
 last_buy_price = 0
 
-logging.info(f"--- BITKUB BOT STARTED (XRP) ---")
+logging.info(f"--- BITKUB BOT STARTED (Pair: {SYMBOL}) ---")
 
-# ใช้ While True แบบรัดกุมเพื่อกัน Container หยุดทำงาน
 while True:
     try:
         high_24h, low_24h, current_price = get_market_data()
         
         if current_price is not None:
             mid_price = (high_24h + low_24h) / 2
-            logging.info(f"XRP: {current_price} | Mid: {mid_price:.4f} | Holding: {holding_token}")
+            logging.info(f"Price: {current_price} | Mid: {mid_price:.4f} | Holding: {holding_token}")
 
             if not holding_token:
                 if current_price <= mid_price:
                     wallet = get_wallet()
                     thb_balance = float(wallet.get('THB', 0))
                     if thb_balance >= 10:
-                        logging.info(f">>> Buying XRP at {current_price}")
+                        logging.info(f">>> Buying {SYMBOL} at {current_price}")
                         order = place_order("bid", thb_balance, current_price)
                         if order.get('error') == 0:
                             last_buy_price = current_price
@@ -93,17 +112,17 @@ while True:
                 sell_target = last_buy_price * (1 + PROFIT_TARGET)
                 if current_price >= sell_target:
                     wallet = get_wallet()
-                    coin_balance = float(wallet.get('XRP', 0))
+                    coin_ticker = SYMBOL.split('_')[1] # XRP
+                    coin_balance = float(wallet.get(coin_ticker, 0))
                     if coin_balance > 0:
-                        logging.info(f">>> Selling XRP at {current_price} (Target: {sell_target:.4f})")
+                        logging.info(f">>> Selling {SYMBOL} at {current_price} (Target: {sell_target:.4f})")
                         order = place_order("ask", coin_balance, current_price)
                         if order.get('error') == 0:
                             holding_token = False
         else:
-            logging.warning("API Unreachable, waiting 30s...")
+            logging.warning("Waiting for market data...")
 
     except Exception as e:
-        logging.error(f"Loop Crash avoided: {e}")
+        logging.error(f"Loop error: {e}")
     
-    # พัก 30 วินาที เพื่อรักษาเสถียรภาพและไม่ให้โดนแบน IP
     time.sleep(30)
