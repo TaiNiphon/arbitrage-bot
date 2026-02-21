@@ -1,1 +1,1 @@
-worker: python bitkub_bot.py
+web: python bitkub_bot.py
