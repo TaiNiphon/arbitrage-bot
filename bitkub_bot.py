@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # --- 1. ตั้งค่า Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# --- 2. ระบบ Dummy Server สำหรับ Railway Health Check ---
+# --- 2. ระบบ Dummy Server สำหรับ Railway ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -21,14 +21,36 @@ def run_dummy_server():
         def log_message(self, format, *args): return
 
     port = int(os.environ.get("PORT", 8080))
-    logging.info(f"Starting Health Check Server on port {port}")
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# เริ่ม Server ใน Background
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 3. ดึงค่า Configuration จาก Railway Variables ---
+# --- 3. ระบบแจ้งเตือน LINE ---
+# ดึงค่าจาก Variables ใน Railway เพื่อความปลอดภัย
+LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN", "kZgpO1nj9NHCqFnt4Uh+EAQhMMqSEqv/DtH16csq0SGlxMB63QXraUiFs9wo/36/EUgivD0ih6LgIH6Bn4QakBsboo/A+5Qx1gnfrWRlpqDdacFDo0EoasoXuiiAJ7gok3FXbLtgmijrWbogEN7NpwdB04t89/1O/w1cDnyilFU=").strip()
+LINE_USER_ID = os.getenv("LINE_USER_ID", "Uff8ff71336841978ddd7e4f30bb80e43").strip()
+
+def send_line_message(text):
+    if not LINE_ACCESS_TOKEN or not LINE_USER_ID: return
+    url = "https://api.line.me/v2/bot/message/push"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+    }
+    # ตรวจสอบโครงสร้างข้อมูลให้ตรงตาม LINE API Document
+    payload = {
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": str(text)}]
+    }
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        if res.status_code != 200:
+            logging.error(f"LINE API Error: {res.text}")
+    except Exception as e:
+        logging.error(f"LINE Connection Error: {e}")
+
+# --- 4. CONFIGURATION (Bitkub) ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET", "").encode()
 SYMBOL = os.getenv("SYMBOL", "THB_XRP")
@@ -36,7 +58,7 @@ SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB")
 PROFIT_TARGET = 0.0155 
 API_HOST = "https://api.bitkub.com"
 
-# --- 4. ฟังก์ชันจัดการ API ---
+# --- 5. Functions จัดการ API Bitkub ---
 def generate_signature(payload):
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(API_SECRET, msg=json_payload.encode(), digestmod=hashlib.sha256).hexdigest()
@@ -51,9 +73,7 @@ def get_wallet():
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         return res.json().get('result', {})
-    except Exception as e:
-        logging.error(f"Wallet Error: {e}")
-        return {}
+    except: return {}
 
 def place_order(side, amount, rate):
     url = f"{API_HOST}/api/market/place-{side}"
@@ -68,9 +88,7 @@ def place_order(side, amount, rate):
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         return res.json()
-    except Exception as e:
-        logging.error(f"Order Error: {e}")
-        return {"error": 1}
+    except: return {"error": 1}
 
 def get_market_data():
     now = int(time.time())
@@ -80,15 +98,14 @@ def get_market_data():
         data = res.json()
         if data.get('s') == 'ok':
             return max(data['h']), min(data['l']), data['c'][-1]
-    except Exception as e:
-        logging.error(f"Market Data Error: {e}")
-    return None, None, None
+    except: return None, None, None
 
-# --- 5. Main Loop ---
+# --- 6. Main Loop ---
 holding_token = False
 last_buy_price = 0
 
 logging.info(f"--- BITKUB BOT STARTED (Pair: {SYMBOL}) ---")
+send_line_message(f"🚀 บอทเริ่มทำงานแล้ว\nเหรียญ: {SYMBOL}\nเป้ากำไร: {PROFIT_TARGET*100}%")
 
 while True:
     try:
@@ -108,21 +125,20 @@ while True:
                         if order.get('error') == 0:
                             last_buy_price = current_price
                             holding_token = True
+                            send_line_message(f"✅ ซื้อสำเร็จ! (BUY)\nเหรียญ: {SYMBOL}\nราคา: {current_price} THB\nใช้เงิน: {thb_balance} THB")
             else:
                 sell_target = last_buy_price * (1 + PROFIT_TARGET)
                 if current_price >= sell_target:
                     wallet = get_wallet()
-                    coin_ticker = SYMBOL.split('_')[1] # XRP
+                    coin_ticker = SYMBOL.split('_')[1]
                     coin_balance = float(wallet.get(coin_ticker, 0))
                     if coin_balance > 0:
-                        logging.info(f">>> Selling {SYMBOL} at {current_price} (Target: {sell_target:.4f})")
+                        logging.info(f">>> Selling {SYMBOL} at {current_price}")
                         order = place_order("ask", coin_balance, current_price)
                         if order.get('error') == 0:
                             holding_token = False
-        else:
-            logging.warning("Waiting for market data...")
-
+                            profit_pct = ((current_price - last_buy_price) / last_buy_price) * 100
+                            send_line_message(f"💰 ขายสำเร็จ! (SELL)\nเหรียญ: {SYMBOL}\nราคาขาย: {current_price} THB\nกำไร: {profit_pct:.2f}%")
     except Exception as e:
         logging.error(f"Loop error: {e}")
-    
     time.sleep(30)
