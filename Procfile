@@ -1,0 +1,1 @@
+worker: python bitkub_bot.py
