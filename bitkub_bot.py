@@ -8,16 +8,16 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- 1. Logging Setup ---
+# --- 1. ตั้งค่า Log ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# --- 2. Health Check Server for Railway ---
+# --- 2. ระบบ Health Check (สำหรับ Railway) ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"Bot is Active")
+            self.wfile.write(b"Bitkub Bot is Active")
         def log_message(self, format, *args): return
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
@@ -25,17 +25,17 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 3. Configuration from Railway Variables ---
-API_KEY = os.getenv("BITKUB_KEY", "").strip()
-API_SECRET = os.getenv("BITKUB_SECRET", "").strip()
-SYMBOL = os.getenv("SYMBOL", "THB_XRP").strip()
-SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB").strip()
-PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.008))
+# --- 3. ดึงค่าจาก Variables พร้อมลบ "ช่องว่าง" และ "บรรทัดใหม่" อัตโนมัติ ---
+# แก้ปัญหาจากรูป 1000054013.jpg ที่รหัสถูกตัดเป็นสองบรรทัด
+API_KEY = os.getenv("BITKUB_KEY", "").replace("\n", "").replace(" ", "").strip()
+API_SECRET = os.getenv("BITKUB_SECRET", "").replace("\n", "").replace(" ", "").strip()
+SYMBOL = "THB_XRP"
+SYMBOL_STR = "XRP_THB"
 API_HOST = "https://api.bitkub.com"
 
-# --- 4. Fixed Signature Function (แก้ Error 404) ---
+# --- 4. ฟังก์ชันสร้าง Signature (Strict JSON Format) ---
 def generate_signature(payload):
-    # สำคัญ: ต้องใช้ separators=(',', ':') เพื่อให้ JSON ไม่มีช่องว่าง
+    # Bitkub กำหนดว่า JSON ต้องไม่มีช่องว่างระหว่างตัวคั่น (separators)
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(
         API_SECRET.encode('utf-8'),
@@ -50,6 +50,7 @@ def get_header():
         'X-BTK-APIKEY': API_KEY
     }
 
+# --- 5. ฟังก์ชันหลักในการดึง Wallet ---
 def get_wallet():
     url = f"{API_HOST}/api/market/wallet"
     payload = {"ts": int(time.time())}
@@ -57,38 +58,42 @@ def get_wallet():
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         data = res.json()
-        if data.get('error') == 0: return data.get('result', {})
+        if data.get('error') == 0:
+            return data.get('result', {})
+        # ถ้ายัง Error 404 บรรทัดนี้จะแจ้งรายละเอียดที่ชัดเจนขึ้น
         logging.error(f"Wallet API Error: {data}")
         return None
     except Exception as e:
         logging.error(f"Connection Error: {e}")
         return None
 
-def get_market_data():
-    now = int(time.time())
-    url = f"{API_HOST}/tradingview/history?symbol={SYMBOL_STR}&resolution=1&from={now-86400}&to={now}"
+def get_market_price():
+    url = f"{API_HOST}/api/market/ticker?sym={SYMBOL}"
     try:
         res = requests.get(url, timeout=15)
         data = res.json()
-        if data.get('s') == 'ok':
-            return float(max(data['h'])), float(min(data['l'])), float(data['c'][-1])
-    except: pass
-    return None, None, None
+        return float(data[SYMBOL]['last'])
+    except:
+        return None
 
-# --- 5. Main Loop ---
-logging.info(f"--- BOT STARTED | Pair: {SYMBOL} ---")
+# --- 6. ลูปการทำงาน ---
+logging.info(f"--- บอทเริ่มทำงาน (Key: {API_KEY[:5]}...{API_KEY[-5:]}) ---")
 
 while True:
     try:
-        high_24h, low_24h, current_price = get_market_data()
-        if current_price is not None:
-            mid_price = (high_24h + low_24h) / 2
-            logging.info(f"Price: {current_price} | Mid: {mid_price:.4f}")
-            
-            # ตรวจสอบ Wallet เพื่อยืนยันว่าเชื่อมต่อสำเร็จ
-            wallet = get_wallet()
-            if wallet:
-                logging.info(f"Wallet Connected! Current THB: {wallet.get('THB', 0)}")
+        # เช็คราคาตลาด
+        price = get_market_price()
+        
+        # เช็คยอดเงินในกระเป๋า (เพื่อทดสอบ API Key)
+        wallet = get_wallet()
+        
+        if wallet:
+            thb_balance = wallet.get('THB', 0)
+            logging.info(f"Price: {price} | Wallet THB: {thb_balance}")
+        else:
+            logging.info(f"Price: {price} | Waiting for Wallet connection...")
+
     except Exception as e:
-        logging.error(f"Loop Error: {e}")
-    time.sleep(30)
+        logging.error(f"Main Loop Error: {e}")
+    
+    time.sleep(30) # เช็คทุก 30 วินาที
