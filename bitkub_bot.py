@@ -45,9 +45,9 @@ SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB").strip()
 PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.008))
 API_HOST = "https://api.bitkub.com"
 
-# --- 5. FIXED BITKUB API FUNCTIONS ---
+# --- 5. FIXED BITKUB API FUNCTIONS (จุดที่แก้ไข Error 404) ---
 def generate_signature(payload):
-    # แก้ไขจุดนี้: ใช้ separators เพื่อลบช่องว่าง และ encode ทันทีในบรรทัดเดียว
+    # แก้ไขจุดนี้: ใช้ separators เพื่อลบช่องว่างใน JSON และ encode เป็น UTF-8
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(
         API_SECRET.encode('utf-8'), 
