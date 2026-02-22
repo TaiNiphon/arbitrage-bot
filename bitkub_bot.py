@@ -72,13 +72,16 @@ def get_header():
         'X-BTK-APIKEY': API_KEY
     }
 
-def get_wallet():
-    url = f"{API_HOST}/api/market/wallet"
+def def get_wallet():
+    # เปลี่ยนจาก /api/market/wallet เป็น /api/v3/market/wallet
+    url = f"{API_HOST}/api/v3/market/wallet" 
     payload = {"ts": int(time.time())}
     payload["sig"] = get_signature(payload)
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         data = res.json()
+        # เช็คด้วยว่า API คืนค่ามาเป็น format ไหน 
+        # ปกติ V3 จะคืนผลลัพธ์ใน 'result'
         if data.get('error') == 0:
             return data.get('result', {})
         else:
