@@ -28,7 +28,8 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- 3. ระบบแจ้งเตือน LINE ---
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN", "").strip()
-LINE_USER_ID = os.getenv("LINE_USER_ID", "Ua88ba52b810900b7ba8df4c08b376496").strip()
+# ใช้ USER_ID ที่ถูกต้องจาก Webhook ล่าสุดของคุณ
+LINE_USER_ID = "Ua88ba52b810900b7ba8df4c08b376496" 
 
 def send_line_message(text):
     if not LINE_ACCESS_TOKEN: return
@@ -37,20 +38,20 @@ def send_line_message(text):
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": str(text)}]}
     try:
         requests.post(url, headers=headers, json=payload, timeout=10)
-    except Exception as e:
-        logging.error(f"LINE Error: {e}")
+    except: pass
 
-# --- 4. CONFIGURATION ---
+# --- 4. CONFIGURATION (ดึงจาก Variables) ---
 API_KEY = os.getenv("BITKUB_KEY", "").strip()
-API_SECRET = os.getenv("BITKUB_SECRET", "").strip()
+# สำคัญ: เก็บ Secret เป็น String ปกติไว้ก่อนเพื่อนำไป encode ในฟังก์ชัน Signature
+API_SECRET = os.getenv("BITKUB_SECRET", "").strip() 
 SYMBOL = os.getenv("SYMBOL", "THB_XRP").strip()
 SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB").strip()
 PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.008))
 API_HOST = "https://api.bitkub.com"
 
-# --- 5. Functions สำหรับ Bitkub API ---
+# --- 5. Fix Signature & API Functions ---
 def generate_signature(payload):
-    # แก้ปัญหา Signature: ใช้ separators เพื่อลบช่องว่างใน JSON
+    # Bitkub เข้มงวดเรื่อง JSON ต้องไม่มีช่องว่างระหว่างตัวคั่น
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(
         API_SECRET.encode('utf-8'), 
@@ -77,7 +78,7 @@ def get_wallet():
         logging.error(f"Wallet API Error: {data}")
         return None
     except Exception as e:
-        logging.error(f"Connection Error: {e}")
+        logging.error(f"Wallet Connection Error: {e}")
         return None
 
 def place_order(side, amount, rate):
@@ -93,9 +94,7 @@ def place_order(side, amount, rate):
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         return res.json()
-    except Exception as e:
-        logging.error(f"Order Error: {e}")
-        return {"error": 1}
+    except: return {"error": 1}
 
 def get_market_data():
     now = int(time.time())
@@ -105,21 +104,18 @@ def get_market_data():
         data = res.json()
         if data.get('s') == 'ok':
             return float(max(data['h'])), float(min(data['l'])), float(data['c'][-1])
-    except Exception as e:
-        logging.error(f"Market Data Error: {e}")
+    except: pass
     return None, None, None
 
-# --- 6. Main Loop ---
+# --- 6. Main Trading Loop ---
 holding_token = False
 last_buy_price = 0
-
 logging.info(f"--- BOT STARTED | Pair: {SYMBOL} | Target: {PROFIT_TARGET*100}% ---")
-send_line_message(f"🚀 บอทเริ่มทำงานแล้ว\nเหรียญ: {SYMBOL}")
+send_line_message(f"🚀 บอทเริ่มทำงานแล้ว (Pair: {SYMBOL})")
 
 while True:
     try:
         high_24h, low_24h, current_price = get_market_data()
-
         if current_price is not None:
             mid_price = (high_24h + low_24h) / 2
             logging.info(f"Price: {current_price} | Mid: {mid_price:.4f} | Holding: {holding_token}")
@@ -147,10 +143,6 @@ while True:
                             if order.get('error') == 0:
                                 holding_token = False
                                 send_line_message(f"💰 ขายสำเร็จ! {SYMBOL} @ {current_price}")
-        else:
-            logging.warning("Market data missing, retrying...")
-            
     except Exception as e:
-        logging.error(f"Global Loop Error: {e}")
-    
+        logging.error(f"Loop Error: {e}")
     time.sleep(30)
