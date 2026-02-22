@@ -8,10 +8,10 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- 1. ตั้งค่า Logging ---
+# --- 1. Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# --- 2. ระบบ Health Check สำหรับ Railway ---
+# --- 2. Dummy Server for Railway Health Check ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -19,39 +19,35 @@ def run_dummy_server():
             self.end_headers()
             self.wfile.write(b"Bot is Active")
         def log_message(self, format, *args): return
-
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 3. ระบบแจ้งเตือน LINE ---
+# --- 3. LINE Notification Setup ---
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN", "").strip()
-# ใช้ USER_ID ที่ถูกต้องจาก Webhook ล่าสุดของคุณ
-LINE_USER_ID = "Ua88ba52b810900b7ba8df4c08b376496" 
+LINE_USER_ID = os.getenv("LINE_USER_ID", "Ua88ba52b810900b7ba8df4c08b376496").strip()
 
 def send_line_message(text):
     if not LINE_ACCESS_TOKEN: return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": str(text)}]}
-    try:
-        requests.post(url, headers=headers, json=payload, timeout=10)
+    try: requests.post(url, headers=headers, json=payload, timeout=10)
     except: pass
 
-# --- 4. CONFIGURATION (ดึงจาก Variables) ---
+# --- 4. CONFIGURATION (ดึงจาก Railway Variables) ---
 API_KEY = os.getenv("BITKUB_KEY", "").strip()
-# สำคัญ: เก็บ Secret เป็น String ปกติไว้ก่อนเพื่อนำไป encode ในฟังก์ชัน Signature
-API_SECRET = os.getenv("BITKUB_SECRET", "").strip() 
+API_SECRET = os.getenv("BITKUB_SECRET", "").strip()
 SYMBOL = os.getenv("SYMBOL", "THB_XRP").strip()
 SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB").strip()
 PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.008))
 API_HOST = "https://api.bitkub.com"
 
-# --- 5. Fix Signature & API Functions ---
+# --- 5. FIXED BITKUB API FUNCTIONS ---
 def generate_signature(payload):
-    # Bitkub เข้มงวดเรื่อง JSON ต้องไม่มีช่องว่างระหว่างตัวคั่น
+    # แก้ไขจุดนี้: ใช้ separators เพื่อลบช่องว่าง และ encode ทันทีในบรรทัดเดียว
     json_payload = json.dumps(payload, separators=(',', ':'))
     return hmac.new(
         API_SECRET.encode('utf-8'), 
@@ -73,12 +69,11 @@ def get_wallet():
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         data = res.json()
-        if data.get('error') == 0:
-            return data.get('result', {})
+        if data.get('error') == 0: return data.get('result', {})
         logging.error(f"Wallet API Error: {data}")
         return None
     except Exception as e:
-        logging.error(f"Wallet Connection Error: {e}")
+        logging.error(f"Connection Error: {e}")
         return None
 
 def place_order(side, amount, rate):
