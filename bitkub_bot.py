@@ -4,7 +4,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # --- 1. ตั้งค่า Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-# --- 2. ระบบ Dummy Server สำหรับ Railway ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -17,33 +16,37 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 3. ดึงค่า Config และล้างเครื่องหมาย " (ป้องกัน Error 404) ---
-API_KEY = os.getenv("BITKUB_KEY", "").replace('"', '').strip()
-API_SECRET = os.getenv("BITKUB_SECRET", "").replace('"', '').strip() # เป็น String ก่อน
-LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN", "").replace('"', '').strip()
-LINE_USER_ID = os.getenv("LINE_USER_ID", "").replace('"', '').strip()
+# --- 2. ฟังก์ชันดึงค่า Config แบบ "ทำความสะอาดรหัส" (แก้ปัญหาเครื่องหมาย ") ---
+def get_safe_env(key):
+    # ดึงค่ามาแล้วลบเครื่องหมาย " และช่องว่างทิ้งทันที
+    val = os.getenv(key, "")
+    return val.replace('"', '').replace("'", "").strip()
+
+API_KEY = get_safe_env("BITKUB_KEY")
+API_SECRET = get_safe_env("BITKUB_SECRET")
+LINE_ACCESS_TOKEN = get_safe_env("LINE_ACCESS_TOKEN")
+LINE_USER_ID = get_safe_env("LINE_USER_ID")
 
 SYMBOL = os.getenv("SYMBOL", "THB_XRP")
 SYMBOL_STR = os.getenv("SYMBOL_STR", "XRP_THB")
 PROFIT_TARGET = 0.0155 
 API_HOST = "https://api.bitkub.com"
 
-# --- 4. ระบบแจ้งเตือน LINE ---
+# --- 3. ระบบแจ้งเตือน LINE ---
 def send_line_message(text):
     if not LINE_ACCESS_TOKEN or not LINE_USER_ID: return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
     payload = {"to": LINE_USER_ID, "messages": [{"type": "text", "text": str(text)}]}
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        if res.status_code != 200: logging.error(f"LINE API Error: {res.text}")
-    except Exception as e: logging.error(f"LINE Connection Error: {e}")
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except: pass
 
-# --- 5. Functions จัดการ API Bitkub (แก้ไข Signature ให้ถูกต้อง) ---
+# --- 4. Functions จัดการ API Bitkub (แก้ Signature ให้ Bitkub ยอมรับ) ---
 def generate_signature(payload):
-    # Bitkub ต้องการ JSON ที่ไม่มีช่องว่างระหว่างตัวคั่น เพื่อสร้าง Signature ที่ถูกต้อง
+    # สำคัญมาก: separators=(',', ':') ป้องกัน Wallet API Error 404
     json_payload = json.dumps(payload, separators=(',', ':'))
-    return hmac.new(API_SECRET.encode(), msg=json_payload.encode(), digestmod=hashlib.sha256).hexdigest()
+    return hmac.new(API_SECRET.encode(), msg=json_payload.encode(), hashlib.sha256).hexdigest()
 
 def get_header():
     return {'Accept': 'application/json', 'Content-Type': 'application/json', 'X-BTK-APIKEY': API_KEY}
@@ -55,22 +58,18 @@ def get_wallet():
     try:
         res = requests.post(url, headers=get_header(), json=payload, timeout=15)
         data = res.json()
-        if data.get('error') != 0:
+        if data.get('error') == 0:
+            return data.get('result', {})
+        else:
             logging.error(f"Wallet API Error: {data}")
             return {}
-        return data.get('result', {})
-    except Exception as e:
-        logging.error(f"Wallet Connection Error: {e}")
-        return {}
+    except: return {}
 
 def place_order(side, amount, rate):
     url = f"{API_HOST}/api/market/place-{side}"
     payload = {
-        "sym": SYMBOL, 
-        "amt": round(float(amount), 8), 
-        "rat": round(float(rate), 4), 
-        "typ": "limit", 
-        "ts": int(time.time())
+        "sym": SYMBOL, "amt": round(float(amount), 8), "rat": round(float(rate), 4),
+        "typ": "limit", "ts": int(time.time())
     }
     payload["sig"] = generate_signature(payload)
     try:
@@ -82,17 +81,16 @@ def get_market_data():
     now = int(time.time())
     url = f"https://api.bitkub.com/tradingview/history?symbol={SYMBOL_STR}&resolution=1&from={now-86400}&to={now}"
     try:
-        res = requests.get(url, timeout=15)
-        data = res.json()
-        if data.get('s') == 'ok':
-            return max(data['h']), min(data['l']), data['c'][-1]
+        res = requests.get(url, timeout=15).json()
+        if res.get('s') == 'ok':
+            return max(res['h']), min(res['l']), res['c'][-1]
     except: return None, None, None
 
-# --- 6. Main Loop ---
+# --- 5. Main Loop ---
 holding_token = False
 last_buy_price = 0
 
-logging.info(f"--- BITKUB BOT STARTED | Key: {API_KEY[:5]}... ---")
+logging.info(f"--- BITKUB BOT STARTED | Pair: {SYMBOL} ---")
 send_line_message(f"🚀 บอทเริ่มทำงานแล้ว\nเหรียญ: {SYMBOL}\nเป้ากำไร: {PROFIT_TARGET*100}%")
 
 while True:
@@ -100,10 +98,10 @@ while True:
         high_24h, low_24h, current_price = get_market_data()
         if current_price is not None:
             mid_price = (high_24h + low_24h) / 2
-            # ดึง Wallet มาโชว์ใน Log เพื่อยืนยันว่าเชื่อมต่อ Bitkub ได้แล้ว
             wallet = get_wallet()
             thb_balance = float(wallet.get('THB', 0))
             
+            # เมื่อแก้สำเร็จ THB จะไม่เป็น 0.0 แต่จะเป็น 201.0
             logging.info(f"Price: {current_price} | Mid: {mid_price:.4f} | THB: {thb_balance} | Holding: {holding_token}")
 
             if not holding_token:
@@ -125,8 +123,7 @@ while True:
                         order = place_order("ask", coin_balance, current_price)
                         if order.get('error') == 0:
                             holding_token = False
-                            profit_pct = ((current_price - last_buy_price) / last_buy_price) * 100
-                            send_line_message(f"💰 ขายสำเร็จ! (SELL)\nราคาขาย: {current_price} THB\nกำไร: {profit_pct:.2f}%")
+                            send_line_message(f"💰 ขายสำเร็จ! (SELL)\nราคาขาย: {current_price} THB")
     except Exception as e:
         logging.error(f"Loop error: {e}")
     time.sleep(30)
