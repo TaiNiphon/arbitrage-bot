@@ -32,10 +32,10 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 SYMBOL = os.getenv("SYMBOL", "xrp_thb").lower() 
 
-# กลยุทธ์การทำกำไร
 PROFIT_TARGET = 0.015  # กำไร 1.5%
-STOP_LOSS = 0.020      # ตัดขาดทุน 2.0% (ป้องกันขาลงแรง)
-EMA_PERIOD = 50        # เส้นแบ่งเทรน
+STOP_LOSS = 0.020      # ตัดขาดทุน 2.0%
+EMA_PERIOD = 50        # ใช้ 50 แท่งย้อนหลัง
+TIMEFRAME = "15"       # ใช้ Timeframe 15 นาที ตามกราฟล่าสุด
 
 API_HOST = "https://api.bitkub.com"
 
@@ -64,66 +64,58 @@ def bitkub_v3_auth(method, path, body={}):
 
 def get_market_data():
     try:
-        # ดึงข้อมูล Ticker
+        # ดึงราคาปัจจุบัน
         ticker = requests.get(f"{API_HOST}/api/v3/market/ticker?sym={SYMBOL}").json()
         current_price = float(ticker[0]['last'])
-        
-        # ดึงข้อมูลแท่งเทียนย้อนหลังเพื่อคำนวณ EMA (ใช้ Timeframe 15m หรือ 1h)
-        candles = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL}&p=15&l=100").json()
-        closes = [c['c'] for c in candles['result']]
-        
-        # คำนวณ EMA แบบง่าย
-        ema = sum(closes[-EMA_PERIOD:]) / EMA_PERIOD
+
+        # ดึงข้อมูลแท่งเทียน
+        candles = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL}&p={TIMEFRAME}&l=100").json()
+        closes = [float(c['c']) for c in candles['result']]
+
+        # --- คำนวณ EMA ของจริง (Exponential) ---
+        ema = closes[0]
+        multiplier = 2 / (EMA_PERIOD + 1)
+        for price in closes:
+            ema = (price - ema) * multiplier + ema
+            
         return current_price, ema
-    except: return None, None
+    except Exception as e:
+        logging.error(f"Data Error: {e}")
+        return None, None
 
 # --- 5. Main Loop ---
 holding_token = False
 last_buy_price = 0
 
 logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")
-msg = f"🚀 บอทเริ่มทำงานบน Railway\nเหรียญ: {SYMBOL}\nเป้ากำไร: {PROFIT_TARGET*100}%"
+msg = f"🚀 บอทเริ่มทำงานบน Railway (EMA สูตรใหม่)\nเหรียญ: {SYMBOL}\nTimeframe: {TIMEFRAME}m\nเป้ากำไร: {PROFIT_TARGET*100}%"
 send_line_message(msg)
 
 while True:
     try:
-        current_price, ema_50 = get_market_data()
-        
-        if current_price and ema_50:
-            trend = "UP" if current_price > ema_50 else "DOWN"
-            logging.info(f"Price: {current_price} | EMA50: {ema_50:.2f} | Trend: {trend} | Holding: {holding_token}")
+        current_price, ema_val = get_market_data()
 
-            # --- เงื่อนไขการซื้อ (Buy Logic) ---
+        if current_price and ema_val:
+            trend = "UP" if current_price > ema_val else "DOWN"
+            logging.info(f"Price: {current_price} | EMA{EMA_PERIOD}: {ema_val:.2f} | Trend: {trend}")
+
             if not holding_token:
-                # ซื้อเฉพาะเมื่อเป็นขาขึ้น หรือ ราคากำลังกลับตัวเหนือ EMA
                 if trend == "UP":
                     wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
                     thb_balance = float(wallet.get('result', {}).get('THB', 0))
 
                     if thb_balance >= 10:
-                        logging.info(">>> Trend is UP: Executing Buy...")
                         order = bitkub_v3_auth("POST", "/api/v3/market/place-bid", {
                             "sym": SYMBOL, "amt": int(thb_balance), "rat": 0, "typ": "market"
                         })
                         if order.get('error') == 0:
                             last_buy_price = current_price
                             holding_token = True
-                            send_line_message(f"🚀 ซื้อแล้ว! (ขาขึ้น)\nราคา: {current_price} THB")
+                            send_line_message(f"🚀 ซื้อสำเร็จ!\nราคา: {current_price} THB\nEMA: {ema_val:.2f}")
 
-            # --- เงื่อนไขการขาย (Sell Logic) ---
             else:
                 profit_pct = (current_price - last_buy_price) / last_buy_price
-                
-                # 1. ขายทำกำไร (Take Profit)
-                if profit_pct >= PROFIT_TARGET:
-                    logging.info(">>> Target Reached: Selling...")
-                    sell_trigger = True
-                # 2. ขายตัดขาดทุน (Stop Loss) เพื่อไม่ให้ติดดอยหนัก
-                elif profit_pct <= -STOP_LOSS:
-                    logging.info(">>> Stop Loss Triggered: Selling...")
-                    sell_trigger = True
-                else:
-                    sell_trigger = False
+                sell_trigger = profit_pct >= PROFIT_TARGET or profit_pct <= -STOP_LOSS
 
                 if sell_trigger:
                     wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
@@ -136,7 +128,7 @@ while True:
                         })
                         if order.get('error') == 0:
                             holding_token = False
-                            status = "กำไร" if profit_pct > 0 else "ตัดขาดทุน"
+                            status = "✅ กำไร" if profit_pct > 0 else "❌ ตัดขาดทุน"
                             send_line_message(f"💰 ขายแล้ว ({status})\nผลลัพธ์: {profit_pct*100:.2f}%\nราคาขาย: {current_price} THB")
 
     except Exception as e:
