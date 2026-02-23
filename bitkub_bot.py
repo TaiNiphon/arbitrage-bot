@@ -26,15 +26,16 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 3. Configuration ---
+# --- 3. Configuration (ปรับใหม่ให้ดึงค่าจาก Railway) ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET")
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 SYMBOL = os.getenv("SYMBOL", "xrp_thb").lower() 
 
-PROFIT_TARGET = 0.015  
-STOP_LOSS = 0.020      
+# ดึงค่ากำไรจาก Railway (ถ้าไม่ตั้งจะใช้ 0.015 เป็นค่าเริ่มต้น)
+PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.015))  
+STOP_LOSS = float(os.getenv("STOP_LOSS", 0.020))      
 EMA_PERIOD = 50        
 TIMEFRAME = "15"       
 
@@ -88,15 +89,15 @@ def get_market_data():
 # --- 5. Main Loop ---
 holding_token = False
 last_buy_price = 0
-last_report_time = 0 # สำหรับส่งรายงานรายชั่วโมง
+last_report_time = 0 
 
 logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")
 msg = (f"🤖 บอทเริ่มทำงาน (โหมดละเอียด)\n"
        f"📌 เหรียญ: {SYMBOL.upper()}\n"
        f"📈 กลยุทธ์: EMA {EMA_PERIOD} (Trend Follow)\n"
        f"⏱ Timeframe: {TIMEFRAME} นาที\n"
-       f"💰 เป้ากำไร: {PROFIT_TARGET*100}%\n"
-       f"🚫 Stop Loss: {STOP_LOSS*100}%")
+       f"💰 เป้ากำไร: {round(PROFIT_TARGET*100, 2)}%\n"
+       f"🚫 Stop Loss: {round(STOP_LOSS*100, 2)}%")
 send_line_message(msg)
 
 while True:
@@ -107,9 +108,8 @@ while True:
             trend = "UP" if current_price > ema_val else "DOWN"
             logging.info(f"Price: {current_price} | EMA50: {ema_val:.2f} | Trend: {trend}")
 
-            # --- ส่วนที่ 1: รายงานสถานะรายชั่วโมง ---
             current_ts = time.time()
-            if current_ts - last_report_time >= 3600: # ทุกๆ 1 ชม. (3600 วินาที)
+            if current_ts - last_report_time >= 3600: 
                 diff = current_price - ema_val
                 status_msg = (f"📊 รายงานสถานะรายชั่วโมง\n"
                              f"💵 ราคาตอนนี้: {current_price} THB\n"
@@ -120,7 +120,6 @@ while True:
                 send_line_message(status_msg)
                 last_report_time = current_ts
 
-            # --- ส่วนที่ 2: เงื่อนไขการซื้อ ---
             if not holding_token:
                 if trend == "UP":
                     wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
@@ -140,7 +139,6 @@ while True:
                                       f"🎯 เป้าขาย: {current_price * (1+PROFIT_TARGET):.2f} THB")
                             send_line_message(buy_msg)
 
-            # --- ส่วนที่ 3: เงื่อนไขการขาย ---
             else:
                 profit_pct = (current_price - last_buy_price) / last_buy_price
                 sell_trigger = profit_pct >= PROFIT_TARGET or profit_pct <= -STOP_LOSS
