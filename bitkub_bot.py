@@ -89,7 +89,7 @@ def get_market_data():
 # --- 5. Main Loop ---
 holding_token = False
 last_buy_price = 0
-last_report_time = 0 
+last_report_time = time.time() - 3600 
 
 logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")
 msg = (f"🤖 บอทเริ่มทำงาน (โหมดละเอียด)\n"
