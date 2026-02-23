@@ -66,22 +66,38 @@ def bitkub_v3_auth(method, path, body={}):
 
 def get_market_data():
     try:
-        # 1. ดึงราคาปัจจุบัน (Ticker) - ปรับการเช็คข้อมูลใหม่
-        ticker_res = requests.get(f"{API_HOST}/api/v3/market/ticker?sym={SYMBOL.upper()}").json()
-        # Bitkub V3 Ticker ส่งมาเป็น Dict { "XRP_THB": { "last": ... } }
+        # 1. ดึงราคาปัจจุบัน
+        ticker_res = requests.get(f"{API_HOST}/api/v3/market/ticker").json()
+        
+        # ปรับการดึงค่าให้รองรับทั้ง xrp_thb และ XRP_THB
         sym_key = SYMBOL.upper()
         if sym_key in ticker_res:
             current_price = float(ticker_res[sym_key]['last'])
-        else: 
-            logging.error(f"Symbol {sym_key} not found in Ticker")
+        else:
+            # ลองหาแบบตัวเล็กถ้าตัวใหญ่ไม่เจอ
+            current_price = float(ticker_res.get(SYMBOL.lower(), {}).get('last', 0))
+
+        if current_price == 0:
+            logging.error(f"Symbol {sym_key} not found in Ticker data")
             return None, None
 
         # 2. ดึงข้อมูลแท่งเทียน
         candle_res = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL.upper()}&p={TIMEFRAME}&l=100").json()
         if 'result' in candle_res and len(candle_res['result']) > 0:
             closes = [float(c['c']) for c in candle_res['result']]
-        else: 
+        else:
             return None, None
+
+        # 3. คำนวณ EMA50
+        ema = closes[0]
+        multiplier = 2 / (EMA_PERIOD + 1)
+        for price in closes:
+            ema = (price - ema) * multiplier + ema
+
+        return current_price, ema
+    except Exception as e:
+        logging.error(f"Get Data Error: {e}")
+        return None, None
 
         # 3. คำนวณ EMA50 (Simple Loop)
         ema = closes[0]
