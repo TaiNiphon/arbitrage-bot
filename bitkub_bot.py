@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime
 
 # --- 1. Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -32,10 +33,10 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 SYMBOL = os.getenv("SYMBOL", "xrp_thb").lower() 
 
-PROFIT_TARGET = 0.015  # กำไร 1.5%
-STOP_LOSS = 0.020      # ตัดขาดทุน 2.0%
-EMA_PERIOD = 50        # ใช้ 50 แท่งย้อนหลัง
-TIMEFRAME = "15"       # ใช้ Timeframe 15 นาที ตามกราฟล่าสุด
+PROFIT_TARGET = 0.015  
+STOP_LOSS = 0.020      
+EMA_PERIOD = 50        
+TIMEFRAME = "15"       
 
 API_HOST = "https://api.bitkub.com"
 
@@ -64,21 +65,16 @@ def bitkub_v3_auth(method, path, body={}):
 
 def get_market_data():
     try:
-        # 1. ดึงราคาปัจจุบัน
         ticker_res = requests.get(f"{API_HOST}/api/v3/market/ticker?sym={SYMBOL.upper()}").json()
         if isinstance(ticker_res, list) and len(ticker_res) > 0:
             current_price = float(ticker_res[0]['last'])
-        else:
-            return None, None
+        else: return None, None
 
-        # 2. ดึงข้อมูลแท่งเทียน
         candle_res = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL.upper()}&p={TIMEFRAME}&l=100").json()
         if 'result' in candle_res and len(candle_res['result']) > 0:
             closes = [float(c['c']) for c in candle_res['result']]
-        else:
-            return None, None
+        else: return None, None
 
-        # 3. คำนวณ EMA แบบ Exponential (สูตรใหม่เกาะกราฟ)
         ema = closes[0]
         multiplier = 2 / (EMA_PERIOD + 1)
         for price in closes:
@@ -92,9 +88,15 @@ def get_market_data():
 # --- 5. Main Loop ---
 holding_token = False
 last_buy_price = 0
+last_report_time = 0 # สำหรับส่งรายงานรายชั่วโมง
 
 logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")
-msg = f"🚀 บอทเริ่มทำงานบน Railway\nเหรียญ: {SYMBOL}\nเป้ากำไร: {PROFIT_TARGET*100}%"
+msg = (f"🤖 บอทเริ่มทำงาน (โหมดละเอียด)\n"
+       f"📌 เหรียญ: {SYMBOL.upper()}\n"
+       f"📈 กลยุทธ์: EMA {EMA_PERIOD} (Trend Follow)\n"
+       f"⏱ Timeframe: {TIMEFRAME} นาที\n"
+       f"💰 เป้ากำไร: {PROFIT_TARGET*100}%\n"
+       f"🚫 Stop Loss: {STOP_LOSS*100}%")
 send_line_message(msg)
 
 while True:
@@ -105,6 +107,20 @@ while True:
             trend = "UP" if current_price > ema_val else "DOWN"
             logging.info(f"Price: {current_price} | EMA50: {ema_val:.2f} | Trend: {trend}")
 
+            # --- ส่วนที่ 1: รายงานสถานะรายชั่วโมง ---
+            current_ts = time.time()
+            if current_ts - last_report_time >= 3600: # ทุกๆ 1 ชม. (3600 วินาที)
+                diff = current_price - ema_val
+                status_msg = (f"📊 รายงานสถานะรายชั่วโมง\n"
+                             f"💵 ราคาตอนนี้: {current_price} THB\n"
+                             f"📉 เส้น EMA50: {ema_val:.2f} THB\n"
+                             f"🔄 เทรนด์: {'ขาขึ้น 🟢' if trend == 'UP' else 'ขาลง 🔴'}\n"
+                             f"ℹ️ {'ราคาอยู่เหนือ EMA พร้อมซื้อ' if trend == 'UP' else f'ต้องขึ้นอีก {abs(diff):.2f} ถึงจะซื้อ'}\n"
+                             f"📦 ถือเหรียญอยู่: {'ใช่' if holding_token else 'ไม่ใช่'}")
+                send_line_message(status_msg)
+                last_report_time = current_ts
+
+            # --- ส่วนที่ 2: เงื่อนไขการซื้อ ---
             if not holding_token:
                 if trend == "UP":
                     wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
@@ -117,8 +133,14 @@ while True:
                         if order.get('error') == 0:
                             last_buy_price = current_price
                             holding_token = True
-                            send_line_message(f"🚀 ซื้อสำเร็จ!\nราคา: {current_price} THB\nEMA: {ema_val:.2f}")
+                            buy_msg = (f"🚀 บอทสั่งซื้อสำเร็จ! (Market Order)\n"
+                                      f"💹 ราคาซื้อ: {current_price} THB\n"
+                                      f"📊 ตัดเส้น EMA ที่: {ema_val:.2f}\n"
+                                      f"⏱ Timeframe: {TIMEFRAME}m\n"
+                                      f"🎯 เป้าขาย: {current_price * (1+PROFIT_TARGET):.2f} THB")
+                            send_line_message(buy_msg)
 
+            # --- ส่วนที่ 3: เงื่อนไขการขาย ---
             else:
                 profit_pct = (current_price - last_buy_price) / last_buy_price
                 sell_trigger = profit_pct >= PROFIT_TARGET or profit_pct <= -STOP_LOSS
@@ -134,8 +156,12 @@ while True:
                         })
                         if order.get('error') == 0:
                             holding_token = False
-                            status = "✅ กำไร" if profit_pct > 0 else "❌ ตัดขาดทุน"
-                            send_line_message(f"💰 ขายแล้ว ({status})\nผลลัพธ์: {profit_pct*100:.2f}%\nราคาขาย: {current_price} THB")
+                            status = "✅ Take Profit" if profit_pct > 0 else "❌ Stop Loss"
+                            sell_msg = (f"💰 บอทสั่งขายแล้ว! ({status})\n"
+                                       f"📉 ราคาขาย: {current_price} THB\n"
+                                       f"📈 ต้นทุน: {last_buy_price} THB\n"
+                                       f"📊 ผลกำไร: {profit_pct*100:.2f}%")
+                            send_line_message(sell_msg)
 
     except Exception as e:
         logging.error(f"Loop Error: {e}")
