@@ -1,3 +1,4 @@
+
 import os
 import requests
 import time
@@ -33,7 +34,7 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 SYMBOL = os.getenv("SYMBOL", "xrp_thb").lower() 
 
-PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.015))  
+PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.0255))  
 STOP_LOSS = float(os.getenv("STOP_LOSS", 0.020))      
 EMA_PERIOD = 50        
 TIMEFRAME = "15"       
@@ -65,7 +66,7 @@ def bitkub_v3_auth(method, path, body={}):
 
 def get_market_data():
     try:
-        # 1. ดึงราคาปัจจุบัน
+        # 1. ดึงราคาปัจจุบัน (Ticker)
         res = requests.get(f"{API_HOST}/api/v3/market/ticker?sym={SYMBOL.upper()}").json()
         
         current_price = None
@@ -105,10 +106,11 @@ last_buy_price = 0
 last_report_time = time.time() - 3600 
 
 logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")
-msg = (f"🤖 บอทเริ่มทำงาน (ฉบับแก้ไข Syntax)\n"
+msg = (f"🤖 บอทเริ่มทำงาน (ฉบับสมบูรณ์/แนวคิดเดิม)\n"
        f"📌 เหรียญ: {SYMBOL.upper()}\n"
-       f"📈 กลยุทธ์: EMA {EMA_PERIOD}\n"
-       f"💰 เป้ากำไร: {round(PROFIT_TARGET*100, 2)}%")
+       f"📈 กลยุทธ์: EMA {EMA_PERIOD} (Trend Follow)\n"
+       f"💰 เป้ากำไร: {round(PROFIT_TARGET*100, 2)}%\n"
+       f"🚫 Stop Loss: {round(STOP_LOSS*100, 2)}%")
 send_line_message(msg)
 
 while True:
@@ -117,42 +119,59 @@ while True:
 
         if current_price and ema_val:
             trend = "UP" if current_price > ema_val else "DOWN"
-            logging.info(f"Price: {current_price} | EMA50: {ema_val:.2f}")
+            logging.info(f"Price: {current_price} | EMA50: {ema_val:.2f} | Trend: {trend}")
 
             current_ts = time.time()
             if current_ts - last_report_time >= 3600: 
+                diff = current_price - ema_val
                 status_msg = (f"📊 รายงานสถานะรายชั่วโมง\n"
-                             f"💵 ราคา: {current_price} THB\n"
-                             f"📉 EMA50: {ema_val:.2f} THB\n"
-                             f"🔄 เทรนด์: {'ขาขึ้น 🟢' if trend == 'UP' else 'ขาลง 🔴'}")
+                             f"💵 ราคาตอนนี้: {current_price} THB\n"
+                             f"📉 เส้น EMA50: {ema_val:.2f} THB\n"
+                             f"🔄 เทรนด์: {'ขาขึ้น 🟢' if trend == 'UP' else 'ขาลง 🔴'}\n"
+                             f"ℹ️ {'ราคาอยู่เหนือ EMA พร้อมซื้อ' if trend == 'UP' else f'ต้องขึ้นอีก {abs(diff):.2f} ถึงจะซื้อ'}\n"
+                             f"📦 ถือเหรียญอยู่: {'ใช่' if holding_token else 'ไม่ใช่'}")
                 send_line_message(status_msg)
                 last_report_time = current_ts
 
-            if not holding_token and trend == "UP":
-                wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
-                balance = float(wallet.get('result', {}).get('THB', 0))
-                if balance >= 10:
-                    order = bitkub_v3_auth("POST", "/api/v3/market/place-bid", {
-                        "sym": SYMBOL.upper(), "amt": int(balance), "rat": 0, "typ": "market"
-                    })
-                    if order.get('error') == 0:
-                        last_buy_price = current_price
-                        holding_token = True
-                        send_line_message(f"🚀 ซื้อสำเร็จที่ {current_price} THB")
-
-            elif holding_token:
-                profit_pct = (current_price - last_buy_price) / last_buy_price
-                if profit_pct >= PROFIT_TARGET or profit_pct <= -STOP_LOSS:
+            if not holding_token:
+                if trend == "UP":
                     wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
-                    coin = SYMBOL.split('_')[0].upper()
-                    coin_amt = float(wallet.get('result', {}).get(coin, 0))
-                    if coin_amt > 0:
+                    thb_balance = float(wallet.get('result', {}).get('THB', 0))
+
+                    if thb_balance >= 10:
+                        order = bitkub_v3_auth("POST", "/api/v3/market/place-bid", {
+                            "sym": SYMBOL.upper(), "amt": int(thb_balance), "rat": 0, "typ": "market"
+                        })
+                        if order.get('error') == 0:
+                            last_buy_price = current_price
+                            holding_token = True
+                            buy_msg = (f"🚀 บอทสั่งซื้อสำเร็จ! (Market Order)\n"
+                                      f"💹 ราคาซื้อ: {current_price} THB\n"
+                                      f"📊 ตัดเส้น EMA ที่: {ema_val:.2f}\n"
+                                      f"🎯 เป้าขาย: {current_price * (1+PROFIT_TARGET):.2f} THB")
+                            send_line_message(buy_msg)
+
+            else:
+                profit_pct = (current_price - last_buy_price) / last_buy_price
+                sell_trigger = profit_pct >= PROFIT_TARGET or profit_pct <= -STOP_LOSS
+
+                if sell_trigger:
+                    wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
+                    coin_name = SYMBOL.split('_')[0].upper()
+                    coin_balance = float(wallet.get('result', {}).get(coin_name, 0))
+
+                    if coin_balance > 0:
                         order = bitkub_v3_auth("POST", "/api/v3/market/place-ask", {
-                            "sym": SYMBOL.upper(), "amt": coin_amt, "rat": 0, "typ": "market"
+                            "sym": SYMBOL.upper(), "amt": coin_balance, "rat": 0, "typ": "market"
                         })
                         if order.get('error') == 0:
                             holding_token = False
-                            send_line_message(f"💰 ขายแล้ว! กำไร: {profit_pct*100:.2f}%")
+                            status = "✅ Take Profit" if profit_pct > 0 else "❌ Stop Loss"
+                            sell_msg = (f"💰 บอทสั่งขายแล้ว! ({status})\n"
+                                       f"📉 ราคาขาย: {current_price} THB\n"
+                                       f"📈 ต้นทุน: {last_buy_price} THB\n"
+                                       f"📊 ผลกำไร: {profit_pct*100:.2f}%")
+                            send_line_message(sell_msg)
 
     except Exception as e:
         logging.error(f"Loop Error: {e}")
