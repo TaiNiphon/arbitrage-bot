@@ -64,23 +64,31 @@ def bitkub_v3_auth(method, path, body={}):
 
 def get_market_data():
     try:
-        # ดึงราคาปัจจุบัน
-        ticker = requests.get(f"{API_HOST}/api/v3/market/ticker?sym={SYMBOL}").json()
-        current_price = float(ticker[0]['last'])
+        # 1. ดึงราคาปัจจุบัน (Ticker) - ใช้ตัวพิมพ์ใหญ่เพื่อความแม่นยำ
+        ticker_res = requests.get(f"{API_HOST}/api/v3/market/ticker?sym={SYMBOL.upper()}").json()
+        if isinstance(ticker_res, list) and len(ticker_res) > 0:
+            current_price = float(ticker_res[0]['last'])
+        else:
+            return None, None
 
-        # ดึงข้อมูลแท่งเทียน
-        candles = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL}&p={TIMEFRAME}&l=100").json()
-        closes = [float(c['c']) for c in candles['result']]
+        # 2. ดึงข้อมูลแท่งเทียน - ตรวจสอบ 'result' ป้องกัน Error
+        candle_res = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL.upper()}&p={TIMEFRAME}&l=100").json()
+        
+        if 'result' in candle_res and len(candle_res['result']) > 0:
+            closes = [float(c['c']) for c in candle_res['result']]
+        else:
+            logging.error(f"Candle Data Missing: {candle_res}")
+            return None, None
 
-        # --- คำนวณ EMA ของจริง (Exponential) ---
+        # 3. คำนวณ EMA แบบสมบูรณ์
         ema = closes[0]
         multiplier = 2 / (EMA_PERIOD + 1)
         for price in closes:
             ema = (price - ema) * multiplier + ema
-            
+
         return current_price, ema
     except Exception as e:
-        logging.error(f"Data Error: {e}")
+        logging.error(f"Get Data Error: {e}")
         return None, None
 
 # --- 5. Main Loop ---
@@ -105,33 +113,11 @@ while True:
                     thb_balance = float(wallet.get('result', {}).get('THB', 0))
 
                     if thb_balance >= 10:
+                        # บังคับ SYMBOL เป็นตัวพิมพ์ใหญ่ในคำสั่งซื้อขาย
                         order = bitkub_v3_auth("POST", "/api/v3/market/place-bid", {
-                            "sym": SYMBOL, "amt": int(thb_balance), "rat": 0, "typ": "market"
+                            "sym": SYMBOL.upper(), "amt": int(thb_balance), "rat": 0, "typ": "market"
                         })
                         if order.get('error') == 0:
                             last_buy_price = current_price
                             holding_token = True
-                            send_line_message(f"🚀 ซื้อสำเร็จ!\nราคา: {current_price} THB\nEMA: {ema_val:.2f}")
-
-            else:
-                profit_pct = (current_price - last_buy_price) / last_buy_price
-                sell_trigger = profit_pct >= PROFIT_TARGET or profit_pct <= -STOP_LOSS
-
-                if sell_trigger:
-                    wallet = bitkub_v3_auth("POST", "/api/v3/market/wallet")
-                    coin_name = SYMBOL.split('_')[0].upper()
-                    coin_balance = float(wallet.get('result', {}).get(coin_name, 0))
-
-                    if coin_balance > 0:
-                        order = bitkub_v3_auth("POST", "/api/v3/market/place-ask", {
-                            "sym": SYMBOL, "amt": coin_balance, "rat": 0, "typ": "market"
-                        })
-                        if order.get('error') == 0:
-                            holding_token = False
-                            status = "✅ กำไร" if profit_pct > 0 else "❌ ตัดขาดทุน"
-                            send_line_message(f"💰 ขายแล้ว ({status})\nผลลัพธ์: {profit_pct*100:.2f}%\nราคาขาย: {current_price} THB")
-
-    except Exception as e:
-        logging.error(f"Loop Error: {e}")
-
-    time.sleep(30)
+                            send_line_message(f"🚀 ซื้อสำเร็จ!\nราคา: {current_price} THB\n
