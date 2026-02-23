@@ -81,7 +81,8 @@ def get_market_data():
 holding_token = False
 last_buy_price = 0
 
-logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")
+logging.info(f"--- COMPLETE BOT STARTED: {SYMBOL} ---")msg = f"🚀 บอทเริ่มทำงานบน Railway\nเหรียญ: {SYMBOL}\nเป้ากำไร: {PROFIT_TARGET*100}%"
+send_line_message(msg)
 
 while True:
     try:
