@@ -71,4 +71,72 @@ def get_market_data():
         else: price = float(t_res.get(SYMBOL_TICKER, {}).get('last', 0))
 
         # 2. ดึงแท่งเทียนมาคำนวณ EMA
-        c_res
+        c_res = requests.get(f"{API_HOST}/api/v3/market/candles?sym={SYMBOL_TICKER}&p={TIMEFRAME}&l=100").json()
+        # ป้องกันอาการค้าง: ตรวจสอบข้อมูลก่อนดึงค่า
+        data = c_res if isinstance(c_res, list) else c_res.get('result', [])
+
+        if len(data) >= EMA_PERIOD:
+            closes = [float(day['c']) for day in data]
+            # คำนวณ EMA
+            ema = closes[0]
+            m = 2 / (EMA_PERIOD + 1)
+            for p in closes: ema = (p - ema) * m + ema
+            return price, ema
+        return None, None
+    except: return None, None
+
+# --- 4. ลูปการทำงานหลัก ---
+
+holding = False
+last_buy = 0
+last_report = 0
+
+logging.info(f"--- BOT STARTED: {SYMBOL_TRADE} ---")
+send_line(f"🤖 บอททำงานแล้ว!\nเหรียญ: {SYMBOL_TRADE}\nกลยุทธ์: EMA50")
+
+
+while True:
+    try:
+        current_price, ema_val = get_market_data()
+        
+        if current_price and ema_val:
+            trend = "UP" if current_price > ema_val else "DOWN"
+            logging.info(f"Price: {current_price} | EMA: {ema_val:.2f} | Trend: {trend}")
+
+            # รายงานรายชั่วโมง
+            if time.time() - last_report >= 3600:
+                send_line(f"📊 รายงาน: {current_price} THB\nEMA50: {ema_val:.2f}\nสถานะ: {trend}")
+                last_report = time.time()
+
+            # ตัดสินใจซื้อ
+            if not holding and trend == "UP":
+                wallet = bitkub_v3_request("POST", "/api/v3/market/wallet")
+                bal = float(wallet.get('result', {}).get('THB', 0)) if isinstance(wallet, dict) else 0
+                if bal >= 10:
+                    order = bitkub_v3_request("POST", "/api/v3/market/place-bid", {
+                        "sym": SYMBOL_TRADE, "amt": round(bal, 2), "rat": 0, "typ": "market"
+                    })
+                    if order.get('error') == 0:
+                        holding, last_buy = True, current_price
+                        send_line(f"✅ ซื้อสำเร็จที่ {current_price}")
+
+            # ตัดสินใจขาย
+            elif holding:
+                profit = (current_price - last_buy) / last_buy
+                if profit >= 0.0255 or profit <= -0.020:
+                    wallet = bitkub_v3_request("POST", "/api/v3/market/wallet")
+                    coin = float(wallet.get('result', {}).get('XRP', 0)) if isinstance(wallet, dict) else 0
+                    if coin > 0:
+                        order = bitkub_v3_request("POST", "/api/v3/market/place-ask", {
+                            "sym": SYMBOL_TRADE, "amt": coin, "rat": 0, "typ": "market"
+                        })
+                        if order.get('error') == 0:
+                            holding = False
+                            send_line(f"💰 ขายแล้ว! กำไร: {profit*100:.2f}%")
+        else:
+            logging.warning("Waiting for market data...")
+
+    except Exception as e:
+        logging.error(f"System Error: {e}")
+
+    time.sleep(30)
