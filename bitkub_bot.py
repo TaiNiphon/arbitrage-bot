@@ -13,11 +13,12 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 2. การตั้งค่าตัวแปร (ตามหน้า Variables ของคุณ) ---
+# --- 2. ตั้งค่าตัวแปรจาก Environment ของคุณ ---
 LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_ID = os.getenv("LINE_USER_ID")
-SYMBOL_TICKER = "XRP_THB" # สำหรับดึงราคาล่าสุด
-SYMBOL_CANDLE = "THB_XRP" # สำหรับดึงข้อมูลกราฟ (V3 Requirement)
+# แยกสัญลักษณ์ตามมาตรฐาน API V3
+SYMBOL_PRICE = "XRP_THB"   # สำหรับเช็กราคา (Ticker)
+SYMBOL_CHART = "THB_XRP"   # สำหรับดึงกราฟ (Candles)
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
@@ -29,58 +30,64 @@ def send_line(msg):
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # ดึงราคาปัจจุบัน (Ticker) - พิสูจน์แล้วว่าดึงได้จากรูป 1000054369
-        t_res = requests.get("https://api.bitkub.com/api/v3/market/ticker", headers=headers, timeout=15).json()
-        price = next((float(i['last']) for i in t_res if i['symbol'] == SYMBOL_TICKER), 0)
+        # 1. ดึงราคาปัจจุบัน
+        t_res = requests.get("https://api.bitkub.com/api/v3/market/ticker", headers=headers, timeout=10).json()
+        price = next((float(i['last']) for i in t_res if i['symbol'] == SYMBOL_PRICE), 0)
         
-        # ดึงข้อมูลกราฟ (Candles) - แก้ไขให้ใช้ชื่อ THB_XRP ตามที่ API V3 ต้องการ
-        c_url = f"https://api.bitkub.com/api/v3/market/candles?sym={SYMBOL_CANDLE}&p=15&l=100"
-        c_res = requests.get(c_url, headers=headers, timeout=15).json()
-        data = c_res if isinstance(c_res, list) else c_res.get('result', [])
+        # 2. ดึงข้อมูลกราฟ (เพิ่มความพยายามดึงจนกว่าจะได้)
+        c_url = f"https://api.bitkub.com/api/v3/market/candles?sym={SYMBOL_CHART}&p=15&l=100"
+        c_res = requests.get(c_url, headers=headers, timeout=10).json()
+        
+        # ตรวจสอบรูปแบบข้อมูลที่ได้รับ
+        data = []
+        if isinstance(c_res, list): data = c_res
+        elif isinstance(c_res, dict): data = c_res.get('result', [])
 
         if price > 0 and len(data) >= 50:
+            # ใช้ค่า Close Price (c) มาคำนวณ EMA 50
             closes = [float(d['c']) for d in data]
-            # คำนวณค่า EMA 50
             ema = closes[0]
-            m = 2 / (50 + 1)
-            for p in closes: ema = (p - ema) * m + ema
+            multiplier = 2 / (50 + 1)
+            for p in closes: ema = (p - ema) * multiplier + ema
             return price, ema
         
-        print(f"⚠️ กำลังรอข้อมูลกราฟ: ราคา={price}, จำนวนแท่ง={len(data)}")
+        print(f"⚠️ รอดึงข้อมูลกราฟ... (ราคา={price}, แท่งเทียน={len(data)})")
         return None, None
     except Exception as e:
-        print(f"❌ ระบบเชื่อมต่อขัดข้อง: {e}")
+        print(f"❌ Error: {e}")
         return None, None
 
-# --- 3. ลูปหลักและการรายงานที่สวยงาม ---
-last_report = 0
-send_line("🚀 [Bot Online]\nระบบเริ่มวิเคราะห์ XRP ด้วย EMA 50 แล้ว!")
+# --- 3. ลูปการทำงานและรายงาน ---
+last_report_time = 0
+send_line("✅ [Trend Bot Online]\nเริ่มระบบวิเคราะห์ XRP ด้วย EMA 50 สำเร็จ!")
 
 while True:
     price, ema_val = get_market_data()
     
     if price and ema_val:
         trend = "UP" if price > ema_val else "DOWN"
-        # แสดงผลในหน้า Logs ของ Railway เพื่อความมั่นใจ
-        print(f"✅ [{time.strftime('%H:%M:%S')}] {SYMBOL_TICKER}: {price} | EMA50: {ema_val:.2f} | Trend: {trend}")
+        current_time = time.time()
+        
+        # พิมพ์สถานะใน Logs ของ Railway ทุกๆ รอบ
+        print(f"[{time.strftime('%H:%M:%S')}] {SYMBOL_PRICE}: {price} | EMA50: {ema_val:.2f} | Trend: {trend}")
 
-        # ส่งรายงานประจำชั่วโมงแบบสวยงาม
-        if time.time() - last_report >= 3600:
-            trend_icon = "📈 ขาขึ้น (Bullish)" if trend == "UP" else "📉 ขาลง (Bearish)"
-            status_color = "🟢" if trend == "UP" else "🔴"
+        # ส่งรายงานเข้า LINE ทุกๆ 1 ชั่วโมง (3600 วินาที) หรือเมื่อมีสัญญาณรายงานครั้งแรก
+        if current_time - last_report_time >= 3600:
+            status_icon = "🟢" if trend == "UP" else "🔴"
+            trend_text = "📈 ขาขึ้น (Bullish)" if trend == "UP" else "📉 ขาลง (Bearish)"
             
-            report_msg = (
-                f"{status_color} [XRP Market Report]\n"
+            report = (
+                f"{status_icon} [XRP Trend Report]\n"
                 "━━━━━━━━━━━━━━━\n"
-                f"💎 สินทรัพย์: {SYMBOL_TICKER}\n"
-                f"💵 ราคาปัจจุบัน: {price:,.2f} THB\n"
-                f"📊 EMA 50 Line: {ema_val:,.2f}\n"
-                f"🧭 เทรนด์ตลาด: {trend_icon}\n"
+                f"💎 สินทรัพย์: {SYMBOL_PRICE}\n"
+                f"💰 ราคาปัจจุบัน: {price:,.2f} THB\n"
+                f"📊 เส้น EMA 50: {ema_val:,.2f} THB\n"
+                f"🧭 สรุปเทรนด์: {trend_text}\n"
                 "━━━━━━━━━━━━━━━\n"
                 f"⏰ อัปเดตเมื่อ: {time.strftime('%H:%M:%S')}\n"
-                "✅ ระบบทำงานปกติ"
+                "🤖 บอททำงานปกติ"
             )
-            send_line(report_msg)
-            last_report = time.time()
-    
-    time.sleep(30) # ตรวจสอบทุก 30 วินาที
+            send_line(report)
+            last_report_time = current_time
+            
+    time.sleep(30) # ตรวจสอบข้อมูลทุก 30 วินาที
