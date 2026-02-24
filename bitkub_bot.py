@@ -1,32 +1,44 @@
 import os, requests, time, hmac, hashlib, json, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- 1. ระบบรักษาการเชื่อมต่อ ---
+# --- 1. ระบบรักษาการเชื่อมต่อ (Health Check) ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot Trading Pro Active with Full Report")
+            self.wfile.write(b"Bot Trading Pro - Multi-Stage & Persistence Active")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 2. ตั้งค่าตัวแปร (Environmental Variables) ---
+# --- 2. ตั้งค่าตัวแปรและระบบฐานข้อมูลไฟล์ ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET")
 LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_ID = os.getenv("LINE_USER_ID")
 HOST = "https://api.bitkub.com"
 
-# ค่า TP/SL จาก Railway
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
 STOP_LOSS = float(os.getenv("STOP_LOSS_PCT", 2.0))
+STATE_FILE = "bot_state.json"
+initial_equity = 1500.00 # ทุนเริ่มต้น
 
-initial_equity = 1500.00  # ทุนเริ่มต้นเพื่อคำนวณกำไรสะสมรวม
-last_buy_price = 0.0      # ต้นทุนไม้ปัจจุบัน
-last_action = "sell"      # สถานะเริ่มต้น
+def save_state(action, buy_price, stage):
+    with open(STATE_FILE, "w") as f:
+        json.dump({"last_action": action, "avg_price": buy_price, "stage": stage}, f)
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                d = json.load(f)
+                return d.get("last_action", "sell"), d.get("avg_price", 0.0), d.get("stage", 0)
+        except: pass
+    return "sell", 0.0, 0
+
+last_action, avg_price, current_stage = load_state()
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
@@ -35,7 +47,7 @@ def send_line(msg):
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
     except: pass
 
-# --- 3. ฟังก์ชัน API ---
+# --- 3. ฟังก์ชัน API Bitkub ---
 def get_signature(ts, method, path, body_str):
     payload = ts + method + path + body_str
     return hmac.new(API_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -81,74 +93,74 @@ def get_market_data():
     except: pass
     return None, None
 
-# --- 4. ลูปหลัก ---
+# --- 4. ลูปการทำงาน ---
 last_report_time = 0
-
-send_line(f"🚀 [Bot Started]\n- Target: {TARGET_PROFIT}%\n- Stop Loss: {STOP_LOSS}%\n- สรุปพอร์ตทุก 3 ชม.")
+send_line(f"🤖 [Bot Ready]\nสถานะ: {last_action}\nไม้ที่ถือ: {current_stage}/2\nต้นทุนเฉลี่ย: {avg_price if avg_price > 0 else '-'}")
 
 while True:
     try:
         price, ema_val = get_market_data()
-
         if price and ema_val:
             trend_icon = "🟢 ขาขึ้น" if price > ema_val else "🔴 ขาลง"
-            
-            # คำนวณกำไร/ขาดทุนไม้ปัจจุบัน
-            current_pnl = 0.0
-            if last_buy_price > 0:
-                current_pnl = ((price - last_buy_price) / last_buy_price) * 100
+            pnl = ((price - avg_price) / avg_price * 100) if avg_price > 0 else 0.0
 
-            # --- ตรรกะซื้อ (Buy) ---
-            if price > ema_val and last_action == "sell":
-                thb_bal, xrp_bal = get_wallet()
-                if thb_bal > 10:
-                    res = place_order("buy", thb_bal)
+            # --- ตรรกะซื้อ (ไม้ 1 และ ไม้ 2) ---
+            if price > ema_val:
+                thb_bal, _ = get_wallet()
+                # ซื้อไม้ 1 (ใช้เงิน 50% ของที่มี)
+                if current_stage == 0 and thb_bal > 20:
+                    buy_amt = thb_bal * 0.5
+                    res = place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        last_buy_price = price
+                        avg_price = price
+                        current_stage = 1
                         last_action = "buy"
-                        send_line(f"🟢 [BUY SUCCESS]\nราคา: {price:,.2f}\nเทรนด์: {trend_icon}")
+                        save_state(last_action, avg_price, current_stage)
+                        send_line(f"📦 [BUY ไม้ 1/2]\nราคา: {price:,.2f}\nทุนเฉลี่ย: {avg_price:,.2f}")
+                
+                # ซื้อไม้ 2 (เมื่อราคาขึ้นจากไม้แรก 0.5% เพื่อยืนยันเทรนด์)
+                elif current_stage == 1 and pnl >= 0.5 and thb_bal > 10:
+                    res = place_order("buy", thb_bal) # ซื้อที่เหลือทั้งหมด
+                    if res.get('error') == 0:
+                        avg_price = (avg_price + price) / 2 # คิดทุนเฉลี่ยคร่าวๆ
+                        current_stage = 2
+                        save_state(last_action, avg_price, current_stage)
+                        send_line(f"📦 [BUY ไม้ 2/2]\nราคา: {price:,.2f}\nทุนเฉลี่ยใหม่: {avg_price:,.2f}")
 
-            # --- ตรรกะขาย (Sell) ---
-            elif last_action == "buy":
-                sell_reason = ""
-                if price < ema_val: sell_reason = "Trend Change (EMA)"
-                elif current_pnl >= TARGET_PROFIT: sell_reason = f"Take Profit ({current_pnl:+.2f}%)"
-                elif current_pnl <= -STOP_LOSS: sell_reason = f"Stop Loss ({current_pnl:+.2f}%)"
+            # --- ตรรกะขาย (TP, SL, Trend Change) ---
+            if last_action == "buy":
+                reason = ""
+                if price < ema_val: reason = "Trend Change (EMA)"
+                elif pnl >= TARGET_PROFIT: reason = f"Take Profit ({pnl:+.2f}%)"
+                elif pnl <= -STOP_LOSS: reason = f"Stop Loss ({pnl:+.2f}%)"
 
-                if sell_reason:
-                    thb_bal, xrp_bal = get_wallet()
+                if reason:
+                    _, xrp_bal = get_wallet()
                     if xrp_bal > 0.1:
                         res = place_order("sell", xrp_bal)
                         if res.get('error') == 0:
-                            send_line(f"🔴 [SELL SUCCESS]\nเหตุผล: {sell_reason}\nราคาขาย: {price:,.2f}\nกำไรไม้นี้: {current_pnl:+.2f}%")
-                            last_action = "sell"
-                            last_buy_price = 0.0
+                            send_line(f"🔴 [SELL ALL SUCCESS]\nเหตุผล: {reason}\nราคาขาย: {price:,.2f}\nกำไรรวมไม้: {pnl:+.2f}%")
+                            last_action, avg_price, current_stage = "sell", 0.0, 0
+                            save_state(last_action, avg_price, current_stage)
 
-            # --- รายงานสรุปพอร์ตแบบสมบูรณ์ ---
+            # --- รายงานสรุปพอร์ตทุก 3 ชม. ---
             if time.time() - last_report_time >= 10800:
                 thb_bal, xrp_bal = get_wallet()
                 total_equity = thb_bal + (xrp_bal * price)
-                total_profit_pct = ((total_equity - initial_equity) / initial_equity) * 100
-                
-                full_report = (
-                    "📊 [Full Portfolio Report]\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"💰 ราคา: {price:,.2f} / EMA: {ema_val:,.2f}\n"
-                    f"🧭 เทรนด์ปัจจุบัน: {trend_icon}\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"📉 ต้นทุนไม้ล่าสุด: {'-' if last_buy_price == 0 else f'{last_buy_price:,.2f}'}\n"
-                    f"✨ P/L ไม้ปัจจุบัน: {current_pnl:+.2f}%\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"🏦 มูลค่าพอร์ต: {total_equity:,.2f} THB\n"
-                    f"📈 กำไรสะสมทั้งหมด: {total_profit_pct:+.2f}%\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"💵 เงินสด: {thb_bal:,.2f} THB\n"
-                    f"💎 เหรียญ: {xrp_bal:,.4f} XRP"
+                total_profit = ((total_equity - initial_equity) / initial_equity) * 100
+                report = (
+                    "📊 [Full Portfolio Report]\n━━━━━━━━━━━━━━━\n"
+                    f"💰 ราคา: {price:,.2f} | EMA: {ema_val:,.2f}\n"
+                    f"🧭 เทรนด์: {trend_icon}\n━━━━━━━━━━━━━━━\n"
+                    f"📦 สถานะ: ถือ {current_stage}/2 ไม้\n"
+                    f"📉 ต้นทุนเฉลี่ย: {avg_price:,.2f}\n"
+                    f"✨ P/L ปัจจุบัน: {pnl:+.2f}%\n━━━━━━━━━━━━━━━\n"
+                    f"🏦 พอร์ต: {total_equity:,.2f} THB\n"
+                    f"📈 กำไรสะสม: {total_profit:+.2f}%\n━━━━━━━━━━━━━━━\n"
+                    f"💵 เงินสด: {thb_bal:,.2f} | 💎 เหรียญ: {xrp_bal:,.4f}"
                 )
-                send_line(full_report)
+                send_line(report)
                 last_report_time = time.time()
 
-    except Exception as e:
-        print(f"Error: {e}")
-
+    except Exception as e: print(f"Error: {e}")
     time.sleep(30)
