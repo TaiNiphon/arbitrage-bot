@@ -1,12 +1,12 @@
 import os, requests, time, hmac, hashlib, json, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- 1. ระบบรักษาการเชื่อมต่อ (Dummy Server) ---
+# --- 1. ระบบรักษาการเชื่อมต่อ ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot Trading Pro Active with TP/SL")
+            self.wfile.write(b"Bot Trading Pro Active with Full Report")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
@@ -20,12 +20,13 @@ LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_ID = os.getenv("LINE_USER_ID")
 HOST = "https://api.bitkub.com"
 
-# ค่าที่เพิ่มเข้ามาใหม่สำหรับ TP/SL
+# ค่า TP/SL จาก Railway
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
 STOP_LOSS = float(os.getenv("STOP_LOSS_PCT", 2.0))
 
-initial_equity = 1500.00
-last_buy_price = 0.0 # ตัวแปรเก็บราคาต้นทุน
+initial_equity = 1500.00  # ทุนเริ่มต้นเพื่อคำนวณกำไรสะสมรวม
+last_buy_price = 0.0      # ต้นทุนไม้ปัจจุบัน
+last_action = "sell"      # สถานะเริ่มต้น
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
@@ -81,71 +82,71 @@ def get_market_data():
     return None, None
 
 # --- 4. ลูปหลัก ---
-last_report = 0
-last_action = "sell" # เริ่มต้นด้วยสถานะว่าง (ขายแล้ว)
+last_report_time = 0
 
-send_line(f"🚀 [Bot Started]\n- Target Profit: {TARGET_PROFIT}%\n- Stop Loss: {STOP_LOSS}%\n- รายงานพอร์ตทุก 3 ชม.")
+send_line(f"🚀 [Bot Started]\n- Target: {TARGET_PROFIT}%\n- Stop Loss: {STOP_LOSS}%\n- สรุปพอร์ตทุก 3 ชม.")
 
 while True:
     try:
         price, ema_val = get_market_data()
 
         if price and ema_val:
-            trend = "UP" if price > ema_val else "DOWN"
+            trend_icon = "🟢 ขาขึ้น" if price > ema_val else "🔴 ขาลง"
             
-            # คำนวณกำไร/ขาดทุนปัจจุบันของไม้ที่ถืออยู่
+            # คำนวณกำไร/ขาดทุนไม้ปัจจุบัน
             current_pnl = 0.0
             if last_buy_price > 0:
                 current_pnl = ((price - last_buy_price) / last_buy_price) * 100
 
             # --- ตรรกะซื้อ (Buy) ---
-            if trend == "UP" and last_action == "sell":
+            if price > ema_val and last_action == "sell":
                 thb_bal, xrp_bal = get_wallet()
                 if thb_bal > 10:
                     res = place_order("buy", thb_bal)
                     if res.get('error') == 0:
                         last_buy_price = price
                         last_action = "buy"
-                        send_line(f"🟢 [BUY ORDER]\nราคา: {price:,.2f} THB\nทุนที่ใช้: {thb_bal:,.2f} THB")
+                        send_line(f"🟢 [BUY SUCCESS]\nราคา: {price:,.2f}\nเทรนด์: {trend_icon}")
 
             # --- ตรรกะขาย (Sell) ---
             elif last_action == "buy":
-                reason = ""
-                # 1. ขายตามเทรนด์เปลี่ยน
-                if trend == "DOWN":
-                    reason = "Trend Change (EMA)"
-                # 2. ขายทำกำไร (Take Profit)
-                elif current_pnl >= TARGET_PROFIT:
-                    reason = f"Take Profit ({current_pnl:+.2f}%)"
-                # 3. ขายตัดขาดทุน (Stop Loss)
-                elif current_pnl <= -STOP_LOSS:
-                    reason = f"Stop Loss ({current_pnl:+.2f}%)"
+                sell_reason = ""
+                if price < ema_val: sell_reason = "Trend Change (EMA)"
+                elif current_pnl >= TARGET_PROFIT: sell_reason = f"Take Profit ({current_pnl:+.2f}%)"
+                elif current_pnl <= -STOP_LOSS: sell_reason = f"Stop Loss ({current_pnl:+.2f}%)"
 
-                if reason:
+                if sell_reason:
                     thb_bal, xrp_bal = get_wallet()
                     if xrp_bal > 0.1:
                         res = place_order("sell", xrp_bal)
                         if res.get('error') == 0:
-                            send_line(f"🔴 [SELL ORDER]\nเหตุผล: {reason}\nราคาขาย: {price:,.2f}\nกำไรไม้หน้า: {current_pnl:+.2f}%")
+                            send_line(f"🔴 [SELL SUCCESS]\nเหตุผล: {sell_reason}\nราคาขาย: {price:,.2f}\nกำไรไม้นี้: {current_pnl:+.2f}%")
                             last_action = "sell"
                             last_buy_price = 0.0
 
-            # --- รายงานพอร์ต (ทุก 3 ชั่วโมง) ---
-            if time.time() - last_report >= 10800:
+            # --- รายงานสรุปพอร์ตแบบสมบูรณ์ ---
+            if time.time() - last_report_time >= 10800:
                 thb_bal, xrp_bal = get_wallet()
-                current_equity = thb_bal + (xrp_bal * price)
-                total_profit_pct = ((current_equity - initial_equity) / initial_equity) * 100
+                total_equity = thb_bal + (xrp_bal * price)
+                total_profit_pct = ((total_equity - initial_equity) / initial_equity) * 100
                 
-                report = (
-                    f"📊 [Performance Report]\n"
-                    f"💰 ราคาปัจจุบัน: {price:,.2f}\n"
-                    f"📈 ต้นทุนไม้ล่าสุด: {'-' if last_buy_price == 0 else f'{last_buy_price:,.2f}'}\n"
-                    f"📉 P/L ไม้ปัจจุบัน: {current_pnl:+.2f}%\n"
-                    f"🏦 รวมมูลค่าพอร์ต: {current_equity:,.2f} THB\n"
-                    f"✨ กำไรสะสมทั้งหมด: {total_profit_pct:+.2f}%"
+                full_report = (
+                    "📊 [Full Portfolio Report]\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"💰 ราคา: {price:,.2f} / EMA: {ema_val:,.2f}\n"
+                    f"🧭 เทรนด์ปัจจุบัน: {trend_icon}\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"📉 ต้นทุนไม้ล่าสุด: {'-' if last_buy_price == 0 else f'{last_buy_price:,.2f}'}\n"
+                    f"✨ P/L ไม้ปัจจุบัน: {current_pnl:+.2f}%\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"🏦 มูลค่าพอร์ต: {total_equity:,.2f} THB\n"
+                    f"📈 กำไรสะสมทั้งหมด: {total_profit_pct:+.2f}%\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"💵 เงินสด: {thb_bal:,.2f} THB\n"
+                    f"💎 เหรียญ: {xrp_bal:,.4f} XRP"
                 )
-                send_line(report)
-                last_report = time.time()
+                send_line(full_report)
+                last_report_time = time.time()
 
     except Exception as e:
         print(f"Error: {e}")
