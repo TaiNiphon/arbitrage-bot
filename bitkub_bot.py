@@ -107,7 +107,7 @@ while True:
                     last_action = "sell"
 
         # --- รายงานประจำชั่วโมงพร้อมกำไรสะสม ---
-        if time.time() - last_report >= 3600:
+        if time.time() - last_report >= 10800:
             thb_bal, xrp_bal = get_wallet()
             current_equity = thb_bal + (xrp_bal * price)
             
