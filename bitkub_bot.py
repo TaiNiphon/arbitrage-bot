@@ -7,19 +7,19 @@ def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot is Active")
+            self.wfile.write(b"Bot Active")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- Config ---
+# --- Configuration ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET")
 LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_ID = os.getenv("LINE_USER_ID")
-SYMBOL_TRADE = "XRP_THB" # ใช้ชื่อเดียวกับใน buy.py
+SYMBOL_TRADE = "XRP_THB"
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
@@ -31,51 +31,73 @@ def send_line(msg):
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 1. ดึง Ticker (ใช้ URL กลางตาม buy.py)
-        t_res = requests.get("https://api.bitkub.com/api/v3/market/ticker", headers=headers, timeout=10).json()
+        # ดึงราคาแบบ Ticker List ตาม buy.py
+        t_res = requests.get("https://api.bitkub.com/api/v3/market/ticker", headers=headers, timeout=15).json()
         price = 0
+        if isinstance(t_res, list):
+            for item in t_res:
+                if item.get('symbol') == SYMBOL_TRADE:
+                    price = float(item.get('last', 0))
+                    break
         
-        # วนลูปหาเหรียญแบบเดียวกับ buy.py
-        for item in t_res:
-            if item.get('symbol') == SYMBOL_TRADE:
-                price = float(item.get('last', 0))
-                break
-        
-        # 2. ดึงแท่งเทียน (ใช้ THB_XRP ตามเอกสาร Bitkub)
-        c_res = requests.get("https://api.bitkub.com/api/v3/market/candles?sym=THB_XRP&p=15&l=100", headers=headers, timeout=10).json()
-        
-        # เช็คว่า c_res มาเป็น list หรือ dict
+        # ดึงแท่งเทียน (ใช้ THB_XRP)
+        c_res = requests.get("https://api.bitkub.com/api/v3/market/candles?sym=THB_XRP&p=15&l=100", headers=headers, timeout=15).json()
         data = c_res if isinstance(c_res, list) else c_res.get('result', [])
 
         if price > 0 and len(data) >= 50:
             closes = [float(d['c']) for d in data]
-            # คำนวณ EMA50 แบบพื้นฐาน
-            ema = sum(closes[:50]) / 50 
+            ema = closes[0]
+            m = 2 / (50 + 1)
+            for p in closes: ema = (p - ema) * m + ema
             return price, ema
-        
-        print(f"⚠️ ข้อมูลไม่ครบ: Price={price}, CandleCount={len(data)}")
         return None, None
-    except Exception as e:
-        print(f"❌ Error ใน get_market_data: {e}")
-        return None, None
+    except: return None, None
 
-# --- ลูปหลัก ---
-send_line("🤖 บอท Reboot: ปรับระบบ Log และการดึงข้อมูลตาม buy.py")
-last_report = 0
+# --- Main Loop ---
+holding, last_report = False, 0
+
+# ข้อความเริ่มงานแบบสวยงาม
+startup_msg = (
+    "🤖 [System Start]\n"
+    "━━━━━━━━━━━━━━━\n"
+    "✅ บอทเริ่มระบบสมบูรณ์\n"
+    f"📌 เฝ้าเหรียญ: {SYMBOL_TRADE}\n"
+    "📊 กลยุทธ์: EMA 50 (Trend Follow)\n"
+    "💰 เป้ากำไร: 2.55%\n"
+    "🚫 Stop Loss: 2.0%\n"
+    "━━━━━━━━━━━━━━━\n"
+    "🚀 กำลังวิเคราะห์สัญญาณ..."
+)
+send_line(startup_msg)
 
 while True:
-    print(f"🔍 กำลังตรวจสอบราคา {SYMBOL_TRADE}...")
-    price, ema = get_market_data()
-    
-    if price and ema:
-        trend = "UP" if price > ema else "DOWN"
-        # บรรทัดนี้จะยืนยันใน Railway ว่ารันผ่านแล้ว
-        print(f"✅ สำเร็จ! | ราคา: {price} | EMA50: {ema:.2f} | เทรนด์: {trend}")
-        
-        if time.time() - last_report >= 3600:
-            send_line(f"📊 รายงานประจำชั่วโมง\nราคา: {price} THB\nEMA50: {ema:.2f}\nเทรนด์: {trend}")
-            last_report = time.time()
-    else:
-        print(f"⏳ ยังดึงข้อมูลไม่ได้... จะลองใหม่ใน 30 วินาที")
-    
+    try:
+        price, ema_val = get_market_data()
+        if price and ema_val:
+            trend = "UP" if price > ema_val else "DOWN"
+            print(f"✅ Active: {price} | EMA: {ema_val:.2f} | Trend: {trend}")
+
+            # รายงานประจำชั่วโมงแบบละเอียดและสวยงาม
+            if time.time() - last_report >= 3600:
+                trend_icon = "📈 ขาขึ้น (Bullish)" if trend == "UP" else "📉 ขาลง (Bearish)"
+                status_icon = "📦 ถือเหรียญอยู่ (Holding)" if holding else "⏳ รอสัญญาณ (Waiting)"
+                
+                report_msg = (
+                    "📊 [Hourly Report]\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"💎 เหรียญ: {SYMBOL_TRADE}\n"
+                    f"💵 ราคาปัจจุบัน: {price} THB\n"
+                    f"📉 ค่า EMA 50: {ema_val:.2f}\n"
+                    f"🧭 เทรนด์: {trend_icon}\n"
+                    f"⚙️ สถานะ: {status_icon}\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    f"⏰ เวลา: {time.strftime('%H:%M:%S')}"
+                )
+                send_line(report_msg)
+                last_report = time.time()
+        else:
+            print(f"⏳ กำลังรอข้อมูลตลาด {SYMBOL_TRADE}...")
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
     time.sleep(30)
