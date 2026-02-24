@@ -6,7 +6,7 @@ def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot Trading Pro Active")
+            self.wfile.write(b"Bot Trading Pro Active with TP/SL")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
@@ -20,8 +20,12 @@ LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_ID = os.getenv("LINE_USER_ID")
 HOST = "https://api.bitkub.com"
 
-# มูลค่าพอร์ตเริ่มต้นสำหรับคำนวณกำไรสะสม
+# ค่าที่เพิ่มเข้ามาใหม่สำหรับ TP/SL
+TARGET_PROFIT = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
+STOP_LOSS = float(os.getenv("STOP_LOSS_PCT", 2.0))
+
 initial_equity = 1500.00
+last_buy_price = 0.0 # ตัวแปรเก็บราคาต้นทุน
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
@@ -78,10 +82,9 @@ def get_market_data():
 
 # --- 4. ลูปหลัก ---
 last_report = 0
-last_action = ""
+last_action = "sell" # เริ่มต้นด้วยสถานะว่าง (ขายแล้ว)
 
-# แจ้งเตือนเมื่อบอทเริ่มทำงาน
-send_line("🚀 [Bot Started]\nบอทเริ่มทำงานแล้ว!\n- รายงานสรุปพอร์ตทุก 3 ชม.\n- แจ้งเตือน ซื้อ-ขาย ทันที")
+send_line(f"🚀 [Bot Started]\n- Target Profit: {TARGET_PROFIT}%\n- Stop Loss: {STOP_LOSS}%\n- รายงานพอร์ตทุก 3 ชม.")
 
 while True:
     try:
@@ -89,51 +92,62 @@ while True:
 
         if price and ema_val:
             trend = "UP" if price > ema_val else "DOWN"
+            
+            # คำนวณกำไร/ขาดทุนปัจจุบันของไม้ที่ถืออยู่
+            current_pnl = 0.0
+            if last_buy_price > 0:
+                current_pnl = ((price - last_buy_price) / last_buy_price) * 100
 
             # --- ตรรกะซื้อ (Buy) ---
-            if trend == "UP" and last_action != "buy":
+            if trend == "UP" and last_action == "sell":
                 thb_bal, xrp_bal = get_wallet()
                 if thb_bal > 10:
                     res = place_order("buy", thb_bal)
                     if res.get('error') == 0:
-                        # แจ้งเตือนซื้อทันที
-                        send_line(f"🟢 [BUY ORDER SUCCESS]\nซี้อ XRP ที่ราคา: {price:,.2f} บาท\nยอดเงินที่ใช้: {thb_bal:,.2f} THB")
+                        last_buy_price = price
                         last_action = "buy"
+                        send_line(f"🟢 [BUY ORDER]\nราคา: {price:,.2f} THB\nทุนที่ใช้: {thb_bal:,.2f} THB")
 
             # --- ตรรกะขาย (Sell) ---
-            elif trend == "DOWN" and last_action != "sell":
-                thb_bal, xrp_bal = get_wallet()
-                if xrp_bal > 0.1:
-                    res = place_order("sell", xrp_bal)
-                    if res.get('error') == 0:
-                        # แจ้งเตือนขายทันที
-                        send_line(f"🔴 [SELL ORDER SUCCESS]\nขาย XRP ที่ราคา: {price:,.2f} บาท\nเพื่อรักษากำไร/ทุน")
-                        last_action = "sell"
+            elif last_action == "buy":
+                reason = ""
+                # 1. ขายตามเทรนด์เปลี่ยน
+                if trend == "DOWN":
+                    reason = "Trend Change (EMA)"
+                # 2. ขายทำกำไร (Take Profit)
+                elif current_pnl >= TARGET_PROFIT:
+                    reason = f"Take Profit ({current_pnl:+.2f}%)"
+                # 3. ขายตัดขาดทุน (Stop Loss)
+                elif current_pnl <= -STOP_LOSS:
+                    reason = f"Stop Loss ({current_pnl:+.2f}%)"
 
-            # --- รายงานพอร์ตทุก 3 ชั่วโมง (10800 วินาที) ---
+                if reason:
+                    thb_bal, xrp_bal = get_wallet()
+                    if xrp_bal > 0.1:
+                        res = place_order("sell", xrp_bal)
+                        if res.get('error') == 0:
+                            send_line(f"🔴 [SELL ORDER]\nเหตุผล: {reason}\nราคาขาย: {price:,.2f}\nกำไรไม้หน้า: {current_pnl:+.2f}%")
+                            last_action = "sell"
+                            last_buy_price = 0.0
+
+            # --- รายงานพอร์ต (ทุก 3 ชั่วโมง) ---
             if time.time() - last_report >= 10800:
                 thb_bal, xrp_bal = get_wallet()
                 current_equity = thb_bal + (xrp_bal * price)
-                profit_pct = ((current_equity - initial_equity) / initial_equity) * 100
-                profit_icon = "📈" if profit_pct >= 0 else "📉"
-
+                total_profit_pct = ((current_equity - initial_equity) / initial_equity) * 100
+                
                 report = (
-                    f"📊 [Bot Performance Report]\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"💰 ราคา: {price:,.2f} / EMA: {ema_val:,.2f}\n"
-                    f"🧭 เทรนด์: {'ขาขึ้น 🟢' if trend == 'UP' else 'ขาลง 🔴'}\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"🏦 มูลค่าพอร์ต: {current_equity:,.2f} THB\n"
-                    f"{profit_icon} กำไรสะสม: {profit_pct:+.2f}%\n"
-                    "━━━━━━━━━━━━━━━\n"
-                    f"💵 เงินสด: {thb_bal:,.2f} THB\n"
-                    f"💎 เหรียญ: {xrp_bal:,.4f} XRP\n"
-                    "━━━━━━━━━━━━━━━"
+                    f"📊 [Performance Report]\n"
+                    f"💰 ราคาปัจจุบัน: {price:,.2f}\n"
+                    f"📈 ต้นทุนไม้ล่าสุด: {'-' if last_buy_price == 0 else f'{last_buy_price:,.2f}'}\n"
+                    f"📉 P/L ไม้ปัจจุบัน: {current_pnl:+.2f}%\n"
+                    f"🏦 รวมมูลค่าพอร์ต: {current_equity:,.2f} THB\n"
+                    f"✨ กำไรสะสมทั้งหมด: {total_profit_pct:+.2f}%"
                 )
                 send_line(report)
                 last_report = time.time()
 
     except Exception as e:
         print(f"Error: {e}")
-    
+
     time.sleep(30)
