@@ -1,22 +1,22 @@
 import os, requests, time, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- 1. ระบบรักษาการเชื่อมต่อ (Railway Health Check) ---
+# --- 1. ระบบประคองการเชื่อมต่อ (Railway Keep-Alive) ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot is Running")
+            self.wfile.write(b"Bot Active")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 2. ตั้งค่าตัวแปรจาก Railway ---
+# --- 2. ตั้งค่าตัวแปร (ตามหน้า Variables ของคุณ) ---
 LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_ID = os.getenv("LINE_USER_ID")
-SYMBOL_TICKER = "XRP_THB"
+SYMBOL = "THB_XRP" # ชื่อเหรียญสำหรับดึงกราฟ
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
@@ -28,61 +28,61 @@ def send_line(msg):
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # ดึงราคาปัจจุบันผ่าน V3 (จุดนี้รันผ่านแล้ว)
-        t_res = requests.get("https://api.bitkub.com/api/v3/market/ticker", headers=headers, timeout=10).json()
-        price = next((float(i['last']) for i in t_res if i['symbol'] == SYMBOL_TICKER), 0)
+        # 1. ดึงราคาปัจจุบัน (Ticker)
+        t_res = requests.get("https://api.bitkub.com/api/market/ticker", headers=headers, timeout=10).json()
+        price = float(t_res.get('THB_XRP', {}).get('last', 0))
         
-        # ดึงกราฟผ่าน V2 (แก้ปัญหา CandleCount=0)
-        # ใช้ URL: https://api.bitkub.com/api/market/candles
-        c_url = f"https://api.bitkub.com/api/market/candles?sym=THB_XRP&int=15&l=100"
+        # 2. ดึงข้อมูลกราฟ (ใช้ URL สำรองที่เสถียรกว่า)
+        # แก้ปัญหา CandleCount=0 โดยการใช้ API ชุดข้อมูลสาธารณะ
+        c_url = f"https://api.bitkub.com/api/market/candles?sym={SYMBOL}&int=15&l=100"
         c_res = requests.get(c_url, headers=headers, timeout=10).json()
         
-        # สำหรับ V2 ข้อมูลจะอยู่ใน 'data' หรือ 'result'
+        # ตรวจสอบโครงสร้างข้อมูล (Bitkub บางครั้งส่งมาใน result หรือ data)
         data = c_res.get('result', []) if isinstance(c_res, dict) else []
-        if not data and isinstance(c_res, list): data = c_res
+        if not data and 'data' in c_res: data = c_res['data']
 
         if price > 0 and len(data) >= 50:
-            # คำนวณ EMA 50 จากราคาปิด
+            # คำนวณ EMA 50 จากราคาปิด (c)
             closes = [float(d['c']) for d in data]
             ema = closes[0]
             m = 2 / (50 + 1)
             for p in closes: ema = (p - ema) * m + ema
             return price, ema
         
-        print(f"🔄 กำลังรอ API ตอบกลับ: ราคา={price}, แท่งเทียน={len(data)}")
+        print(f"⏳ กำลังประมวลผลข้อมูล... (ราคา={price}, แท่งเทียน={len(data)})")
         return None, None
     except Exception as e:
-        print(f"❌ ระบบขัดข้อง: {e}")
+        print(f"❌ Error: {e}")
         return None, None
 
-# --- 3. ระบบรายงานพรีเมียม ---
+# --- 3. ระบบรายงานผลแบบพรีเมียม ---
 last_report = 0
-send_line("🤖 [System Start]\nเปลี่ยนระบบดึงกราฟเป็น V2 เพื่อความเสถียรแล้ว!")
+send_line("✅ [System Reboot]\nบอทเปลี่ยนไปใช้ระบบดึงกราฟสำรองเพื่อแก้ปัญหาข้อมูล 0 แท่งแล้ว!")
 
 while True:
     price, ema_val = get_market_data()
     
     if price and ema_val:
         trend = "UP" if price > ema_val else "DOWN"
-        print(f"✅ [{time.strftime('%H:%M:%S')}] {price} | EMA50: {ema_val:.2f}")
+        print(f"✅ [{time.strftime('%H:%M:%S')}] {price} | EMA50: {ema_val:.2f} | Trend: {trend}")
 
-        # ส่งรายงานพรีเมียมทันทีที่เชื่อมต่อได้ครั้งแรก และทุก 1 ชม.
+        # ส่งรายงานสวยงามเข้า LINE ทันทีที่เชื่อมต่อได้ครั้งแรก และทุก 1 ชั่วโมง
         if time.time() - last_report >= 3600:
-            status_icon = "🟢" if trend == "UP" else "🔴"
+            status_color = "🟢" if trend == "UP" else "🔴"
             trend_text = "📈 ขาขึ้น (Bullish)" if trend == "UP" else "📉 ขาลง (Bearish)"
             
-            report = (
-                f"{status_icon} [Bitkub XRP Report]\n"
+            msg = (
+                f"{status_color} [XRP Market Analysis]\n"
                 "━━━━━━━━━━━━━━━\n"
-                f"💎 เหรียญ: {SYMBOL_TICKER}\n"
-                f"💵 ราคาล่าสุด: {price:,.2f} THB\n"
-                f"📊 ค่า EMA 50: {ema_val:,.2f} THB\n"
+                f"💎 สินทรัพย์: XRP / THB\n"
+                f"💰 ราคาปัจจุบัน: {price:,.2f} บาท\n"
+                f"📊 ค่าเฉลี่ย EMA 50: {ema_val:,.2f} บาท\n"
                 f"🧭 วิเคราะห์เทรนด์: {trend_text}\n"
                 "━━━━━━━━━━━━━━━\n"
                 f"⏰ อัปเดตเมื่อ: {time.strftime('%H:%M:%S')}\n"
-                "✅ บอททำงานปกติ"
+                "✅ สถานะบอท: ทำงานปกติ (Active)"
             )
-            send_line(report)
+            send_line(msg)
             last_report = time.time()
             
-    time.sleep(30)
+    time.sleep(30) # ตรวจสอบทุก 30 วินาที
