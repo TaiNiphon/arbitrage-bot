@@ -31,7 +31,8 @@ API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET")
 LINE_ACCESS_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
-SYMBOL = os.getenv("SYMBOL", "XRP_THB").upper() # แนะนำให้ใช้ตัวพิมพ์ใหญ่
+SYMBOL = os.getenv("SYMBOL", "XRP_THB").upper()
+
 
 PROFIT_TARGET = float(os.getenv("PROFIT_TARGET", 0.0255))  
 STOP_LOSS = float(os.getenv("STOP_LOSS", 0.020))      
