@@ -21,7 +21,7 @@ LINE_ID = os.getenv("LINE_USER_ID")
 HOST = "https://api.bitkub.com"
 
 # มูลค่าพอร์ตเริ่มต้นสำหรับคำนวณกำไรสะสม
-initial_equity = 497.29 
+initial_equity = 1500.00
 
 def send_line(msg):
     if not LINE_TOKEN or not LINE_ID: return
