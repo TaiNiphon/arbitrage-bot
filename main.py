@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class BitkubBotV3:
     def __init__(self):
-        # โหลดค่าจาก Environment Variables
+        # โหลดค่าจาก Variables
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.line_token = os.getenv("LINE_ACCESS_TOKEN")
@@ -21,7 +21,7 @@ class BitkubBotV3:
         # สถานะเริ่มต้น
         self.state_file = "/tmp/bot_state_v3.json"
         self.last_action, self.avg_price, self.current_stage = self._load_state()
-        self.last_report_time = 0 # ตั้งเป็น 0 เพื่อให้รายงานทันทีที่รัน
+        self.last_report_time = 0 # ตั้งเป็น 0 เพื่อให้รายงานทันทีที่เริ่มรัน
 
     def _request(self, method, path, payload=None, private=False):
         url = f"https://api.bitkub.com{path}"
@@ -29,7 +29,7 @@ class BitkubBotV3:
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
         if private:
             try:
-                # V3 Signature Standard
+                # มาตรฐาน V3 Signature ตามประกาศ Bitkub
                 ts = requests.get("https://api.bitkub.com/api/v3/servertime", timeout=5).text.strip()
                 sig_payload = ts + method + path + body_str
                 sig = hmac.new(self.api_secret.encode('utf-8'), sig_payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -56,6 +56,7 @@ class BitkubBotV3:
     def get_wallet(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res.get('error') == 0:
+            # แยกชื่อเหรียญ เช่น THB_XRP -> XRP
             coin = self.symbol.split('_')[1] if '_' in self.symbol else "XRP"
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
@@ -72,14 +73,16 @@ class BitkubBotV3:
         total_equity = thb_bal + (coin_bal * price)
         all_time_growth = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         
+        # หน้าตารายงานแบบละเอียด
+        ema_status = f"{ema_val:,.2f}" if ema_val > 0 else "Calculating..."
         report = (
             "📊 [PORTFOLIO INSIGHT]\n"
             "━━━━━━━━━━━━━━━\n"
-            f"💰 Price: {price:,.2f} THB\n"
-            f"📈 EMA(50): {ema_val:,.2f}\n"
-            f"🕒 Time: {datetime.now().strftime('%d/%m %H:%M')}\n"
+            f"💰 Market: {self.symbol}: {price:,.2f}\n"
+            f"📈 EMA(50): {ema_status}\n"
+            f"🕒 Time: {datetime.now().strftime('%H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
-            f"📦 Stage: {self.current_stage}/2 | {self.last_action.upper()}\n"
+            f"📦 Position: Stage {self.current_stage}/2\n"
             f"📉 Avg Cost: {self.avg_price:,.2f}\n"
             f"✨ Current P/L: {pnl:+.2f}%\n"
             "━━━━━━━━━━━━━━━\n"
@@ -89,70 +92,80 @@ class BitkubBotV3:
             "━━━━━━━━━━━━━━━"
         )
         self.notify(report)
-        logger.info(f"Report Sent: {price:,.2f} | Growth: {all_time_growth:+.2f}%")
+        logger.info(f"Report Sent - Equity: {total_equity:,.2f}")
 
     def run(self):
         logger.info(f"🚀 Bot V3 Started - Symbol: {self.symbol}")
+        self.notify(f"🤖 Bot Online | Full Report Active\nSymbol: {self.symbol}")
+        
         while True:
             try:
-                # --- Step 1: ดึงราคาแบบรองรับ V3 Ticker List ---
+                # 1. ดึงราคา (รองรับ V3 List)
                 ticker_res = self._request("GET", "/api/v3/market/ticker")
                 price = 0
                 if isinstance(ticker_res, list):
                     for item in ticker_res:
-                        if item.get('symbol').upper() in [self.symbol, "_".join(self.symbol.split("_")[::-1])]:
+                        if item.get('symbol').upper() in [self.symbol, "XRP_THB", "THB_XRP"]:
                             price = float(item.get('last', 0))
                             break
                 elif isinstance(ticker_res, dict):
                     price = float(ticker_res.get(self.symbol, {}).get('last', 0))
 
                 if price == 0:
-                    logger.warning(f"⚠️ Price not found for {self.symbol}. Retrying..."); time.sleep(30); continue
+                    logger.warning(f"⚠️ Price not found for {self.symbol}"); time.sleep(30); continue
 
-                # --- Step 2: ดึงข้อมูล EMA จาก TradingView ---
-                hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}")
+                # 2. ดึงข้อมูล EMA (ขยายเป็น 2 วัน เพื่อแก้ปัญหาสัญญาณไม่พอ)
+                hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 closes = hist.get('c', [])
-                if len(closes) < 50:
-                    logger.warning("⚠️ Insufficient data for EMA"); time.sleep(30); continue
-                ema_val = sum(closes[-50:]) / 50 
+                
+                ema_val = 0
+                if len(closes) >= 50:
+                    ema_val = sum(closes[-50:]) / 50
+                else:
+                    logger.warning(f"⚠️ Insufficient data ({len(closes)}/50). EMA logic paused.")
 
-                # --- Step 3: คำนวณ P/L ---
+                # 3. คำนวณ P/L
                 pnl = ((price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- Step 4: รายงานผล (ทันทีที่รัน และทุก 1 ชม.) ---
+                # 4. ส่งรายงานทุก 1 ชม. (หรือทันทีที่รัน)
                 if time.time() - self.last_report_time >= 3600:
                     self.send_detailed_report(price, ema_val, pnl)
                     self.last_report_time = time.time()
 
-                # --- Step 5: ตรรกะการซื้อ (2 ไม้) ---
-                if price > ema_val:
-                    thb, _ = self.get_wallet()
-                    if self.current_stage == 0 and thb > 50:
-                        res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.48, "typ": "market"}, private=True)
-                        if res.get('error') == 0:
-                            self.avg_price, self.current_stage, self.last_action = price, 1, "buy"
-                            self._save_state(); self.notify(f"🟢 [BUY 1/2] Price: {price:,.2f}")
-                    elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
-                        res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.95, "typ": "market"}, private=True)
-                        if res.get('error') == 0:
-                            self.avg_price = (self.avg_price + price) / 2
-                            self.current_stage = 2
-                            self._save_state(); self.notify(f"🟢 [BUY 2/2] Price: {price:,.2f}")
-
-                # --- Step 6: ตรรกะการขาย (Stop Loss หรือ Trend เปลี่ยน) ---
-                if self.last_action == "buy":
-                    if pnl <= -self.stop_loss or price < (ema_val * 0.997):
-                        _, coin = self.get_wallet()
-                        if coin > 0.01:
-                            res = self._request("POST", "/api/v3/market/place-ask", {"sym": self.symbol, "amt": coin, "typ": "market"}, private=True)
+                # 5. ตรรกะซื้อขาย (จะทำงานเมื่อมีค่า EMA เท่านั้น)
+                if ema_val > 0:
+                    # เงื่อนไขการซื้อ
+                    if price > ema_val:
+                        thb, _ = self.get_wallet()
+                        if self.current_stage == 0 and thb > 50:
+                            res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.48, "typ": "market"}, private=True)
                             if res.get('error') == 0:
-                                self.notify(f"🔴 [SELL ALL] P/L: {pnl:+.2f}% | Price: {price:,.2f}")
-                                self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
-                                self._save_state()
+                                self.avg_price, self.current_stage, self.last_action = price, 1, "buy"
+                                self._save_state(); self.notify(f"🟢 [BUY 1/2] Price: {price:,.2f}")
+                        elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
+                            res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.95, "typ": "market"}, private=True)
+                            if res.get('error') == 0:
+                                self.avg_price = (self.avg_price + price) / 2
+                                self.current_stage = 2
+                                self._save_state(); self.notify(f"🟢 [BUY 2/2] Price: {price:,.2f}")
 
-            except Exception as e: logger.error(f"❌ Main Loop Error: {e}")
+                    # เงื่อนไขการขาย
+                    if self.last_action == "buy":
+                        if pnl <= -self.stop_loss or price < (ema_val * 0.997):
+                            _, coin = self.get_wallet()
+                            if coin > 0.01:
+                                res = self._request("POST", "/api/v3/market/place-ask", {"sym": self.symbol, "amt": coin, "typ": "market"}, private=True)
+                                if res.get('error') == 0:
+                                    self.notify(f"🔴 [SELL ALL] P/L: {pnl:+.2f}% | Price: {price:,.2f}")
+                                    self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
+                                    self._save_state()
+
+            except Exception as e: 
+                logger.error(f"❌ Main Loop Error: {e}")
+            
             time.sleep(30)
 
+# --- Server สำหรับ Railway ---
 def start_server():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
