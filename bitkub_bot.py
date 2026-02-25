@@ -137,7 +137,8 @@ while True:
             if price > ema_val and last_action == "sell":
                 thb_bal, _ = get_wallet()
                 if current_stage == 0 and thb_bal > 15:
-                    res = place_order("buy", thb_bal * 0.95) # เผื่อค่าธรรมเนียม
+                    res = place_order("buy", thb_bal * 0.50) # ซื้อแค่ 50% ของเงินสดที่มี
+
                     if res.get('error') == 0:
                         avg_price, current_stage, last_action = price, 1, "buy"
                         save_state(last_action, avg_price, current_stage)
