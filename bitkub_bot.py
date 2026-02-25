@@ -6,14 +6,14 @@ def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot Trading Pro - Stage & Persistence Active")
+            self.wfile.write(b"Bot Trading Pro - Active")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- 2. ตั้งค่าตัวแปรและระบบฐานข้อมูลไฟล์ ---
+# --- 2. ตั้งค่าตัวแปร (ตรวจสอบชื่อให้ตรงกับ Railway) ---
 API_KEY = os.getenv("BITKUB_KEY")
 API_SECRET = os.getenv("BITKUB_SECRET")
 LINE_TOKEN = os.getenv("LINE_ACCESS_TOKEN")
@@ -47,7 +47,7 @@ def send_line(msg):
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
     except: pass
 
-# --- 3. ฟังก์ชัน API Bitkub (ปรับปรุงตาม buy.py) ---
+# --- 3. ฟังก์ชัน API Bitkub (ปรับปรุงตาม buy.py ที่รันผ่าน) ---
 def get_signature(ts, method, path, body_str):
     payload = ts + method + path + body_str
     return hmac.new(API_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -66,33 +66,41 @@ def get_wallet():
     return 0.0, 0.0
 
 def place_order(side, amount):
-    # ปรับปรุง: ใช้ xrp_thb ตัวเล็ก และปัดเศษจำนวนเงินเป็นจำนวนเต็มตาม buy.py
+    # ปรับปรุง: ใช้ xrp_thb ตัวเล็ก และปัดเศษจำนวนเงินตามตัวอย่างที่รันผ่าน
     path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
     try:
         ts = requests.get(f"{HOST}/api/v3/servertime").text.strip()
+        
+        # คัดลอกโครงสร้างจาก buy.py
         body = {
             "sym": "xrp_thb", 
-            "amt": int(amount), # ใช้จำนวนเงินเต็มหน่วย
+            "amt": int(amount), # ปรับเป็นจำนวนเต็ม
             "typ": "market"
         }
+        
         body_str = json.dumps(body, separators=(',', ':'))
         sig = get_signature(ts, "POST", path, body_str)
         headers = {'Accept': 'application/json','Content-Type': 'application/json','X-BTK-APIKEY': API_KEY,'X-BTK-TIMESTAMP': ts,'X-BTK-SIGN': sig}
         res = requests.post(f"{HOST}{path}", headers=headers, data=body_str, timeout=10).json()
-        print(f"Order Result: {res}") # พิมพ์ลง Logs เพื่อตรวจสอบ
+        
+        # เพิ่มการแสดงผลใน Logs เพื่อ Debug
+        print(f"DEBUG: {side.upper()} Result -> {res}")
         return res
     except Exception as e:
-        print(f"Place Order Error: {e}")
+        print(f"DEBUG: Order Error -> {e}")
         return {"error": 999}
 
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        t_res = requests.get(f"{HOST}/api/v3/market/ticker", headers=headers, timeout=10).json()
+        # ใช้ XRP_THB ตัวพิมพ์ใหญ่สำหรับการดึงข้อมูล Ticker
+        t_res = requests.get(f"{HOST}/api/v3/market/ticker?sym=XRP_THB", headers=headers, timeout=10).json()
         price = next((float(i['last']) for i in t_res if i['symbol'] == "XRP_THB"), 0)
+        
         c_url = f"{HOST}/tradingview/history?symbol=XRP_THB&resolution=15&from={int(time.time()) - 86400}&to={int(time.time())}"
         c_res = requests.get(c_url, headers=headers, timeout=10).json()
         data_c = c_res.get('c', [])
+        
         if price > 0 and len(data_c) >= 50:
             ema = data_c[0]
             m = 2 / (50 + 1)
@@ -103,7 +111,7 @@ def get_market_data():
 
 # --- 4. ลูปการทำงาน ---
 last_report_time = 0
-send_line(f"🤖 [Bot Ready]\nสถานะ: {last_action}\nถือ: {current_stage}/2 ไม้\nทุน: {avg_price if avg_price > 0 else '-'}")
+send_line(f"🤖 [Bot Ready]\nสถานะ: {last_action}\nถือ: {current_stage}/2 ไม้")
 
 while True:
     try:
@@ -128,7 +136,6 @@ while True:
                 elif current_stage == 1 and pnl >= 0.5 and thb_bal > 10:
                     res = place_order("buy", thb_bal)
                     if res.get('error') == 0:
-                        # คำนวณทุนเฉลี่ยใหม่โดยประมาณ
                         avg_price = (avg_price + price) / 2
                         current_stage = 2
                         save_state(last_action, avg_price, current_stage)
@@ -137,7 +144,7 @@ while True:
             # --- ขาย (TP, SL, Trend Change) ---
             if last_action == "buy":
                 reason = ""
-                if price < (ema_val * 0.998): # เผื่อระยะเล็กน้อยให้ EMA ไม่สะบัดหลุดง่ายเกินไป
+                if price < (ema_val * 0.999): # เผื่อช่องว่างนิดเดียวกันสะบัด
                     reason = "Trend Change (EMA)"
                 elif pnl >= TARGET_PROFIT: reason = f"Take Profit ({pnl:+.2f}%)"
                 elif pnl <= -STOP_LOSS: reason = f"Stop Loss ({pnl:+.2f}%)"
@@ -145,9 +152,10 @@ while True:
                 if reason:
                     _, xrp_bal = get_wallet()
                     if xrp_bal > 0.1:
+                        # สำหรับการขาย (Ask) API V3 จะรับค่าจำนวนเหรียญเป็น Float ได้ปกติครับ
                         res = place_order("sell", xrp_bal)
                         if res.get('error') == 0:
-                            send_line(f"🔴 [SELL ALL SUCCESS]\nเหตุผล: {reason}\nราคาขาย: {price:,.2f}\nกำไรรวม: {pnl:+.2f}%")
+                            send_line(f"🔴 [SELL ALL SUCCESS]\nเหตุผล: {reason}\nราคา: {price:,.2f}\nกำไร: {pnl:+.2f}%")
                             last_action, avg_price, current_stage = "sell", 0.0, 0
                             save_state(last_action, avg_price, current_stage)
 
@@ -157,15 +165,13 @@ while True:
                 total_equity = thb_bal + (xrp_bal * price)
                 total_profit = ((total_equity - initial_equity) / initial_equity) * 100
                 report = (
-                    "📊 [Full Portfolio Report]\n━━━━━━━━━━━━━━━\n"
+                    "📊 [Report]\n"
                     f"💰 ราคา: {price:,.2f} | EMA: {ema_val:,.2f}\n"
-                    f"🧭 เทรนด์: {trend_icon}\n━━━━━━━━━━━━━━━\n"
+                    f"🧭 เทรนด์: {trend_icon}\n"
                     f"📦 สถานะ: ถือ {current_stage}/2 ไม้\n"
-                    f"📉 ต้นทุนเฉลี่ย: {avg_price:,.2f}\n"
-                    f"✨ P/L ปัจจุบัน: {pnl:+.2f}%\n━━━━━━━━━━━━━━━\n"
+                    f"✨ P/L: {pnl:+.2f}%\n"
                     f"🏦 พอร์ต: {total_equity:,.2f} THB\n"
-                    f"📈 กำไรสะสม: {total_profit:+.2f}%\n━━━━━━━━━━━━━━━\n"
-                    f"💵 เงินสด: {thb_bal:,.2f} | 💎 เหรียญ: {xrp_bal:,.4f}"
+                    f"💵 เงินสด: {thb_bal:,.2f}"
                 )
                 send_line(report)
                 last_report_time = time.time()
