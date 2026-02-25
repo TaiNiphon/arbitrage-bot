@@ -8,28 +8,22 @@ logger = logging.getLogger(__name__)
 
 class BitkubBot:
     def __init__(self):
-        # API Config (ดึงจาก Environment Variables บน Railway)
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.line_token = os.getenv("LINE_ACCESS_TOKEN")
         self.line_id = os.getenv("LINE_USER_ID")
         self.host = "https://api.bitkub.com"
-        
-        # Strategy Config
+
         self.symbol = os.getenv("SYMBOL", "XRP_THB")
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1500.00))
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
-        
-        # State Management (Railway /tmp is ephemeral, but works during runtime)
+
         self.state_file = "/tmp/bot_state_v3.json"
-        
-        # Internal State
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
         self.last_report_time = 0
 
-    # --- 1. Security & API Core ---
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
         return hmac.new(self.api_secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -38,7 +32,7 @@ class BitkubBot:
         url = f"{self.host}{path}"
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
-        
+
         if private:
             try:
                 ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
@@ -56,7 +50,6 @@ class BitkubBot:
             logger.error(f"API Error: {e}")
             return {"error": 999}
 
-    # --- 2. Advanced Mathematical Logic ---
     def calculate_ema(self, prices, period=50):
         if len(prices) < period: return None
         k = 2 / (period + 1)
@@ -86,7 +79,6 @@ class BitkubBot:
             except: pass
         return "sell", 0.0, 0, 0.0, 0.0
 
-    # --- 3. Trading & Portfolio ---
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res.get('error') == 0:
@@ -99,7 +91,6 @@ class BitkubBot:
         payload = {"sym": self.symbol, "amt": amount, "typ": "market"}
         return self._request("POST", path, payload, private=True)
 
-    # --- 4. Professional Reporting ---
     def notify(self, msg):
         if not self.line_token: logger.info(msg); return
         try:
@@ -113,7 +104,7 @@ class BitkubBot:
         total_equity = thb_bal + (coin_bal * price)
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
-        
+
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
         report = (
@@ -135,25 +126,29 @@ class BitkubBot:
         )
         self.notify(report)
 
-    # --- 5. Main Logic ---
     def run(self):
         self.notify(f"🚀 Bot Ultimate Edition Started\nSymbol: {self.symbol}\nCapital: {self.initial_equity} THB")
-        
+
         while True:
             try:
-                # Get Ticker
-                ticker_res = self._request("GET", "/api/v3/market/ticker") # ดึงมาทั้งหมด
-# ค้นหาค่า 'last' เฉพาะของ Symbol ที่เราตั้งไว้
-current_price = 0
-for symbol_data in ticker_res:
-    if symbol_data['symbol'] == self.symbol:
-        current_price = float(symbol_data['last'])
-        break
-      
+                # Get Price (FIXED: Improved Search Logic)
+                ticker_res = self._request("GET", "/api/v3/market/ticker")
+                current_price = 0
+                if isinstance(ticker_res, list):
+                    for symbol_data in ticker_res:
+                        if symbol_data.get('symbol') == self.symbol:
+                            current_price = float(symbol_data.get('last', 0))
+                            break
+                
+                if current_price == 0:
+                    logger.warning("Waiting for valid price...")
+                    time.sleep(10)
+                    continue
+
                 # Get History for EMA
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
-                
+
                 if not ema_val:
                     time.sleep(30); continue
 
@@ -201,7 +196,6 @@ for symbol_data in ticker_res:
                                 self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                                 self._save_state()
 
-                # Report ทุก 3 ชม.
                 if time.time() - self.last_report_time >= 10800:
                     self.send_detailed_report(current_price, ema_val, pnl)
                     self.last_report_time = time.time()
@@ -209,7 +203,6 @@ for symbol_data in ticker_res:
             except Exception as e: logger.error(f"Loop Error: {e}")
             time.sleep(30)
 
-# --- Railway Health Check ---
 def run_health_check():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
