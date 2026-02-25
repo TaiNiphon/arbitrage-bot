@@ -21,16 +21,18 @@ class BitkubBot:
         
         self.state_file = "/tmp/bot_state_final.json"
         self.last_action, self.avg_price, self.current_stage = self._load_state()
-        self.last_report_time = 0
+        self.last_report_time = 0 # ตั้งเป็น 0 เพื่อให้ส่งรายงานทันทีที่รัน
 
     def _request(self, method, path, payload=None, private=False):
         url = f"https://api.bitkub.com{path}"
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
         if private:
-            ts = requests.get("https://api.bitkub.com/api/v3/servertime").text.strip()
-            sig = hmac.new(self.api_secret.encode('utf-8'), (ts + method + path + body_str).encode('utf-8'), hashlib.sha256).hexdigest()
-            headers.update({'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig})
+            try:
+                ts = requests.get("https://api.bitkub.com/api/v3/servertime", timeout=5).text.strip()
+                sig = hmac.new(self.api_secret.encode('utf-8'), (ts + method + path + body_str).encode('utf-8'), hashlib.sha256).hexdigest()
+                headers.update({'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig})
+            except: return {"error": 999}
         try:
             return requests.request(method, url, headers=headers, data=body_str, timeout=10).json()
         except: return {"error": 999}
@@ -51,7 +53,7 @@ class BitkubBot:
     def get_wallet(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res.get('error') == 0:
-            coin = self.symbol.split('_')[1]
+            coin = self.symbol.split('_')[1] if '_' in self.symbol else "XRP"
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
@@ -59,7 +61,8 @@ class BitkubBot:
         if not self.line_token: return
         headers = {"Authorization": f"Bearer {self.line_token}", "Content-Type": "application/json"}
         payload = {"to": self.line_id, "messages": [{"type": "text", "text": msg}]}
-        requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=5)
+        try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=5)
+        except: logger.error("Line notification failed")
 
     def send_full_report(self, price, ema_val, pnl):
         thb_bal, coin_bal = self.get_wallet()
@@ -82,26 +85,34 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify("🤖 Bot Online | Full Report Active")
+        logger.info("🤖 Bot Starting...")
         while True:
             try:
-                # แก้ไขการดึงราคาให้แม่นยำขึ้น
+                # --- แก้ไขการดึงราคาให้รองรับทั้ง List และ Dict (Fix List Object Error) ---
                 ticker = self._request("GET", "/api/v3/market/ticker")
-                price = float(ticker.get(self.symbol, {}).get('last', 0))
-                if price == 0: # ป้องกันกรณี Symbol สลับด้าน
-                    alt_sym = "_".join(self.symbol.split("_")[::-1])
-                    price = float(ticker.get(alt_sym, {}).get('last', 0))
+                price = 0
+                if isinstance(ticker, dict):
+                    price = float(ticker.get(self.symbol, {}).get('last', 0))
+                elif isinstance(ticker, list):
+                    for item in ticker:
+                        if item.get('symbol') == self.symbol or item.get('symbol') == "_".join(self.symbol.split("_")[::-1]):
+                            price = float(item.get('last', 0))
+                            break
 
                 if price == 0:
-                    logger.warning(f"Could not find price for {self.symbol}"); time.sleep(20); continue
+                    logger.warning(f"Price for {self.symbol} not found. Retrying..."); time.sleep(20); continue
 
                 # ดึง EMA
                 hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}")
                 ema_val = sum(hist.get('c', [])[-50:]) / 50 if len(hist.get('c', [])) >= 50 else 0
-
                 if ema_val == 0: time.sleep(20); continue
 
                 pnl = ((price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
+
+                # --- ส่งรายงานทันทีและทุก 1 ชม. ---
+                if time.time() - self.last_report_time >= 3600:
+                    self.send_full_report(price, ema_val, pnl)
+                    self.last_report_time = time.time()
 
                 # --- กลยุทธ์การซื้อ (2 ไม้) ---
                 if price > ema_val:
@@ -129,17 +140,12 @@ class BitkubBot:
                                 self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
                                 self._save_state()
 
-                # รายงานพอร์ตทุก 1 ชั่วโมง
-                if time.time() - self.last_report_time >= 3600:
-                    self.send_full_report(price, ema_val, pnl)
-                    self.last_report_time = time.time()
-
-            except Exception as e: logger.error(f"Error: {e}")
+            except Exception as e: logger.error(f"Main Loop Error: {e}")
             time.sleep(30)
 
 def start_server():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Active")
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
     HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
 
 if __name__ == "__main__":
