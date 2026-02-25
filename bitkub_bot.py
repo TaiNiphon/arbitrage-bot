@@ -6,7 +6,7 @@ def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers()
-            self.wfile.write(b"Bot Trading Pro - Multi-Stage & Persistence Active")
+            self.wfile.write(b"Bot Trading Pro - Stage & Persistence Active")
         def log_message(self, *args): return
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
@@ -23,7 +23,7 @@ HOST = "https://api.bitkub.com"
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
 STOP_LOSS = float(os.getenv("STOP_LOSS_PCT", 2.0))
 STATE_FILE = "bot_state.json"
-initial_equity = 1500.00 # ทุนเริ่มต้น
+initial_equity = 1500.00 
 
 def save_state(action, buy_price, stage):
     with open(STATE_FILE, "w") as f:
@@ -47,7 +47,7 @@ def send_line(msg):
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
     except: pass
 
-# --- 3. ฟังก์ชัน API Bitkub ---
+# --- 3. ฟังก์ชัน API Bitkub (ปรับปรุงตาม buy.py) ---
 def get_signature(ts, method, path, body_str):
     payload = ts + method + path + body_str
     return hmac.new(API_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -66,16 +66,24 @@ def get_wallet():
     return 0.0, 0.0
 
 def place_order(side, amount):
+    # ปรับปรุง: ใช้ xrp_thb ตัวเล็ก และปัดเศษจำนวนเงินเป็นจำนวนเต็มตาม buy.py
     path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
     try:
         ts = requests.get(f"{HOST}/api/v3/servertime").text.strip()
-        body = {"sym": "THB_XRP", "amt": amount, "typ": "market"}
+        body = {
+            "sym": "xrp_thb", 
+            "amt": int(amount), # ใช้จำนวนเงินเต็มหน่วย
+            "typ": "market"
+        }
         body_str = json.dumps(body, separators=(',', ':'))
         sig = get_signature(ts, "POST", path, body_str)
         headers = {'Accept': 'application/json','Content-Type': 'application/json','X-BTK-APIKEY': API_KEY,'X-BTK-TIMESTAMP': ts,'X-BTK-SIGN': sig}
         res = requests.post(f"{HOST}{path}", headers=headers, data=body_str, timeout=10).json()
+        print(f"Order Result: {res}") # พิมพ์ลง Logs เพื่อตรวจสอบ
         return res
-    except: return {"error": 999}
+    except Exception as e:
+        print(f"Place Order Error: {e}")
+        return {"error": 999}
 
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -95,7 +103,7 @@ def get_market_data():
 
 # --- 4. ลูปการทำงาน ---
 last_report_time = 0
-send_line(f"🤖 [Bot Ready]\nสถานะ: {last_action}\nไม้ที่ถือ: {current_stage}/2\nต้นทุนเฉลี่ย: {avg_price if avg_price > 0 else '-'}")
+send_line(f"🤖 [Bot Ready]\nสถานะ: {last_action}\nถือ: {current_stage}/2 ไม้\nทุน: {avg_price if avg_price > 0 else '-'}")
 
 while True:
     try:
@@ -104,10 +112,9 @@ while True:
             trend_icon = "🟢 ขาขึ้น" if price > ema_val else "🔴 ขาลง"
             pnl = ((price - avg_price) / avg_price * 100) if avg_price > 0 else 0.0
 
-            # --- ตรรกะซื้อ (ไม้ 1 และ ไม้ 2) ---
+            # --- ซื้อไม้ 1 และ 2 ---
             if price > ema_val:
                 thb_bal, _ = get_wallet()
-                # ซื้อไม้ 1 (ใช้เงิน 50% ของที่มี)
                 if current_stage == 0 and thb_bal > 20:
                     buy_amt = thb_bal * 0.5
                     res = place_order("buy", buy_amt)
@@ -117,20 +124,21 @@ while True:
                         last_action = "buy"
                         save_state(last_action, avg_price, current_stage)
                         send_line(f"📦 [BUY ไม้ 1/2]\nราคา: {price:,.2f}\nทุนเฉลี่ย: {avg_price:,.2f}")
-                
-                # ซื้อไม้ 2 (เมื่อราคาขึ้นจากไม้แรก 0.5% เพื่อยืนยันเทรนด์)
+
                 elif current_stage == 1 and pnl >= 0.5 and thb_bal > 10:
-                    res = place_order("buy", thb_bal) # ซื้อที่เหลือทั้งหมด
+                    res = place_order("buy", thb_bal)
                     if res.get('error') == 0:
-                        avg_price = (avg_price + price) / 2 # คิดทุนเฉลี่ยคร่าวๆ
+                        # คำนวณทุนเฉลี่ยใหม่โดยประมาณ
+                        avg_price = (avg_price + price) / 2
                         current_stage = 2
                         save_state(last_action, avg_price, current_stage)
-                        send_line(f"📦 [BUY ไม้ 2/2]\nราคา: {price:,.2f}\nทุนเฉลี่ยใหม่: {avg_price:,.2f}")
+                        send_line(f"📦 [BUY ไม้ 2/2]\nราคา: {price:,.2f}\nทุนใหม่: {avg_price:,.2f}")
 
-            # --- ตรรกะขาย (TP, SL, Trend Change) ---
+            # --- ขาย (TP, SL, Trend Change) ---
             if last_action == "buy":
                 reason = ""
-                if price < ema_val: reason = "Trend Change (EMA)"
+                if price < (ema_val * 0.998): # เผื่อระยะเล็กน้อยให้ EMA ไม่สะบัดหลุดง่ายเกินไป
+                    reason = "Trend Change (EMA)"
                 elif pnl >= TARGET_PROFIT: reason = f"Take Profit ({pnl:+.2f}%)"
                 elif pnl <= -STOP_LOSS: reason = f"Stop Loss ({pnl:+.2f}%)"
 
@@ -139,7 +147,7 @@ while True:
                     if xrp_bal > 0.1:
                         res = place_order("sell", xrp_bal)
                         if res.get('error') == 0:
-                            send_line(f"🔴 [SELL ALL SUCCESS]\nเหตุผล: {reason}\nราคาขาย: {price:,.2f}\nกำไรรวมไม้: {pnl:+.2f}%")
+                            send_line(f"🔴 [SELL ALL SUCCESS]\nเหตุผล: {reason}\nราคาขาย: {price:,.2f}\nกำไรรวม: {pnl:+.2f}%")
                             last_action, avg_price, current_stage = "sell", 0.0, 0
                             save_state(last_action, avg_price, current_stage)
 
