@@ -79,15 +79,35 @@ def place_order(side, amount):
     path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
     try:
         ts = get_server_time()
-        # เปลี่ยน sym เป็น XRP_THB ให้ตรง Market API
-        body = {"sym": "XRP_THB", "amt": amount, "typ": "market"}
+        
+        # 1. ต้องดึงราคาล่าสุดมาเพื่อใส่ในค่า 'rat' ตามเงื่อนไข Error 10
+        ticker_res = requests.get(f"{HOST}/api/v3/market/ticker").json()
+        current_rat = next((float(i['last']) for i in ticker_res if i['symbol'] == "XRP_THB"), 0)
+
+        # 2. เพิ่ม "rat": current_rat เข้าไปใน body
+        body = {
+            "sym": "XRP_THB", 
+            "amt": amount, 
+            "typ": "market",
+            "rat": current_rat  # เพิ่มบรรทัดนี้ครับ
+        }
+        
         body_str = json.dumps(body, separators=(',', ':'))
         sig = get_signature(ts, "POST", path, body_str)
-        headers = {'Accept': 'application/json','Content-Type': 'application/json','X-BTK-APIKEY': API_KEY,'X-BTK-TIMESTAMP': ts,'X-BTK-SIGN': sig}
+        headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-BTK-APIKEY': API_KEY,
+            'X-BTK-TIMESTAMP': ts,
+            'X-BTK-SIGN': sig
+        }
         res = requests.post(f"{HOST}{path}", headers=headers, data=body_str, timeout=10).json()
-        print(f"Order Result ({side}): {res}") # เพิ่ม Log เพื่อดู Error ใน Railway
+        print(f"✅ Order Attempt ({side}): {res}")
         return res
-    except Exception as e: return {"error": 999, "msg": str(e)}
+    except Exception as e: 
+        print(f"❌ Order Exception: {e}")
+        return {"error": 999}
+
 
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
