@@ -142,9 +142,14 @@ class BitkubBot:
         while True:
             try:
                 # Get Ticker
-                ticker = self._request("GET", f"/api/v3/market/ticker?symbol={self.symbol}")
-                current_price = float(ticker[0]['last'])
-                
+                ticker_res = self._request("GET", "/api/v3/market/ticker") # ดึงมาทั้งหมด
+# ค้นหาค่า 'last' เฉพาะของ Symbol ที่เราตั้งไว้
+current_price = 0
+for symbol_data in ticker_res:
+    if symbol_data['symbol'] == self.symbol:
+        current_price = float(symbol_data['last'])
+        break
+      
                 # Get History for EMA
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
