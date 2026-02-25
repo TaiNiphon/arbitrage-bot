@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- 1. ระบบรักษาการเชื่อมต่อ ---
+# --- 1. ระบบรักษาการเชื่อมต่อ (Railway Health Check) ---
 def run_dummy_server():
     class HealthCheckHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -22,7 +22,7 @@ HOST = "https://api.bitkub.com"
 
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
 STOP_LOSS = float(os.getenv("STOP_LOSS_PCT", 2.0))
-STATE_FILE = "/tmp/bot_state.json" # ใช้ /tmp สำหรับ Railway ephemeral
+STATE_FILE = "/tmp/bot_state.json" 
 initial_equity = 1500.00
 
 def save_state(action, buy_price, stage):
@@ -49,14 +49,12 @@ def send_line(msg):
     try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
     except: print("Line Error")
 
-# --- 3. ฟังก์ชัน API มาตรฐาน V4 (Timestamp ms & V4 Signature) ---
+# --- 3. ฟังก์ชัน API มาตรฐาน V4 ---
 def get_server_time():
-    # ดึงเวลาเซิร์ฟเวอร์และแปลงเป็น Milliseconds
     res = requests.get(f"{HOST}/api/v3/servertime")
     return res.text.strip()
 
 def get_signature(ts, method, path, body_str):
-    # รูปแบบ V4: TIMESTAMP + METHOD + PATH + JSON_BODY
     payload = ts + method + path + body_str
     return hmac.new(API_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
 
@@ -70,8 +68,6 @@ def get_wallet():
         res = requests.post(f"{HOST}{path}", headers=headers, data=body_str, timeout=10).json()
         if res.get('error') == 0:
             return float(res['result'].get('THB', 0)), float(res['result'].get('XRP', 0))
-        else:
-            print(f"Wallet Error: {res}")
     except Exception as e: print(f"Wallet Exception: {e}")
     return 0.0, 0.0
 
@@ -79,35 +75,19 @@ def place_order(side, amount):
     path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
     try:
         ts = get_server_time()
-        
-        # 1. ต้องดึงราคาล่าสุดมาเพื่อใส่ในค่า 'rat' ตามเงื่อนไข Error 10
         ticker_res = requests.get(f"{HOST}/api/v3/market/ticker").json()
         current_rat = next((float(i['last']) for i in ticker_res if i['symbol'] == "XRP_THB"), 0)
 
-        # 2. เพิ่ม "rat": current_rat เข้าไปใน body
-        body = {
-            "sym": "XRP_THB", 
-            "amt": amount, 
-            "typ": "market",
-            "rat": current_rat  # เพิ่มบรรทัดนี้ครับ
-        }
-        
+        body = {"sym": "XRP_THB", "amt": amount, "typ": "market", "rat": current_rat}
         body_str = json.dumps(body, separators=(',', ':'))
         sig = get_signature(ts, "POST", path, body_str)
-        headers = {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'X-BTK-APIKEY': API_KEY,
-            'X-BTK-TIMESTAMP': ts,
-            'X-BTK-SIGN': sig
-        }
+        headers = {'Accept': 'application/json','Content-Type': 'application/json','X-BTK-APIKEY': API_KEY,'X-BTK-TIMESTAMP': ts,'X-BTK-SIGN': sig}
         res = requests.post(f"{HOST}{path}", headers=headers, data=body_str, timeout=10).json()
         print(f"✅ Order Attempt ({side}): {res}")
         return res
     except Exception as e: 
         print(f"❌ Order Exception: {e}")
         return {"error": 999}
-
 
 def get_market_data():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -118,13 +98,13 @@ def get_market_data():
         c_res = requests.get(c_url, headers=headers, timeout=10).json()
         data_c = c_res.get('c', [])
         if price > 0 and len(data_c) >= 50:
-            ema = sum(data_c[-50:]) / 50 # Simple EMA/SMA เพื่อความแม่นยำพื้นฐาน
+            ema = sum(data_c[-50:]) / 50 
             return price, ema
     except: pass
     return None, None
 
 # --- 4. Main Loop ---
-send_line("🤖 Bot Started & V4 Updated")
+send_line("🤖 Bot Started | All-in Mode | StopLoss Active")
 last_report_time = 0
 
 while True:
@@ -132,31 +112,37 @@ while True:
         price, ema_val = get_market_data()
         if price and ema_val:
             pnl = ((price - avg_price) / avg_price * 100) if avg_price > 0 else 0.0
-            
-            # --- BUY LOGIC ---
+
+            # --- BUY LOGIC (All-in ไม่แบ่งไม้) ---
             if price > ema_val and last_action == "sell":
                 thb_bal, _ = get_wallet()
-                if current_stage == 0 and thb_bal > 15:
-                    res = place_order("buy", thb_bal * 0.50) # ซื้อแค่ 50% ของเงินสดที่มี
-
+                if thb_bal > 15:
+                    buy_amt = thb_bal * 0.95 # ใช้เงินทั้งหมด 95% ในครั้งเดียว
+                    res = place_order("buy", buy_amt)
                     if res.get('error') == 0:
                         avg_price, current_stage, last_action = price, 1, "buy"
                         save_state(last_action, avg_price, current_stage)
-                        send_line(f"🟢 BUY SUCCESS\nราคา: {price}")
+                        send_line(f"🟢 BUY ALL-IN SUCCESS\nราคา: {price}")
 
-            # --- SELL LOGIC ---
+            # --- SELL LOGIC (TP, SL, Trend) ---
             if last_action == "buy":
                 reason = ""
-                if price < ema_val: reason = "Trend Down"
-                elif pnl >= TARGET_PROFIT: reason = "Take Profit"
-                elif pnl <= -STOP_LOSS: reason = "Stop Loss"
+                # ให้ราคาต่ำกว่า EMA อย่างน้อย 0.3% ถึงจะถือว่าเป็นขาลงจริง (ลดการตกใจขาย)
+                trend_confirm = ema_val * 0.997 
+
+                if pnl <= -STOP_LOSS: 
+                    reason = f"Stop Loss ({pnl:.2f}%)"
+                elif pnl >= TARGET_PROFIT: 
+                    reason = f"Take Profit ({pnl:.2f}%)"
+                elif price < trend_confirm: 
+                    reason = "Trend Down (EMA Confirmed)"
 
                 if reason:
                     _, xrp_bal = get_wallet()
                     if xrp_bal > 0.1:
                         res = place_order("sell", xrp_bal)
                         if res.get('error') == 0:
-                            send_line(f"🔴 SELL SUCCESS\nเหตุผล: {reason}\nกำไร: {pnl:.2f}%")
+                            send_line(f"🔴 SELL SUCCESS\nเหตุผล: {reason}\nกำไร/ขาดทุน: {pnl:.2f}%")
                             last_action, avg_price, current_stage = "sell", 0.0, 0
                             save_state(last_action, avg_price, current_stage)
 
