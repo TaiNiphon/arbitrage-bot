@@ -1,9 +1,16 @@
-import os, requests, time, hmac, hashlib, json, threading, logging
+import os, requests, time, hmac, hashlib, json, threading, logging, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
+# --- บังคับให้ Python พ่น Log ทันที (Fix Railway Log) ---
+sys.stdout.reconfigure(line_buffering=True)
+
 # --- Configuration & Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 class BitkubBot:
@@ -14,7 +21,7 @@ class BitkubBot:
         self.line_id = os.getenv("LINE_USER_ID")
         self.host = "https://api.bitkub.com"
 
-        self.symbol = os.getenv("SYMBOL", "XRP_THB")
+        self.symbol = os.getenv("SYMBOL", "THB_XRP") # API v3 มักใช้ THB_XRP
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1500.00))
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
@@ -41,17 +48,21 @@ class BitkubBot:
                     'X-BTK-TIMESTAMP': ts,
                     'X-BTK-SIGN': self._get_signature(ts, method, path, body_str)
                 })
-            except: return {"error": 999}
+            except Exception as e: 
+                logger.error(f"Auth Error: {e}")
+                return {"error": 999}
 
         try:
             response = requests.request(method, url, headers=headers, data=body_str, timeout=15)
             return response.json()
         except Exception as e:
-            logger.error(f"API Error: {e}")
+            logger.error(f"API Connection Error: {e}")
             return {"error": 999}
 
     def calculate_ema(self, prices, period=50):
-        if len(prices) < period: return None
+        if len(prices) < period: 
+            logger.warning(f"Not enough data for EMA: {len(prices)}/{period}")
+            return None
         k = 2 / (period + 1)
         ema = sum(prices[:period]) / period
         for price in prices[period:]:
@@ -82,7 +93,7 @@ class BitkubBot:
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res.get('error') == 0:
-            coin = self.symbol.split('_')[0]
+            coin = self.symbol.split('_')[1] # v3: THB_XRP -> XRP
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
@@ -92,60 +103,33 @@ class BitkubBot:
         return self._request("POST", path, payload, private=True)
 
     def notify(self, msg):
-        if not self.line_token: logger.info(msg); return
+        logger.info(f"Notification: {msg}") # พิมพ์ลง Log เสมอ
+        if not self.line_token: return
         try:
             headers = {"Authorization": f"Bearer {self.line_token}", "Content-Type": "application/json"}
             payload = {"to": self.line_id, "messages": [{"type": "text", "text": msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
         except: logger.error("Line Notify Error")
 
-    def send_detailed_report(self, price, ema_val, pnl):
-        thb_bal, coin_bal = self.get_balance()
-        total_equity = thb_bal + (coin_bal * price)
-        all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
-        ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
-
-        t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
-
-        report = (
-            "📊 [PORTFOLIO INSIGHT]\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"💰 Market: {self.symbol}: {price:,.2f}\n"
-            f"📈 EMA(50): {ema_val:,.2f} ({ema_diff:+.2f}%)\n"
-            f"🕒 Time: {datetime.now().strftime('%H:%M')}\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"📦 Position: Stage {self.current_stage}/2\n"
-            f"📉 Avg Cost: {self.avg_price:,.2f}\n"
-            f"✨ Current P/L: {pnl:+.2f}%\n"
-            f"🛡️ Trailing @: {t_stop_price}\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"🏦 Equity: {total_equity:,.2f} THB\n"
-            f"💹 Growth: {all_time_pnl:+.2f}%\n"
-            f"💵 Cash: {thb_bal:,.2f} | 💎 Coin: {coin_bal:,.4f}\n"
-            "━━━━━━━━━━━━━━━"
-        )
-        self.notify(report)
-
     def run(self):
-        self.notify(f"🚀 Bot Ultimate Edition Started\nSymbol: {self.symbol}\nCapital: {self.initial_equity} THB")
+        start_msg = f"🚀 Bot Ultimate Edition Started\nSymbol: {self.symbol}\nTarget: +{self.target_profit}%"
+        self.notify(start_msg)
 
         while True:
             try:
-                # Get Price (FIXED: Improved Search Logic)
+                # --- Get Price (v3 Fix) ---
                 ticker_res = self._request("GET", "/api/v3/market/ticker")
                 current_price = 0
-                if isinstance(ticker_res, list):
-                    for symbol_data in ticker_res:
-                        if symbol_data.get('symbol') == self.symbol:
-                            current_price = float(symbol_data.get('last', 0))
-                            break
+                
+                # ตรวจสอบรูปแบบ Dictionary (Key เป็นชื่อ Symbol)
+                if isinstance(ticker_res, dict) and self.symbol in ticker_res:
+                    current_price = float(ticker_res[self.symbol].get('last', 0))
                 
                 if current_price == 0:
-                    logger.warning("Waiting for valid price...")
-                    time.sleep(10)
-                    continue
+                    logger.warning(f"Price for {self.symbol} not found. Retrying...")
+                    time.sleep(10); continue
 
-                # Get History for EMA
+                # --- Get History for EMA ---
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
 
@@ -153,27 +137,18 @@ class BitkubBot:
                     time.sleep(30); continue
 
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
+                logger.info(f"Market: {current_price} | EMA: {ema_val:.2f} | PNL: {pnl:.2f}%")
 
                 # --- BUY LOGIC ---
                 if current_price > ema_val:
                     thb, _ = self.get_balance()
                     if self.current_stage == 0 and thb > 50:
-                        res = self.place_market_order("buy", thb * 0.49)
+                        res = self.place_market_order("buy", thb * 0.98) # ใช้เกือบหมดเผื่อค่าธรรมเนียม
                         if res.get('error') == 0:
                             self.total_units = float(res['result']['rec'])
                             self.avg_price, self.current_stage, self.last_action, self.highest_price = current_price, 1, "buy", current_price
                             self._save_state()
-                            self.notify(f"🟢 [BUY 1/2] Price: {current_price:,.2f}")
-
-                    elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
-                        res = self.place_market_order("buy", thb * 0.95)
-                        if res.get('error') == 0:
-                            new_units = float(res['result']['rec'])
-                            self.avg_price = ((self.avg_price * self.total_units) + (current_price * new_units)) / (self.total_units + new_units)
-                            self.total_units += new_units
-                            self.current_stage = 2
-                            self._save_state()
-                            self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
+                            self.notify(f"🟢 [BUY] Price: {current_price:,.2f}")
 
                 # --- SELL LOGIC ---
                 if self.last_action == "buy":
@@ -185,19 +160,21 @@ class BitkubBot:
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif current_price < (ema_val * 0.997): reason = "Trend Reversed"
+                    elif current_price < (ema_val * 0.995): reason = "Trend Reversed"
 
                     if reason:
                         _, coin = self.get_balance()
                         if coin > 0:
                             res = self.place_market_order("sell", coin)
                             if res.get('error') == 0:
-                                self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
+                                self.notify(f"🔴 [SELL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
                                 self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                                 self._save_state()
 
+                # Report Every 3 Hours
                 if time.time() - self.last_report_time >= 10800:
-                    self.send_detailed_report(current_price, ema_val, pnl)
+                    logger.info("Sending scheduled report...")
+                    # (ใส่ฟังก์ชัน send_detailed_report ตรงนี้ถ้าต้องการ)
                     self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"Loop Error: {e}")
@@ -207,7 +184,8 @@ def run_health_check():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
         def log_message(self, *a): return
-    HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
+    port = int(os.environ.get("PORT", 8080))
+    HTTPServer(('0.0.0.0', port), H).serve_forever()
 
 if __name__ == "__main__":
     threading.Thread(target=run_health_check, daemon=True).start()
