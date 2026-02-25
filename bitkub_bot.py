@@ -182,7 +182,7 @@ while True:
                             send_full_report(price, ema_val, current_stage, avg_price, pnl)
 
             # --- รายงานพอร์ตทุก 1 ชม. ---
-            if time.time() - last_report_time >= 3600:
+            if time.time() - last_report_time >= 10800:
                 send_full_report(price, ema_val, current_stage, avg_price, pnl)
                 last_report_time = time.time()
 
