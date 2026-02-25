@@ -23,7 +23,7 @@ HOST = "https://api.bitkub.com"
 TARGET_PROFIT = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
 STOP_LOSS = float(os.getenv("STOP_LOSS_PCT", 2.0))
 STATE_FILE = "bot_state.json"
-initial_equity = 1500.00 # ทุนเริ่มต้น
+initial_equity = 1501.97 # ทุนเริ่มต้น
 
 def save_state(action, buy_price, stage):
     with open(STATE_FILE, "w") as f:
