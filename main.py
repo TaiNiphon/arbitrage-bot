@@ -2,26 +2,27 @@ import os, requests, time, hmac, hashlib, json, threading, logging, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
-# --- ระบบ Logging สำหรับ Railway ---
+# --- Logging ---
 sys.stdout.reconfigure(line_buffering=True)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubBotV3:
+class BitkubBotUltimate:
     def __init__(self):
-        # โหลดค่าจาก Variables
+        # โหลดค่า Config (แนวคิดเดิมของคุณ)
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.line_token = os.getenv("LINE_ACCESS_TOKEN")
         self.line_id = os.getenv("LINE_USER_ID")
-        self.symbol = os.getenv("SYMBOL", "THB_XRP").upper()
+        self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() # มาตรฐาน XRP_THB
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1500.00))
+        self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0)) # กำไรเป้าหมายเพื่อเริ่ม Trailing
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
-        
-        # สถานะเริ่มต้น
+        self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0)) # ย่อ 1% จากจุดสูงสุดแล้วขาย
+
         self.state_file = "/tmp/bot_state_v3.json"
-        self.last_action, self.avg_price, self.current_stage = self._load_state()
-        self.last_report_time = 0 
+        self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
+        self.last_report_time = 0
 
     def _request(self, method, path, payload=None, private=False):
         url = f"https://api.bitkub.com{path}"
@@ -44,18 +45,23 @@ class BitkubBotV3:
             try:
                 with open(self.state_file, "r") as f:
                     d = json.load(f)
-                    return d.get('last_action', 'sell'), d.get('avg_price', 0.0), d.get('stage', 0)
+                    return d['last_action'], d['avg_price'], d['stage'], d.get('total_units', 0.0), d.get('highest_price', 0.0)
             except: pass
-        return "sell", 0.0, 0
+        return "sell", 0.0, 0, 0.0, 0.0
 
     def _save_state(self):
         with open(self.state_file, "w") as f:
-            json.dump({'last_action': self.last_action, 'avg_price': self.avg_price, 'stage': self.current_stage}, f)
+            json.dump({
+                "last_action": self.last_action, "avg_price": self.avg_price,
+                "stage": self.current_stage, "total_units": self.total_units,
+                "highest_price": self.highest_price
+            }, f)
 
-    def get_wallet(self):
+    def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res.get('error') == 0:
-            coin = self.symbol.split('_')[1] if '_' in self.symbol else "XRP"
+            # แก้ไขจุดตัดชื่อเหรียญให้ยืดหยุ่น (XRP_THB หรือ THB_XRP)
+            coin = "XRP" if "XRP" in self.symbol else self.symbol.split('_')[0]
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
@@ -63,112 +69,114 @@ class BitkubBotV3:
         if not self.line_token: return
         headers = {"Authorization": f"Bearer {self.line_token}", "Content-Type": "application/json"}
         payload = {"to": self.line_id, "messages": [{"type": "text", "text": msg}]}
-        try: requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
-        except: logger.error("Line notification failed")
+        requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
 
     def send_detailed_report(self, price, ema_val, pnl):
-        thb_bal, coin_bal = self.get_wallet()
+        thb_bal, coin_bal = self.get_balance()
         total_equity = thb_bal + (coin_bal * price)
-        all_time_growth = ((total_equity - self.initial_equity) / self.initial_equity) * 100
+        growth = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         
-        ema_status = f"{ema_val:,.2f}" if ema_val > 0 else "Calculating (Fast-Sync)..."
+        # แสดงจุด Trailing Stop ตามแนวคิดเดิมของคุณ
+        t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
+
         report = (
             "📊 [PORTFOLIO INSIGHT]\n"
             "━━━━━━━━━━━━━━━\n"
-            f"💰 Market: {self.symbol}: {price:,.2f}\n"
-            f"📈 EMA(50): {ema_status}\n"
+            f"💰 Market {self.symbol}: {price:,.2f}\n"
+            f"📈 EMA(50): {ema_val:,.2f}\n"
             f"🕒 Time: {datetime.now().strftime('%H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
-            f"📦 Position: Stage {self.current_stage}/2\n"
+            f"📦 Stage: {self.current_stage}/2 | {self.last_action.upper()}\n"
             f"📉 Avg Cost: {self.avg_price:,.2f}\n"
             f"✨ Current P/L: {pnl:+.2f}%\n"
+            f"🛡️ Trailing @: {t_stop_price}\n"
             "━━━━━━━━━━━━━━━\n"
             f"🏦 Equity: {total_equity:,.2f} THB\n"
-            f"💹 Growth: {all_time_growth:+.2f}%\n"
+            f"💹 Growth: {growth:+.2f}%\n"
             f"💵 Cash: {thb_bal:,.2f} | 💎 Coin: {coin_bal:,.4f}\n"
             "━━━━━━━━━━━━━━━"
         )
         self.notify(report)
-        logger.info(f"Report Sent - Equity: {total_equity:,.2f}")
 
     def run(self):
-        logger.info(f"🚀 Bot V3 Started - Symbol: {self.symbol}")
-        self.notify(f"🤖 Bot Online | Full Report Active\nSymbol: {self.symbol}\nMode: Fast-Sync EMA")
-        
+        logger.info(f"🚀 Bot V3 Started - {self.symbol}")
+        self.notify(f"🚀 Bot Ultimate Started\nCapital: {self.initial_equity} THB")
+
         while True:
             try:
-                # 1. ดึงราคาปัจจุบัน
+                # 1. ดึงราคา (รองรับ V3 Ticker List)
                 ticker_res = self._request("GET", "/api/v3/market/ticker")
                 price = 0
                 if isinstance(ticker_res, list):
                     for item in ticker_res:
                         if item.get('symbol').upper() in [self.symbol, "XRP_THB", "THB_XRP"]:
-                            price = float(item.get('last', 0))
-                            break
-                elif isinstance(ticker_res, dict):
-                    price = float(ticker_res.get(self.symbol, {}).get('last', 0))
+                            price = float(item.get('last', 0)); break
 
                 if price == 0:
-                    logger.warning(f"⚠️ Price not found for {self.symbol}"); time.sleep(30); continue
+                    time.sleep(10); continue
 
-                # 2. ดึงข้อมูล History (ขยายเป็น 3 วัน = 259200 วินาที เพื่อให้ข้อมูลแน่นและติดง่ายขึ้น)
-                now_ts = int(time.time())
-                hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={now_ts-259200}&to={now_ts}")
-                
+                # 2. คำนวณ EMA (ใช้ Fast-Sync 3 วัน)
+                hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-259200}&to={int(time.time())}")
                 closes = hist.get('c', [])
-                ema_val = 0
-                
-                if isinstance(closes, list) and len(closes) >= 50:
-                    ema_val = sum(closes[-50:]) / 50
-                    logger.info(f"✅ EMA Sync Complete: {ema_val:,.2f}")
-                else:
-                    data_len = len(closes) if isinstance(closes, list) else 0
-                    logger.warning(f"⚠️ Syncing EMA Data... ({data_len}/50)")
+                if len(closes) < 50:
+                    logger.warning("Waiting for EMA data..."); time.sleep(30); continue
+                ema_val = sum(closes[-50:]) / 50
 
-                # 3. คำนวณ P/L
                 pnl = ((price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # 4. ส่งรายงาน (ส่งทันที และทุก 1 ชม.)
+                # 3. รายงาน (ทันทีและทุก 1 ชม. เพื่อความต่อเนื่อง)
                 if time.time() - self.last_report_time >= 3600:
                     self.send_detailed_report(price, ema_val, pnl)
                     self.last_report_time = time.time()
 
-                # 5. ตรรกะซื้อขาย (ทำงานทันทีที่ ema_val > 0)
-                if ema_val > 0:
-                    if price > ema_val:
-                        thb, _ = self.get_wallet()
-                        if self.current_stage == 0 and thb > 50:
-                            res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.48, "typ": "market"}, private=True)
-                            if res.get('error') == 0:
-                                self.avg_price, self.current_stage, self.last_action = price, 1, "buy"
-                                self._save_state(); self.notify(f"🟢 [BUY 1/2] Price: {price:,.2f}")
-                        elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
-                            res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.95, "typ": "market"}, private=True)
-                            if res.get('error') == 0:
-                                self.avg_price = (self.avg_price + price) / 2
-                                self.current_stage = 2
-                                self._save_state(); self.notify(f"🟢 [BUY 2/2] Price: {price:,.2f}")
+                # 4. BUY LOGIC (2 Stages ตามแนวคิดคุณ)
+                if price > ema_val:
+                    thb, _ = self.get_balance()
+                    if self.current_stage == 0 and thb > 50:
+                        res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.49, "typ": "market"}, private=True)
+                        if res.get('error') == 0:
+                            self.total_units = float(res['result']['rec'])
+                            self.avg_price, self.current_stage, self.last_action, self.highest_price = price, 1, "buy", price
+                            self._save_state(); self.notify(f"🟢 [BUY 1/2] Price: {price:,.2f}")
+                    elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
+                        res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": thb*0.95, "typ": "market"}, private=True)
+                        if res.get('error') == 0:
+                            new_units = float(res['result']['rec'])
+                            self.avg_price = ((self.avg_price * self.total_units) + (price * new_units)) / (self.total_units + new_units)
+                            self.total_units += new_units
+                            self.current_stage = 2
+                            self._save_state(); self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
 
-                    if self.last_action == "buy":
-                        if pnl <= -self.stop_loss or price < (ema_val * 0.997):
-                            _, coin = self.get_wallet()
-                            if coin > 0.01:
-                                res = self._request("POST", "/api/v3/market/place-ask", {"sym": self.symbol, "amt": coin, "typ": "market"}, private=True)
-                                if res.get('error') == 0:
-                                    self.notify(f"🔴 [SELL ALL] P/L: {pnl:+.2f}% | Price: {price:,.2f}")
-                                    self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
-                                    self._save_state()
+                # 5. SELL LOGIC (Trailing Stop + SL ตามแนวคิดคุณ)
+                if self.last_action == "buy":
+                    if price > self.highest_price:
+                        self.highest_price = price
+                        self._save_state()
 
-            except Exception as e: 
-                logger.error(f"❌ Main Loop Error: {e}")
-            
+                    reason = None
+                    if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
+                    elif pnl >= self.target_profit and price <= (self.highest_price * (1 - (self.trailing_pct/100))):
+                        reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
+                    elif price < (ema_val * 0.997): reason = "Trend Reversed"
+
+                    if reason:
+                        _, coin = self.get_balance()
+                        if coin > 0.001:
+                            res = self._request("POST", "/api/v3/market/place-ask", {"sym": self.symbol, "amt": coin, "typ": "market"}, private=True)
+                            if res.get('error') == 0:
+                                self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
+                                self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
+                                self._save_state()
+
+            except Exception as e: logger.error(f"Loop Error: {e}")
             time.sleep(30)
 
 def start_server():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
+        def log_message(self, *a): return
     HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
 
 if __name__ == "__main__":
     threading.Thread(target=start_server, daemon=True).start()
-    BitkubBotV3().run()
+    BitkubBotUltimate().run()
