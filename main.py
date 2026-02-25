@@ -21,7 +21,7 @@ class BitkubBotV3:
         # สถานะเริ่มต้น
         self.state_file = "/tmp/bot_state_v3.json"
         self.last_action, self.avg_price, self.current_stage = self._load_state()
-        self.last_report_time = 0 # ตั้งเป็น 0 เพื่อให้รายงานทันทีที่เริ่มรัน
+        self.last_report_time = 0 
 
     def _request(self, method, path, payload=None, private=False):
         url = f"https://api.bitkub.com{path}"
@@ -29,7 +29,6 @@ class BitkubBotV3:
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
         if private:
             try:
-                # มาตรฐาน V3 Signature ตามประกาศ Bitkub
                 ts = requests.get("https://api.bitkub.com/api/v3/servertime", timeout=5).text.strip()
                 sig_payload = ts + method + path + body_str
                 sig = hmac.new(self.api_secret.encode('utf-8'), sig_payload.encode('utf-8'), hashlib.sha256).hexdigest()
@@ -56,7 +55,6 @@ class BitkubBotV3:
     def get_wallet(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res.get('error') == 0:
-            # แยกชื่อเหรียญ เช่น THB_XRP -> XRP
             coin = self.symbol.split('_')[1] if '_' in self.symbol else "XRP"
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
@@ -73,8 +71,7 @@ class BitkubBotV3:
         total_equity = thb_bal + (coin_bal * price)
         all_time_growth = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         
-        # หน้าตารายงานแบบละเอียด
-        ema_status = f"{ema_val:,.2f}" if ema_val > 0 else "Calculating..."
+        ema_status = f"{ema_val:,.2f}" if ema_val > 0 else "Calculating (Fast-Sync)..."
         report = (
             "📊 [PORTFOLIO INSIGHT]\n"
             "━━━━━━━━━━━━━━━\n"
@@ -96,11 +93,11 @@ class BitkubBotV3:
 
     def run(self):
         logger.info(f"🚀 Bot V3 Started - Symbol: {self.symbol}")
-        self.notify(f"🤖 Bot Online | Full Report Active\nSymbol: {self.symbol}")
+        self.notify(f"🤖 Bot Online | Full Report Active\nSymbol: {self.symbol}\nMode: Fast-Sync EMA")
         
         while True:
             try:
-                # 1. ดึงราคา (รองรับ V3 List)
+                # 1. ดึงราคาปัจจุบัน
                 ticker_res = self._request("GET", "/api/v3/market/ticker")
                 price = 0
                 if isinstance(ticker_res, list):
@@ -114,27 +111,30 @@ class BitkubBotV3:
                 if price == 0:
                     logger.warning(f"⚠️ Price not found for {self.symbol}"); time.sleep(30); continue
 
-                # 2. ดึงข้อมูล EMA (ขยายเป็น 2 วัน เพื่อแก้ปัญหาสัญญาณไม่พอ)
-                hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
-                closes = hist.get('c', [])
+                # 2. ดึงข้อมูล History (ขยายเป็น 3 วัน = 259200 วินาที เพื่อให้ข้อมูลแน่นและติดง่ายขึ้น)
+                now_ts = int(time.time())
+                hist = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={now_ts-259200}&to={now_ts}")
                 
+                closes = hist.get('c', [])
                 ema_val = 0
-                if len(closes) >= 50:
+                
+                if isinstance(closes, list) and len(closes) >= 50:
                     ema_val = sum(closes[-50:]) / 50
+                    logger.info(f"✅ EMA Sync Complete: {ema_val:,.2f}")
                 else:
-                    logger.warning(f"⚠️ Insufficient data ({len(closes)}/50). EMA logic paused.")
+                    data_len = len(closes) if isinstance(closes, list) else 0
+                    logger.warning(f"⚠️ Syncing EMA Data... ({data_len}/50)")
 
                 # 3. คำนวณ P/L
                 pnl = ((price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # 4. ส่งรายงานทุก 1 ชม. (หรือทันทีที่รัน)
+                # 4. ส่งรายงาน (ส่งทันที และทุก 1 ชม.)
                 if time.time() - self.last_report_time >= 3600:
                     self.send_detailed_report(price, ema_val, pnl)
                     self.last_report_time = time.time()
 
-                # 5. ตรรกะซื้อขาย (จะทำงานเมื่อมีค่า EMA เท่านั้น)
+                # 5. ตรรกะซื้อขาย (ทำงานทันทีที่ ema_val > 0)
                 if ema_val > 0:
-                    # เงื่อนไขการซื้อ
                     if price > ema_val:
                         thb, _ = self.get_wallet()
                         if self.current_stage == 0 and thb > 50:
@@ -149,7 +149,6 @@ class BitkubBotV3:
                                 self.current_stage = 2
                                 self._save_state(); self.notify(f"🟢 [BUY 2/2] Price: {price:,.2f}")
 
-                    # เงื่อนไขการขาย
                     if self.last_action == "buy":
                         if pnl <= -self.stop_loss or price < (ema_val * 0.997):
                             _, coin = self.get_wallet()
@@ -165,7 +164,6 @@ class BitkubBotV3:
             
             time.sleep(30)
 
-# --- Server สำหรับ Railway ---
 def start_server():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
