@@ -115,18 +115,23 @@ class BitkubBot:
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
         except: pass
 
-    def send_detailed_report(self, price, pnl):
+    def send_detailed_report(self, price, pnl, ema_val=None):
         thb_bal, coin_bal = self.get_balance()
         total_equity = thb_bal + (coin_bal * price)
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         now_th = self.get_local_time()
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
+        
+        # ส่วนที่เพิ่ม: คำนวณความห่างจาก EMA
+        ema_str = f"{ema_val:,.2f}" if ema_val else "Calculating..."
+        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
 
         report = (
-            "💎 [ULTIMATE REPORT V5.5]\n"
+            "💎 [ULTIMATE REPORT V5.5.1]\n"
             "━━━━━━━━━━━━━━━\n"
             f"📊 MARKET: {self.symbol}\n"
             f"💵 Price: {price:,.2f} | P/L: {pnl:+.2f}%\n"
+            f"📈 EMA(50): {ema_str} {diff_ema}\n" # บรรทัดที่เพิ่มใหม่
             f"🕒 Time: {now_th.strftime('%d/%m %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
             "🏦 ASSET SUMMARY\n"
@@ -222,7 +227,7 @@ class BitkubBot:
 
                 # Report every 3 hours
                 if time.time() - self.last_report_time >= 10800:
-                    self.send_detailed_report(current_price, pnl)
+                    self.send_detailed_report(current_price, pnl, ema_val) # เพิ่ม ema_val เข้าไป
                     self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"🔥 Loop Error: {e}")
