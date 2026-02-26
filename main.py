@@ -1,6 +1,6 @@
 import os, requests, time, hmac, hashlib, json, threading, logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- Configuration & Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,7 +16,6 @@ class BitkubBot:
         self.host = "https://api.bitkub.com"
 
         # Strategy Config
-        # ปรับเป็น xrp_thb ตัวพิมพ์เล็กตามตัวอย่างที่รันผ่าน
         self.symbol = os.getenv("SYMBOL", "xrp_thb").lower() 
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1500.00))
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
@@ -26,6 +25,10 @@ class BitkubBot:
         self.state_file = "/tmp/bot_state_v3.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
         self.last_report_time = 0
+
+    def get_local_time(self):
+        """ คืนค่าเวลาปัจจุบันของไทย (GMT+7) """
+        return datetime.utcnow() + timedelta(hours=7)
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
@@ -38,7 +41,6 @@ class BitkubBot:
 
         if private:
             try:
-                # ดึง timestamp จาก servertime.text
                 ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
                 headers.update({
                     'X-BTK-APIKEY': self.api_key,
@@ -83,13 +85,12 @@ class BitkubBot:
         return 0.0, 0.0
 
     def place_order_v3(self, side, amount, price):
-        """ แก้ไขตามไฟล์ buy.py """
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         payload = {
             "sym": self.symbol,
-            "amt": int(amount) if side == "buy" else amount, # ซื้อใช้ int(thb)
+            "amt": int(amount) if side == "buy" else amount,
             "rat": price,
-            "typ": "limit" # ใช้ limit ตามตัวอย่างที่ผ่าน
+            "typ": "limit"
         }
         return self._request("POST", path, payload, private=True)
 
@@ -113,16 +114,26 @@ class BitkubBot:
         thb_bal, coin_bal = self.get_balance()
         total_equity = thb_bal + (coin_bal * price)
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
+        ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
+        
+        # ปรับเวลาเป็น GMT+7
+        now_th = self.get_local_time()
+        
+        # หาราคา Trailing Stop
+        t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
+
+        # จัดรูปแบบรายงานตามรูปภาพที่คุณส่งมา
         report = (
             "📊 [PORTFOLIO INSIGHT]\n"
             "━━━━━━━━━━━━━━━\n"
             f"💰 Market: {self.symbol.upper()}: {price:,.2f}\n"
-            f"📈 EMA(50): {ema_val:,.2f}\n"
-            f"🕒 Time: {datetime.now().strftime('%H:%M')}\n"
+            f"📈 EMA(50): {ema_val:,.2f} ({ema_diff:+.2f}%)\n"
+            f"🕒 Time: {now_th.strftime('%H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
             f"📦 Position: Stage {self.current_stage}/2\n"
             f"📉 Avg Cost: {self.avg_price:,.2f}\n"
             f"✨ Current P/L: {pnl:+.2f}%\n"
+            f"🛡️ Trailing @: {t_stop_price}\n"
             "━━━━━━━━━━━━━━━\n"
             f"🏦 Equity: {total_equity:,.2f} THB\n"
             f"💹 Growth: {all_time_pnl:+.2f}%\n"
@@ -136,23 +147,20 @@ class BitkubBot:
 
         while True:
             try:
-                # แก้ไข Error: 'list' object has no attribute 'get'
                 ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
                 current_price = 0
                 
-                # ตรวจสอบว่าเป็น list หรือไม่
+                # ป้องกัน Error 'list' object has no attribute 'get'
                 if isinstance(ticker_res, list):
-                    # ค้นหา symbol ใน list
                     symbol_data = next((item for item in ticker_res if item['symbol'] == self.symbol.upper()), None)
                     if symbol_data:
-                        current_price = float(symbol_data.get('lowest_ask', 0)) # ใช้ lowest_ask ตาม buy.py
+                        current_price = float(symbol_data.get('lowest_ask', 0))
                 elif isinstance(ticker_res, dict) and ticker_res.get('error') == 0:
                     current_price = float(ticker_res['result'].get('lowest_ask', 0))
 
                 if current_price == 0:
                     time.sleep(10); continue
 
-                # Get EMA ข้อมูล TradingView
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol.upper()}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
 
@@ -164,7 +172,7 @@ class BitkubBot:
                 # --- BUY LOGIC ---
                 if current_price > ema_val:
                     thb, _ = self.get_balance()
-                    if self.current_stage == 0 and thb >= 10: # ขั้นต่ำ 10 บาท
+                    if self.current_stage == 0 and thb >= 10:
                         res = self.place_order_v3("buy", thb * 0.49, current_price)
                         if res.get('error') == 0:
                             self.total_units = float(res['result'].get('rec', 0))
