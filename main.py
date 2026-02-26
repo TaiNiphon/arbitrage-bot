@@ -73,8 +73,11 @@ class BitkubBot:
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res and res.get('error') == 0:
-            coin = self.symbol.replace("THB_", "")
-            return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
+            # ดึงชื่อเหรียญออกมา ไม่ว่าจะตั้งชื่อ SYMBOL มาแบบไหน
+            coin_name = self.symbol.replace("THB_", "").replace("_THB", "").upper()
+            thb_bal = float(res['result'].get('THB', 0))
+            coin_bal = float(res['result'].get(coin_name, 0))
+            return thb_bal, coin_bal
         return 0.0, 0.0
 
     def check_and_cancel_sell_orders(self, current_price, ema_val):
