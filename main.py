@@ -1,6 +1,6 @@
 import os, requests, time, hmac, hashlib, json, threading, logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime
+import datetime as dt
 
 # --- Configuration & Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,6 +25,18 @@ class BitkubBot:
         self.state_file = "/tmp/bot_state_v3.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
         self.last_report_time = 0
+
+    def notify(self, message):
+        """ ฟังก์ชันส่งข้อความเข้า LINE ที่ขาดไป """
+        if not self.line_token:
+            logger.warning("Line Token not found!")
+            return
+        url = "https://notify-api.line.me/api/notify"
+        headers = {"Authorization": f"Bearer {self.line_token}"}
+        try:
+            requests.post(url, headers=headers, data={"message": message}, timeout=10)
+        except Exception as e:
+            logger.error(f"Notify Error: {e}")
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
@@ -99,8 +111,7 @@ class BitkubBot:
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
 
-        # แก้ไขจุดที่ทำให้บอทค้าง (ลบ { ออก)
-        import datetime as dt
+        # ปรับเวลาไทย (+7) และแก้ Syntax Error ที่เคยค้าง
         thai_time = (dt.datetime.utcnow() + dt.timedelta(hours=7)).strftime('%H:%M')
 
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
@@ -125,11 +136,11 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
+        # ยืนยันการเริ่มทำงานเข้า LINE
         self.notify(f"🚀 Bot Ultimate Edition Started\nSymbol: {self.symbol}\nCapital: {self.initial_equity} THB")
 
         while True:
             try:
-                # --- GET PRICE (Improved Universal Search) ---
                 ticker_res = self._request("GET", "/api/v3/market/ticker")
                 current_price = 0
                 if isinstance(ticker_res, list):
@@ -139,11 +150,10 @@ class BitkubBot:
                             break
                 elif isinstance(ticker_res, dict) and self.symbol in ticker_res:
                     current_price = float(ticker_res[self.symbol].get('last', 0))
-                
+
                 if current_price == 0:
                     time.sleep(10); continue
 
-                # --- GET EMA DATA ---
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
 
@@ -158,7 +168,6 @@ class BitkubBot:
                     if self.current_stage == 0 and thb > 50:
                         res = self.place_market_order("buy", thb * 0.49)
                         if res.get('error') == 0:
-                            # ใช้ 'rec' (receive) สำหรับจำนวนเหรียญที่ได้จริงหลังหักค่าธรรมเนียม
                             self.total_units = float(res['result'].get('rec', 0))
                             self.avg_price, self.current_stage, self.last_action, self.highest_price = current_price, 1, "buy", current_price
                             self._save_state()
@@ -168,7 +177,6 @@ class BitkubBot:
                         res = self.place_market_order("buy", thb * 0.95)
                         if res.get('error') == 0:
                             new_units = float(res['result'].get('rec', 0))
-                            # สูตรคำนวณต้นทุนเฉลี่ยแบบถ่วงน้ำหนัก (Weighted Average)
                             self.avg_price = ((self.avg_price * self.total_units) + (current_price * new_units)) / (self.total_units + new_units)
                             self.total_units += new_units
                             self.current_stage = 2
