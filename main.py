@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class BitkubBot:
     def __init__(self):
-        # API Config (ดึงจาก Environment Variables เพื่อความปลอดภัย)
+        # API Config
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.line_token = os.getenv("LINE_ACCESS_TOKEN")
@@ -16,7 +16,8 @@ class BitkubBot:
         self.host = "https://api.bitkub.com"
 
         # Strategy Config
-        self.symbol = os.getenv("SYMBOL", "xrp_thb").lower() # ใช้ตัวพิมพ์เล็กตามรูปภาพ
+        # ปรับเป็น xrp_thb ตัวพิมพ์เล็กตามตัวอย่างที่รันผ่าน
+        self.symbol = os.getenv("SYMBOL", "xrp_thb").lower() 
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1500.00))
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
@@ -37,7 +38,7 @@ class BitkubBot:
 
         if private:
             try:
-                # ดึง Server Time ตามแบบในรูปภาพ
+                # ดึง timestamp จาก servertime.text
                 ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
                 headers.update({
                     'X-BTK-APIKEY': self.api_key,
@@ -82,15 +83,23 @@ class BitkubBot:
         return 0.0, 0.0
 
     def place_order_v3(self, side, amount, price):
-        """ อ้างอิงคำสั่งซื้อขายจากรูปภาพที่คุณส่งมา """
+        """ แก้ไขตามไฟล์ buy.py """
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         payload = {
             "sym": self.symbol,
-            "amt": int(amount) if side == "buy" else amount, # ซื้อใช้เงินบาท(int), ขายใช้จำนวนเหรียญ
+            "amt": int(amount) if side == "buy" else amount, # ซื้อใช้ int(thb)
             "rat": price,
-            "typ": "limit" # ใช้ limit ตามรูปภาพเพื่อให้ทำงานได้ชัวร์
+            "typ": "limit" # ใช้ limit ตามตัวอย่างที่ผ่าน
         }
         return self._request("POST", path, payload, private=True)
+
+    def calculate_ema(self, prices, period=50):
+        if len(prices) < period: return None
+        k = 2 / (period + 1)
+        ema = sum(prices[:period]) / period
+        for price in prices[period:]:
+            ema = (price * k) + (ema * (1 - k))
+        return ema
 
     def notify(self, msg):
         if not self.line_token: logger.info(msg); return
@@ -122,29 +131,28 @@ class BitkubBot:
         )
         self.notify(report)
 
-    def calculate_ema(self, prices, period=50):
-        if len(prices) < period: return None
-        k = 2 / (period + 1)
-        ema = sum(prices[:period]) / period
-        for price in prices[period:]:
-            ema = (price * k) + (ema * (1 - k))
-        return ema
-
     def run(self):
-        self.notify(f"🚀 Bot Integrated Version Started\nSymbol: {self.symbol.upper()}")
+        self.notify(f"🚀 Bot Fixed & Running\nSymbol: {self.symbol.upper()}")
 
         while True:
             try:
-                # Get Ticker
+                # แก้ไข Error: 'list' object has no attribute 'get'
                 ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
                 current_price = 0
-                if ticker_res.get('error') == 0:
-                    current_price = float(ticker_res['result'].get('last', 0))
+                
+                # ตรวจสอบว่าเป็น list หรือไม่
+                if isinstance(ticker_res, list):
+                    # ค้นหา symbol ใน list
+                    symbol_data = next((item for item in ticker_res if item['symbol'] == self.symbol.upper()), None)
+                    if symbol_data:
+                        current_price = float(symbol_data.get('lowest_ask', 0)) # ใช้ lowest_ask ตาม buy.py
+                elif isinstance(ticker_res, dict) and ticker_res.get('error') == 0:
+                    current_price = float(ticker_res['result'].get('lowest_ask', 0))
 
                 if current_price == 0:
                     time.sleep(10); continue
 
-                # Get EMA
+                # Get EMA ข้อมูล TradingView
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol.upper()}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
 
@@ -156,7 +164,7 @@ class BitkubBot:
                 # --- BUY LOGIC ---
                 if current_price > ema_val:
                     thb, _ = self.get_balance()
-                    if self.current_stage == 0 and thb > 50:
+                    if self.current_stage == 0 and thb >= 10: # ขั้นต่ำ 10 บาท
                         res = self.place_order_v3("buy", thb * 0.49, current_price)
                         if res.get('error') == 0:
                             self.total_units = float(res['result'].get('rec', 0))
@@ -165,7 +173,7 @@ class BitkubBot:
                             self._save_state()
                             self.notify(f"🟢 [BUY 1/2] Price: {self.avg_price:,.2f}")
 
-                    elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
+                    elif self.current_stage == 1 and pnl >= 0.5 and thb >= 10:
                         res = self.place_order_v3("buy", thb * 0.95, current_price)
                         if res.get('error') == 0:
                             new_units = float(res['result'].get('rec', 0))
@@ -177,7 +185,7 @@ class BitkubBot:
                             self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
 
                 # --- SELL LOGIC ---
-                if self.last_action == "buy":
+                if self.last_action == "buy" and self.total_units > 0:
                     if current_price > self.highest_price:
                         self.highest_price = current_price
                         self._save_state()
@@ -189,20 +197,19 @@ class BitkubBot:
                     elif current_price < (ema_val * 0.997): reason = "Trend Reversed"
 
                     if reason:
-                        _, coin = self.get_balance()
-                        if coin > 0:
-                            res = self.place_order_v3("sell", coin, current_price)
-                            if res.get('error') == 0:
-                                self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
-                                self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
-                                self._save_state()
+                        res = self.place_order_v3("sell", self.total_units, current_price)
+                        if res.get('error') == 0:
+                            self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
+                            self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
+                            self._save_state()
 
-                # Report 3 hrs.
+                # Report ทุก 3 ชม.
                 if time.time() - self.last_report_time >= 10800:
                     self.send_detailed_report(current_price, ema_val, pnl)
                     self.last_report_time = time.time()
 
-            except Exception as e: logger.error(f"Loop Error: {e}")
+            except Exception as e: 
+                logger.error(f"Loop Error: {e}")
             time.sleep(30)
 
 def run_health_check():
