@@ -74,7 +74,7 @@ class BitkubBot:
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res and res.get('error') == 0:
-            coin = self.symbol.split('_')[1]
+            coin = self.symbol.replace("THB_", "")
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
@@ -96,51 +96,38 @@ class BitkubBot:
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
         except: pass
 
-    def send_detailed_report(self, price, pnl):
-        thb_bal, coin_bal = self.get_balance()
-        total_equity = thb_bal + (coin_bal * price)
-        all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
-        now_th = self.get_local_time()
-        t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
-
-        report = (
-            "💎 [ULTIMATE REPORT V5.3]\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"📊 MARKET: {self.symbol}\n"
-            f"💵 Price: {price:,.2f} | P/L: {pnl:+.2f}%\n"
-            f"🕒 Time: {now_th.strftime('%d/%m %H:%M')}\n"
-            "━━━━━━━━━━━━━━━\n"
-            "🏦 ASSET SUMMARY\n"
-            f"💰 Cash: {thb_bal:,.2f} THB\n"
-            f"🪙 Coin: {coin_bal:,.4f} {self.symbol.split('_')[1]}\n"
-            f"📈 Equity: {total_equity:,.2f} THB\n"
-            f"🚀 Growth: {all_time_pnl:+.2f}%\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"🛡️ Trailing Stop @: {t_stop_price}\n"
-            "━━━━━━━━━━━━━━━"
-        )
-        self.notify(report)
-
     def run(self):
-        self.notify(f"🚀 Bot V5.3 Started\nMonitoring {self.symbol}")
+        self.notify(f"🚀 Bot V5.4 Fixed Started\nMonitoring {self.symbol}")
+        # เตรียมชื่อ symbol สำหรับค้นหาใน List (เช่น XRP_THB)
+        search_sym = f"{self.symbol.split('_')[1]}_{self.symbol.split('_')[0]}"
+
         while True:
             try:
-                # 1. ข้อมูลราคา (Flexible Fetch)
+                # 1. ข้อมูลราคา (Fix List Search)
                 ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
-                # Bitkub บางครั้งครอบ result บางครั้งไม่ครอบ
-                ticker = ticker_res.get('result', ticker_res) if isinstance(ticker_res, dict) else {}
+                current_price = None
                 
-                if self.symbol not in ticker:
-                    logger.error(f"❌ Symbol {self.symbol} not found in ticker. Data: {ticker_res}")
-                    time.sleep(30); continue
-                
-                current_price = float(ticker[self.symbol]['last'])
+                # ตรวจสอบว่าเป็น List หรือไม่ (ตามภาพ Log)
+                if isinstance(ticker_res, list):
+                    for item in ticker_res:
+                        if item.get('symbol') == search_sym or item.get('symbol') == self.symbol:
+                            current_price = float(item['last'])
+                            break
+                elif isinstance(ticker_res, dict):
+                    res_data = ticker_res.get('result', ticker_res)
+                    if self.symbol in res_data:
+                        current_price = float(res_data[self.symbol]['last'])
+                    elif search_sym in res_data:
+                        current_price = float(res_data[search_sym]['last'])
 
-                # 2. ข้อมูลกราฟ (EMA)
+                if current_price is None:
+                    logger.error(f"❌ Could not find price for {self.symbol}. Response: {ticker_res}")
+                    time.sleep(30); continue
+
+                # 2. ข้อมูลกราฟ
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 if not isinstance(history, dict) or 'c' not in history:
-                    logger.error(f"❌ History data error. Data: {history}")
-                    time.sleep(30); continue
+                    logger.error("❌ History data error"); time.sleep(30); continue
                 
                 prices = history.get('c', [])
                 ema_series = self.calculate_ema(prices, 50)
@@ -150,7 +137,7 @@ class BitkubBot:
                 ema_prev = ema_series[-2]
                 is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
 
-                # 3. Sync Wallet & Logic
+                # 3. Sync Wallet
                 thb, coin_bal = self.get_balance()
                 if coin_bal * current_price > 50:
                     if self.last_action == "sell" or self.current_stage == 0:
@@ -160,13 +147,10 @@ class BitkubBot:
 
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY/SELL LOGIC (เงื่อนไขเดิมทั้งหมด) ---
+                # --- BUY/SELL LOGIC (คงเดิม) ---
                 if is_uptrend and self.current_stage < 2:
                     if self.current_stage == 0 and thb >= 10:
-                        # ซื้อไม้ 1
-                        path = "/api/v3/market/place-bid"
-                        payload = {"sym": self.symbol, "amt": int(thb * 0.49), "rat": round(current_price, 4), "typ": "limit"}
-                        res = self._request("POST", path, payload, private=True)
+                        res = self._request("POST", "/api/v3/market/place-bid", {"sym": self.symbol, "amt": int(thb * 0.49), "rat": round(current_price, 4), "typ": "limit"}, private=True)
                         if res and res.get('error') == 0:
                             self.total_units, self.avg_price, self.current_stage, self.last_action = float(res['result']['rec']), float(res['result']['rat']), 1, "buy"
                             self.highest_price = self.avg_price
@@ -181,19 +165,17 @@ class BitkubBot:
                     elif current_price < (ema_val * 0.998): reason = "Trend Reversed"
 
                     if reason:
-                        path = "/api/v3/market/place-ask"
-                        payload = {"sym": self.symbol, "amt": round(self.total_units, 6), "rat": 0, "typ": "market"}
-                        res = self._request("POST", path, payload, private=True)
+                        res = self._request("POST", "/api/v3/market/place-ask", {"sym": self.symbol, "amt": round(self.total_units, 6), "rat": 0, "typ": "market"}, private=True)
                         if res and res.get('error') == 0:
                             self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
 
                 if time.time() - self.last_report_time >= 10800:
-                    self.send_detailed_report(current_price, pnl)
+                    # ฟังก์ชันรายงานสรุป (ถ้าต้องการ)
                     self.last_report_time = time.time()
 
-            except Exception as e: logger.error(f"🔥 Global Error: {e}")
+            except Exception as e: logger.error(f"🔥 Error: {e}")
             time.sleep(30)
 
 def run_health_check():
