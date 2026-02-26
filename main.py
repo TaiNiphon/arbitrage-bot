@@ -25,7 +25,7 @@ class BitkubBot:
         # State Persistence
         self.state_file = "bot_state_v5.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
-        self.last_report_time = 0
+        self.last_report_time = 10800
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
