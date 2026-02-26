@@ -22,13 +22,13 @@ class BitkubBot:
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
 
-        self.state_file = "/tmp/bot_state_v3.json"
+        # State Management
+        self.state_file = "/tmp/bot_state_v5.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
         self.last_report_time = 0
 
     def get_local_time(self):
-        """ คืนค่าเวลาปัจจุบันของไทย (GMT+7) แก้ไขตาม Log Warning """
-        # ใช้ timezone.utc แทน utcnow() ตามคำแนะนำใน Log
+        """ คืนค่าเวลาไทยปัจจุบัน (GMT+7) """
         return datetime.now(timezone.utc) + timedelta(hours=7)
 
     def _get_signature(self, ts, method, path, body_str):
@@ -39,10 +39,8 @@ class BitkubBot:
         url = f"{self.host}{path}"
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
-
         if private:
             try:
-                # ดึง Server Time (V3) ตามรูปแบบในไฟล์ buy.py
                 ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
                 headers.update({
                     'X-BTK-APIKEY': self.api_key,
@@ -50,7 +48,6 @@ class BitkubBot:
                     'X-BTK-SIGN': self._get_signature(ts, method, path, body_str)
                 })
             except: return {"error": 999}
-
         try:
             response = requests.request(method, url, headers=headers, data=body_str, timeout=15)
             return response.json()
@@ -86,12 +83,22 @@ class BitkubBot:
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
+    def cancel_all_orders(self):
+        """ ยกเลิกออเดอร์ค้างทั้งหมดเพื่อให้เงิน/เหรียญ กลับมาว่างพร้อมเทรดใหม่ """
+        res = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
+        if res.get('error') == 0 and res.get('result'):
+            for order in res['result']:
+                payload = {"sym": self.symbol, "id": order['id'], "sd": order['side'].lower(), "hash": order['hash']}
+                self._request("POST", "/api/v3/market/cancel-order", payload, private=True)
+                logger.info(f"Auto-Cancelled Order: {order['id']}")
+            return True
+        return False
+
     def place_order_v3(self, side, amount, price):
-        """ ส่งคำสั่งซื้อขายแบบ Limit ตามความสำเร็จในรูปภาพ """
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         payload = {
             "sym": self.symbol,
-            "amt": int(amount) if side == "buy" else amount, # Buy ใช้ int(THB)
+            "amt": int(amount) if side == "buy" else amount,
             "rat": price,
             "typ": "limit"
         }
@@ -119,8 +126,6 @@ class BitkubBot:
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
         now_th = self.get_local_time()
-        
-        # แสดงราคา Trailing Stop ถ้ากำไรถึงเป้า
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
         report = (
@@ -143,49 +148,50 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 Bot Optimized & Running\nSymbol: {self.symbol.upper()}")
-
+        self.notify(f"🚀 Bot Ultimate v5 Active\nMonitoring: {self.symbol.upper()}")
         while True:
             try:
-                # ตรวจสอบ Ticker แบบ List เพื่อความปลอดภัย
-                ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
-                current_price = 0
-                
-                if isinstance(ticker_res, list):
-                    symbol_data = next((item for item in ticker_res if item['symbol'] == self.symbol.upper()), None)
-                    if symbol_data:
-                        current_price = float(symbol_data.get('lowest_ask', 0))
-                elif isinstance(ticker_res, dict) and ticker_res.get('error') == 0:
-                    current_price = float(ticker_res['result'].get('lowest_ask', 0))
+                # 1. เคลียร์ออเดอร์เก่าที่ค้างเกิน 30 วินาที
+                self.cancel_all_orders()
 
+                # 2. ดึงราคาปัจจุบัน
+                ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
+                current_price, top_ask, top_bid = 0, 0, 0
+                if isinstance(ticker_res, list):
+                    sym_data = next((item for item in ticker_res if item['symbol'] == self.symbol.upper()), None)
+                    if sym_data:
+                        top_ask = float(sym_data.get('lowest_ask', 0))
+                        top_bid = float(sym_data.get('highest_bid', 0))
+                        current_price = top_ask
+                
                 if current_price == 0:
                     time.sleep(10); continue
 
+                # 3. คำนวณ EMA
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol.upper()}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
-
                 if not ema_val:
                     time.sleep(30); continue
 
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY LOGIC (2 Stages) ---
+                # --- BUY LOGIC ---
                 if current_price > ema_val:
                     thb, _ = self.get_balance()
                     if self.current_stage == 0 and thb >= 10:
-                        res = self.place_order_v3("buy", thb * 0.49, current_price)
+                        res = self.place_order_v3("buy", thb * 0.49, top_ask)
                         if res.get('error') == 0:
                             self.total_units = float(res['result'].get('rec', 0))
-                            self.avg_price = float(res['result'].get('rat', current_price))
+                            self.avg_price = float(res['result'].get('rat', top_ask))
                             self.current_stage, self.last_action, self.highest_price = 1, "buy", current_price
                             self._save_state()
                             self.notify(f"🟢 [BUY 1/2] Price: {self.avg_price:,.2f}")
 
                     elif self.current_stage == 1 and pnl >= 0.5 and thb >= 10:
-                        res = self.place_order_v3("buy", thb * 0.95, current_price)
+                        res = self.place_order_v3("buy", thb * 0.95, top_ask)
                         if res.get('error') == 0:
                             new_units = float(res['result'].get('rec', 0))
-                            new_price = float(res['result'].get('rat', current_price))
+                            new_price = float(res['result'].get('rat', top_ask))
                             self.avg_price = ((self.avg_price * self.total_units) + (new_price * new_units)) / (self.total_units + new_units)
                             self.total_units += new_units
                             self.current_stage = 2
@@ -205,13 +211,15 @@ class BitkubBot:
                     elif current_price < (ema_val * 0.997): reason = "Trend Reversed"
 
                     if reason:
-                        res = self.place_order_v3("sell", self.total_units, current_price)
+                        # ขายที่ราคา top_bid เพื่อให้แมตช์ทันที
+                        res = self.place_order_v3("sell", self.total_units, top_bid)
                         if res.get('error') == 0:
                             self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
+                        else: logger.error(f"Sell Attempt Failed: {res}")
 
-                # Report ทุก 3 ชม.
+                # Periodic Report
                 if time.time() - self.last_report_time >= 10800:
                     self.send_detailed_report(current_price, ema_val, pnl)
                     self.last_report_time = time.time()
