@@ -25,7 +25,7 @@ class BitkubBot:
         # State Persistence
         self.state_file = "bot_state_v5.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
-        self.last_report_time = 10800
+        self.last_report_time = 0
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
@@ -73,11 +73,8 @@ class BitkubBot:
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res and res.get('error') == 0:
-            # ดึงชื่อเหรียญออกมา ไม่ว่าจะตั้งชื่อ SYMBOL มาแบบไหน
-            coin_name = self.symbol.replace("THB_", "").replace("_THB", "").upper()
-            thb_bal = float(res['result'].get('THB', 0))
-            coin_bal = float(res['result'].get(coin_name, 0))
-            return thb_bal, coin_bal
+            coin = self.symbol.replace("THB_", "")
+            return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
     def check_and_cancel_sell_orders(self, current_price, ema_val):
@@ -124,7 +121,7 @@ class BitkubBot:
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         now_th = self.get_local_time()
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
-        
+
         # ส่วนที่เพิ่ม: คำนวณความห่างจาก EMA
         ema_str = f"{ema_val:,.2f}" if ema_val else "Calculating..."
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
@@ -172,11 +169,11 @@ class BitkubBot:
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 if not isinstance(history, dict) or 'c' not in history:
                     logger.error("❌ History Error"); time.sleep(30); continue
-                
+
                 prices = history.get('c', [])
                 ema_series = self.calculate_ema(prices, 50)
                 if not ema_series: time.sleep(30); continue
-                
+
                 ema_val, ema_prev = ema_series[-1], ema_series[-2]
                 is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
 
