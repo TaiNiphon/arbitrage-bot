@@ -78,28 +78,6 @@ class BitkubBot:
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
-    def check_and_cancel_sell_orders(self, current_price, ema_val):
-        res = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
-        if res and res.get('error') == 0 and res.get('result'):
-            for order in res['result']:
-                if order['side'].lower() == "sell":
-                    if current_price > (ema_val * 1.002):
-                        self._request("POST", "/api/v3/market/cancel-order", {"sym": self.symbol, "id": order['id']}, private=True)
-                        self.notify(f"⚠️ [REVIVE] ราคากลับตัวขึ้นเหนือ EMA! ยกเลิกการขายที่ค้างอยู่เพื่อถือต่อ")
-                        return True
-        return False
-
-    def place_order_v3(self, side, amount, price):
-        path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        typ = "limit" if side == "buy" else "market"
-        payload = {
-            "sym": self.symbol,
-            "amt": int(amount) if side == "buy" else round(amount, 6),
-            "rat": round(price, 4) if typ == "limit" else 0,
-            "typ": typ
-        }
-        return self._request("POST", path, payload, private=True)
-
     def calculate_ema(self, prices, period=50):
         if not prices or len(prices) < period: return None
         k = 2 / (period + 1)
@@ -123,11 +101,10 @@ class BitkubBot:
         total_equity = thb_bal + (coin_bal * price)
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         now_th = self.get_local_time()
-        
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
         report = (
-            "💎 [ULTIMATE REPORT V5.2]\n"
+            "💎 [ULTIMATE REPORT V5.3]\n"
             "━━━━━━━━━━━━━━━\n"
             f"📊 MARKET: {self.symbol}\n"
             f"💵 Price: {price:,.2f} | P/L: {pnl:+.2f}%\n"
@@ -145,19 +122,25 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 Bot V5.2 Fixed Started")
+        self.notify(f"🚀 Bot V5.3 Started\nMonitoring {self.symbol}")
         while True:
             try:
-                # 1. ข้อมูลราคาปัจจุบัน (Safe Fetch)
-                ticker = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
-                if not ticker or self.symbol not in ticker: 
-                    logger.error("Ticker data error"); time.sleep(30); continue
+                # 1. ข้อมูลราคา (Flexible Fetch)
+                ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
+                # Bitkub บางครั้งครอบ result บางครั้งไม่ครอบ
+                ticker = ticker_res.get('result', ticker_res) if isinstance(ticker_res, dict) else {}
+                
+                if self.symbol not in ticker:
+                    logger.error(f"❌ Symbol {self.symbol} not found in ticker. Data: {ticker_res}")
+                    time.sleep(30); continue
+                
                 current_price = float(ticker[self.symbol]['last'])
 
-                # 2. คำนวณเทรนด์ EMA (Safe Fetch & Check)
+                # 2. ข้อมูลกราฟ (EMA)
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 if not isinstance(history, dict) or 'c' not in history:
-                    logger.error("History data error"); time.sleep(30); continue
+                    logger.error(f"❌ History data error. Data: {history}")
+                    time.sleep(30); continue
                 
                 prices = history.get('c', [])
                 ema_series = self.calculate_ema(prices, 50)
@@ -167,48 +150,40 @@ class BitkubBot:
                 ema_prev = ema_series[-2]
                 is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
 
-                # 3. Sync Balance
+                # 3. Sync Wallet & Logic
                 thb, coin_bal = self.get_balance()
-                if coin_bal * current_price > 50: 
+                if coin_bal * current_price > 50:
                     if self.last_action == "sell" or self.current_stage == 0:
                         self.last_action, self.current_stage, self.total_units = "buy", 2, coin_bal
                         self.avg_price = current_price if self.avg_price == 0 else self.avg_price
                         self._save_state()
 
-                self.check_and_cancel_sell_orders(current_price, ema_val)
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY/SELL LOGIC (Same as V5.1) ---
+                # --- BUY/SELL LOGIC (เงื่อนไขเดิมทั้งหมด) ---
                 if is_uptrend and self.current_stage < 2:
-                    res_open = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
-                    if res_open and not res_open.get('result'):
-                        if self.current_stage == 0 and thb >= 10:
-                            res = self.place_order_v3("buy", thb * 0.49, current_price)
-                            if res and res.get('error') == 0:
-                                self.total_units, self.avg_price, self.current_stage, self.last_action = float(res['result']['rec']), float(res['result']['rat']), 1, "buy"
-                                self.highest_price = self.avg_price
-                                self._save_state()
-                                self.notify(f"🟢 [BUY 1/2] @ {self.avg_price:,.2f}")
-                        elif self.current_stage == 1 and pnl >= 0.5 and thb >= 10:
-                            res = self.place_order_v3("buy", thb * 0.95, current_price)
-                            if res and res.get('error') == 0:
-                                nq, nr = float(res['result']['rec']), float(res['result']['rat'])
-                                self.avg_price = ((self.avg_price * self.total_units) + (nq * nr)) / (self.total_units + nq)
-                                self.total_units += nq
-                                self.current_stage = 2
-                                self._save_state()
-                                self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
+                    if self.current_stage == 0 and thb >= 10:
+                        # ซื้อไม้ 1
+                        path = "/api/v3/market/place-bid"
+                        payload = {"sym": self.symbol, "amt": int(thb * 0.49), "rat": round(current_price, 4), "typ": "limit"}
+                        res = self._request("POST", path, payload, private=True)
+                        if res and res.get('error') == 0:
+                            self.total_units, self.avg_price, self.current_stage, self.last_action = float(res['result']['rec']), float(res['result']['rat']), 1, "buy"
+                            self.highest_price = self.avg_price
+                            self._save_state()
+                            self.notify(f"🟢 [BUY 1/2] @ {self.avg_price:,.2f}")
 
                 if self.last_action == "buy" and self.total_units > 0:
                     if current_price > self.highest_price: self.highest_price = current_price; self._save_state()
                     reason = None
-                    if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
-                    elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
-                        reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
+                    if pnl <= -self.stop_loss: reason = "Stop Loss"
+                    elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))): reason = "Trailing Stop"
                     elif current_price < (ema_val * 0.998): reason = "Trend Reversed"
 
                     if reason:
-                        res = self.place_order_v3("sell", self.total_units, current_price)
+                        path = "/api/v3/market/place-ask"
+                        payload = {"sym": self.symbol, "amt": round(self.total_units, 6), "rat": 0, "typ": "market"}
+                        res = self._request("POST", path, payload, private=True)
                         if res and res.get('error') == 0:
                             self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
@@ -218,7 +193,7 @@ class BitkubBot:
                     self.send_detailed_report(current_price, pnl)
                     self.last_report_time = time.time()
 
-            except Exception as e: logger.error(f"Loop Error: {e}")
+            except Exception as e: logger.error(f"🔥 Global Error: {e}")
             time.sleep(30)
 
 def run_health_check():
