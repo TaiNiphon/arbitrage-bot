@@ -1,6 +1,6 @@
 import os, requests, time, hmac, hashlib, json, threading, logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # --- Configuration & Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,8 +27,9 @@ class BitkubBot:
         self.last_report_time = 0
 
     def get_local_time(self):
-        """ คืนค่าเวลาปัจจุบันของไทย (GMT+7) """
-        return datetime.utcnow() + timedelta(hours=7)
+        """ คืนค่าเวลาปัจจุบันของไทย (GMT+7) แก้ไขตาม Log Warning """
+        # ใช้ timezone.utc แทน utcnow() ตามคำแนะนำใน Log
+        return datetime.now(timezone.utc) + timedelta(hours=7)
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
@@ -41,6 +42,7 @@ class BitkubBot:
 
         if private:
             try:
+                # ดึง Server Time (V3) ตามรูปแบบในไฟล์ buy.py
                 ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
                 headers.update({
                     'X-BTK-APIKEY': self.api_key,
@@ -85,10 +87,11 @@ class BitkubBot:
         return 0.0, 0.0
 
     def place_order_v3(self, side, amount, price):
+        """ ส่งคำสั่งซื้อขายแบบ Limit ตามความสำเร็จในรูปภาพ """
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         payload = {
             "sym": self.symbol,
-            "amt": int(amount) if side == "buy" else amount,
+            "amt": int(amount) if side == "buy" else amount, # Buy ใช้ int(THB)
             "rat": price,
             "typ": "limit"
         }
@@ -115,14 +118,11 @@ class BitkubBot:
         total_equity = thb_bal + (coin_bal * price)
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
-        
-        # ปรับเวลาเป็น GMT+7
         now_th = self.get_local_time()
         
-        # หาราคา Trailing Stop
+        # แสดงราคา Trailing Stop ถ้ากำไรถึงเป้า
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
-        # จัดรูปแบบรายงานตามรูปภาพที่คุณส่งมา
         report = (
             "📊 [PORTFOLIO INSIGHT]\n"
             "━━━━━━━━━━━━━━━\n"
@@ -143,14 +143,14 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 Bot Fixed & Running\nSymbol: {self.symbol.upper()}")
+        self.notify(f"🚀 Bot Optimized & Running\nSymbol: {self.symbol.upper()}")
 
         while True:
             try:
+                # ตรวจสอบ Ticker แบบ List เพื่อความปลอดภัย
                 ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
                 current_price = 0
                 
-                # ป้องกัน Error 'list' object has no attribute 'get'
                 if isinstance(ticker_res, list):
                     symbol_data = next((item for item in ticker_res if item['symbol'] == self.symbol.upper()), None)
                     if symbol_data:
@@ -169,7 +169,7 @@ class BitkubBot:
 
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY LOGIC ---
+                # --- BUY LOGIC (2 Stages) ---
                 if current_price > ema_val:
                     thb, _ = self.get_balance()
                     if self.current_stage == 0 and thb >= 10:
