@@ -93,21 +93,13 @@ class BitkubBot:
         payload = {"sym": self.symbol, "amt": amount, "typ": "market"}
         return self._request("POST", path, payload, private=True)
 
-    def notify(self, msg):
-        if not self.line_token: logger.info(msg); return
-        try:
-            headers = {"Authorization": f"Bearer {self.line_token}", "Content-Type": "application/json"}
-            payload = {"to": self.line_id, "messages": [{"type": "text", "text": msg}]}
-            requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
-        except: logger.error("Line Notify Error")
-
     def send_detailed_report(self, price, ema_val, pnl):
         thb_bal, coin_bal = self.get_balance()
         total_equity = thb_bal + (coin_bal * price)
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
 
-        # ปรับเวลาให้เป็นประเทศไทย (UTC+7)
+        # แก้ไขจุดที่ทำให้บอทค้าง (ลบ { ออก)
         import datetime as dt
         thai_time = (dt.datetime.utcnow() + dt.timedelta(hours=7)).strftime('%H:%M')
 
@@ -118,7 +110,7 @@ class BitkubBot:
             "━━━━━━━━━━━━━━━\n"
             f"💰 Market: {self.symbol}: {price:,.2f}\n"
             f"📈 EMA(50): {ema_val:,.2f} ({ema_diff:+.2f}%)\n"
-            f"🕒 Time (TH): {thai_time}\n"  # แสดงเวลาไทย
+            f"🕒 Time (TH): {thai_time}\n"
             "━━━━━━━━━━━━━━━\n"
             f"📦 Position: Stage {self.current_stage}/2\n"
             f"📉 Avg Cost: {self.avg_price:,.2f}\n"
