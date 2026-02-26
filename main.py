@@ -26,14 +26,17 @@ class BitkubBot:
         self.last_report_time = 0
 
     def notify(self, msg):
-        """ ส่งผ่าน LINE Notify (เสถียรกว่าสำหรับบอทเทรด) """
-        if not self.line_token: logger.info(f"Console: {msg}"); return
+        """ระบบส่ง LINE Notify พร้อมระบบป้องกัน Error"""
+        if not self.line_token:
+            logger.info(f"Notification: {msg}")
+            return
         try:
             url = "https://notify-api.line.me/api/notify"
             headers = {"Authorization": f"Bearer {self.line_token}"}
-            requests.post(url, headers=headers, data={"message": msg}, timeout=10)
+            # Timeout สั้นลง เพื่อไม่ให้บอทค้างถ้าเน็ต Railway มีปัญหา
+            requests.post(url, headers=headers, data={"message": msg}, timeout=5)
         except Exception as e:
-            logger.error(f"Line Notify Error: {e}")
+            logger.error(f"⚠️ LINE Notify Connectivity Error: {e}")
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
@@ -46,7 +49,9 @@ class BitkubBot:
 
         if private:
             try:
-                ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
+                # ดึงเวลาเซิร์ฟเวอร์เพื่อให้ Signature ตรงกัน
+                ts_res = requests.get(f"{self.host}/api/v3/servertime", timeout=5)
+                ts = ts_res.text.strip()
                 headers.update({
                     'X-BTK-APIKEY': self.api_key,
                     'X-BTK-TIMESTAMP': ts,
@@ -58,7 +63,7 @@ class BitkubBot:
             response = requests.request(method, url, headers=headers, data=body_str, timeout=15)
             return response.json()
         except Exception as e:
-            logger.error(f"API Error: {e}")
+            logger.error(f"API Connectivity Error: {e}")
             return {"error": 999}
 
     def calculate_ema(self, prices, period=50):
@@ -86,7 +91,7 @@ class BitkubBot:
             try:
                 with open(self.state_file, "r") as f:
                     d = json.load(f)
-                    return d['last_action'], d['avg_price'], d['stage'], d.get('total_units', 0.0), d.get('highest_price', 0.0)
+                    return d.get('last_action', 'sell'), d.get('avg_price', 0.0), d.get('stage', 0), d.get('total_units', 0.0), d.get('highest_price', 0.0)
             except: pass
         return "sell", 0.0, 0, 0.0, 0.0
 
@@ -99,8 +104,8 @@ class BitkubBot:
 
     def place_market_order(self, side, amount):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        # Bitkub: Buy use THB amount, Sell use COIN amount
-        payload = {"sym": self.symbol, "amt": round(amount, 8), "typ": "market"}
+        # ปรับจำนวนให้เหมาะสม (บาทสำหรับซื้อ, เหรียญสำหรับขาย)
+        payload = {"sym": self.symbol, "amt": round(amount, 6), "typ": "market"}
         return self._request("POST", path, payload, private=True)
 
     def send_detailed_report(self, price, ema_val, pnl):
@@ -109,7 +114,7 @@ class BitkubBot:
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
         
-        # ปรับเวลาไทย UTC+7
+        # ปรับเวลาเป็นประเทศไทย UTC+7
         thai_time = (datetime.utcnow() + timedelta(hours=7)).strftime('%H:%M')
 
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
@@ -134,10 +139,13 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
+        # หน่วงเวลาเริ่มต้นเล็กน้อยเพื่อให้ Network ของ Railway พร้อมทำงาน
+        time.sleep(5)
         self.notify(f"🚀 Bot Started\nSymbol: {self.symbol}\nCapital: {self.initial_equity} THB")
 
         while True:
             try:
+                # 1. ดึงราคาปัจจุบัน
                 ticker_res = self._request("GET", "/api/v3/market/ticker")
                 current_price = 0
                 if isinstance(ticker_res, dict) and self.symbol in ticker_res:
@@ -146,6 +154,7 @@ class BitkubBot:
                 if current_price == 0:
                     time.sleep(10); continue
 
+                # 2. ดึงข้อมูล EMA
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
 
@@ -154,29 +163,44 @@ class BitkubBot:
 
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY LOGIC ---
+                # 3. BUY LOGIC (ราคาตัดขึ้นเหนือ EMA)
                 if current_price > ema_val:
                     thb, _ = self.get_balance()
+                    # ไม้ที่ 1 (ซื้อ 49% ของเงินที่มี)
                     if self.current_stage == 0 and thb > 50:
-                        buy_amt = thb * 0.95 # ใช้เงิน 95% ของที่มีเพื่อกันค่าธรรมเนียม
+                        buy_amt = thb * 0.49
                         res = self.place_market_order("buy", buy_amt)
                         if res.get('error') == 0:
                             self.total_units = float(res['result'].get('rec', 0))
-                            self.avg_price, self.current_stage, self.last_action, self.highest_price = current_price, 2, "buy", current_price
+                            self.avg_price, self.current_stage, self.last_action, self.highest_price = current_price, 1, "buy", current_price
                             self._save_state()
-                            self.notify(f"🟢 [BUY SUCCESS] Price: {current_price:,.2f}")
+                            self.notify(f"🟢 [BUY 1/2] Price: {current_price:,.2f}")
 
-                # --- SELL LOGIC ---
+                    # ไม้ที่ 2 (ซื้อเพิ่ม 95% ของเงินที่เหลือ เมื่อกำไรเริ่มเดิน)
+                    elif self.current_stage == 1 and pnl >= 0.5 and thb > 50:
+                        buy_amt = thb * 0.95
+                        res = self.place_market_order("buy", buy_amt)
+                        if res.get('error') == 0:
+                            new_units = float(res['result'].get('rec', 0))
+                            self.avg_price = ((self.avg_price * self.total_units) + (current_price * new_units)) / (self.total_units + new_units)
+                            self.total_units += new_units
+                            self.current_stage = 2
+                            self._save_state()
+                            self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
+
+                # 4. SELL LOGIC (Trailing Stop / Stop Loss / Trend Reversed)
                 if self.last_action == "buy":
                     if current_price > self.highest_price:
                         self.highest_price = current_price
                         self._save_state()
 
                     reason = None
-                    if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
+                    if pnl <= -self.stop_loss: 
+                        reason = f"Stop Loss ({pnl:.2f}%)"
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif current_price < (ema_val * 0.998): reason = "Trend Reversed"
+                    elif current_price < (ema_val * 0.997): 
+                        reason = "Trend Reversed"
 
                     if reason:
                         _, coin = self.get_balance()
@@ -187,14 +211,15 @@ class BitkubBot:
                                 self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                                 self._save_state()
 
-                # Report ทุก 3 ชม.
+                # 5. ส่งรายงานทุก 3 ชั่วโมง
                 if time.time() - self.last_report_time >= 10800:
                     self.send_detailed_report(current_price, ema_val, pnl)
                     self.last_report_time = time.time()
 
             except Exception as e: 
                 logger.error(f"Loop Error: {e}")
-            time.sleep(30)
+            
+            time.sleep(30) # รอ 30 วินาทีก่อนเริ่มรอบถัดไป
 
 def run_health_check():
     class H(BaseHTTPRequestHandler):
@@ -206,5 +231,7 @@ def run_health_check():
     HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
 
 if __name__ == "__main__":
+    # เริ่มต้น Health Check ใน Thread แยก
     threading.Thread(target=run_health_check, daemon=True).start()
+    # เริ่มต้นบอท
     BitkubBot().run()
