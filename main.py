@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class BitkubBot:
     def __init__(self):
-        # API Config
+        # API Config (ดึงจากตัวแปรที่คุณรันได้ปกติ)
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.line_token = os.getenv("LINE_ACCESS_TOKEN")
@@ -22,6 +22,7 @@ class BitkubBot:
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
 
+        # ระบบจำสถานะ (State)
         self.state_file = "bot_state_v3.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
         self.last_report_time = 0
@@ -51,7 +52,7 @@ class BitkubBot:
             return {"error": 999}
 
     def calculate_ema(self, prices, period=50):
-        if len(prices) < 10: return None # ลดขั้นต่ำลงเพื่อให้รันได้ไวขึ้น
+        if len(prices) < 10: return None
         k = 2 / (period + 1)
         ema = sum(prices[:period]) / len(prices[:period])
         for price in prices[period:]:
@@ -68,10 +69,15 @@ class BitkubBot:
                     "total_units": self.total_units,
                     "highest_price": self.highest_price
                 }, f)
-        except Exception as e: logger.error(f"Save State Error: {e}")
+        except: pass
 
     def _load_state(self):
-        # บังคับ Reset สำหรับการรันครั้งแรกเพื่อให้มั่นใจว่าบอทจะซื้อ
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, "r") as f:
+                    d = json.load(f)
+                    return d['last_action'], d['avg_price'], d['stage'], d.get('total_units', 0.0), d.get('highest_price', 0.0)
+            except: pass
         return "sell", 0.0, 0, 0.0, 0.0
 
     def get_balance(self):
@@ -92,21 +98,18 @@ class BitkubBot:
             headers = {"Authorization": f"Bearer {self.line_token}", "Content-Type": "application/json"}
             payload = {"to": self.line_id, "messages": [{"type": "text", "text": msg}]}
             requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
-        except Exception as e: logger.error(f"Line Error: {e}")
+        except: pass
 
     def run(self):
-        self.notify(f"🚀 บอทเริ่มทำงาน (ฉบับแก้ไขสมบูรณ์)\nตลาด: {self.symbol}")
+        self.notify(f"🚀 บอทอัปเกรดสำเร็จ!\nสถานะปัจจุบัน: {self.last_action.upper()}\nเป้าหมายกำไร: {self.target_profit}%")
         while True:
             try:
-                # 1. ดึงราคาปัจจุบัน
+                # 1. ดึงข้อมูลตลาด
                 ticker = self._request("GET", "/api/v3/market/ticker")
                 current_price = 0
-                if isinstance(ticker, list):
-                    for s in ticker:
-                        if s.get('symbol') == self.symbol: current_price = float(s.get('last', 0))
-                elif self.symbol in ticker:
+                if isinstance(ticker, dict) and self.symbol in ticker:
                     current_price = float(ticker[self.symbol].get('last', 0))
-
+                
                 # 2. ดึงข้อมูล EMA
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
                 ema_val = self.calculate_ema(history.get('c', []), 50)
@@ -114,11 +117,11 @@ class BitkubBot:
                 thb, coin = self.get_balance()
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- ตรรกะการซื้อ (ไม้แรก) ---
+                # --- BUY LOGIC (2 ไม้) ---
                 if self.last_action == "sell" and thb > 50:
-                    # เงื่อนไข: ถ้าราคา > EMA หรือบอทเพิ่งเริ่มรันครั้งแรก (Force Buy)
+                    # ซื้อไม้แรกถ้า ราคา > EMA หรือไม่มีข้อมูล EMA
                     if ema_val is None or current_price >= (ema_val * 0.998):
-                        buy_amt = thb * 0.49 # แบ่งซื้อไม้แรกครึ่งหนึ่งของเงินที่มี
+                        buy_amt = thb * 0.49
                         res = self.place_market_order("buy", buy_amt)
                         if res.get('error') == 0:
                             self.total_units = float(res['result'].get('rec', 0))
@@ -126,10 +129,11 @@ class BitkubBot:
                             self.current_stage = 1
                             self.last_action = "buy"
                             self.highest_price = current_price
-                            self.notify(f"🟢 ซื้อไม้แรกสำเร็จ!\nราคา: {current_price:,.2f}\nใช้เงิน: {buy_amt:,.2f} THB")
+                            self._save_state()
+                            self.notify(f"🟢 BUY 1/2 สำเร็จ!\nราคา: {current_price:,.2f}")
 
-                # --- ตรรกะการซื้อ (ไม้สอง) ---
                 elif self.current_stage == 1 and thb > 50 and pnl >= 0.5:
+                    # ซื้อไม้สองถ้ากำไรมาแล้ว 0.5% (Confirm เทรนด์)
                     buy_amt = thb * 0.95
                     res = self.place_market_order("buy", buy_amt)
                     if res.get('error') == 0:
@@ -137,29 +141,34 @@ class BitkubBot:
                         self.avg_price = ((self.avg_price * self.total_units) + (current_price * new_units)) / (self.total_units + new_units)
                         self.total_units += new_units
                         self.current_stage = 2
-                        self.notify(f"🟢 ซื้อไม้สองสำเร็จ!\nราคาเฉลี่ยใหม่: {self.avg_price:,.2f}")
+                        self._save_state()
+                        self.notify(f"🟢 BUY 2/2 สำเร็จ!\nต้นทุนเฉลี่ย: {self.avg_price:,.2f}")
 
-                # --- ตรรกะการขาย ---
+                # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0:
-                    if current_price > self.highest_price: self.highest_price = current_price
-                    
+                    if current_price > self.highest_price:
+                        self.highest_price = current_price
+                        self._save_state()
+
                     reason = None
                     if pnl <= -self.stop_loss: reason = "Stop Loss"
-                    elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))): reason = "Trailing Stop"
-                    elif ema_val and current_price < (ema_val * 0.995): reason = "Trend Change"
+                    elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
+                        reason = "Trailing Stop"
+                    elif ema_val and current_price < (ema_val * 0.995): reason = "Trend Reversed"
 
                     if reason:
                         res = self.place_market_order("sell", coin)
                         if res.get('error') == 0:
-                            self.notify(f"🔴 ขายทั้งหมดเรียบร้อย\nเหตุผล: {reason}\nกำไร/ขาดทุน: {pnl:+.2f}%")
+                            self.notify(f"🔴 SELL ALL เรียบร้อย\nเหตุผล: {reason}\nP/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
+                            self._save_state()
 
-                # Report ทุก 3 ชม.
+                # รายงานพอร์ตทุก 3 ชม.
                 if time.time() - self.last_report_time >= 10800:
-                    self.notify(f"📊 รายงานสถานะ\nราคา: {current_price:,.2f}\nเงินสด: {thb:,.2f}\nเหรียญ: {coin:,.4f}")
+                    self.notify(f"📊 รายงานสถานะ\nราคา: {current_price:,.2f}\nPNL: {pnl:+.2f}%")
                     self.last_report_time = time.time()
 
-            except Exception as e: logger.error(f"Loop Error: {e}")
+            except Exception as e: logger.error(f"Error: {e}")
             time.sleep(30)
 
 def run_health_check():
