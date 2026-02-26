@@ -73,15 +73,14 @@ class BitkubBot:
 
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
-        if res.get('error') == 0:
+        if res and res.get('error') == 0:
             coin = self.symbol.split('_')[1]
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
     def check_and_cancel_sell_orders(self, current_price, ema_val):
-        """ ระบบ Anti-Stuck: ถ้าราคาดีดกลับขึ้นเหนือ EMA ให้ยกเลิก Order ขายทันทีเพื่อถือต่อ """
         res = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
-        if res.get('error') == 0 and res.get('result'):
+        if res and res.get('error') == 0 and res.get('result'):
             for order in res['result']:
                 if order['side'].lower() == "sell":
                     if current_price > (ema_val * 1.002):
@@ -102,7 +101,7 @@ class BitkubBot:
         return self._request("POST", path, payload, private=True)
 
     def calculate_ema(self, prices, period=50):
-        if len(prices) < period: return None
+        if not prices or len(prices) < period: return None
         k = 2 / (period + 1)
         ema = sum(prices[:period]) / period
         ema_list = [ema]
@@ -125,11 +124,10 @@ class BitkubBot:
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         now_th = self.get_local_time()
         
-        # คำนวณราคาที่จะโดน Trailing Stop
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
         report = (
-            "💎 [ULTIMATE REPORT V5.1]\n"
+            "💎 [ULTIMATE REPORT V5.2]\n"
             "━━━━━━━━━━━━━━━\n"
             f"📊 MARKET: {self.symbol}\n"
             f"💵 Price: {price:,.2f} | P/L: {pnl:+.2f}%\n"
@@ -147,53 +145,53 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 Bot V5.1 Ultimate Started\nFull Reporting & Stability Active")
-        
+        self.notify(f"🚀 Bot V5.2 Fixed Started")
         while True:
             try:
-                # 1. ข้อมูลราคาปัจจุบัน
+                # 1. ข้อมูลราคาปัจจุบัน (Safe Fetch)
                 ticker = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
-                current_price = float(ticker['result'][self.symbol]['last'])
-                
-                # 2. คำนวณเทรนด์ EMA
+                if not ticker or self.symbol not in ticker: 
+                    logger.error("Ticker data error"); time.sleep(30); continue
+                current_price = float(ticker[self.symbol]['last'])
+
+                # 2. คำนวณเทรนด์ EMA (Safe Fetch & Check)
                 history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
+                if not isinstance(history, dict) or 'c' not in history:
+                    logger.error("History data error"); time.sleep(30); continue
+                
                 prices = history.get('c', [])
                 ema_series = self.calculate_ema(prices, 50)
                 if not ema_series: time.sleep(30); continue
-                
+
                 ema_val = ema_series[-1]
                 ema_prev = ema_series[-2]
                 is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
 
-                # 3. ระบบ Re-sync สถานะจาก Wallet จริง (กันหลงไม้)
+                # 3. Sync Balance
                 thb, coin_bal = self.get_balance()
                 if coin_bal * current_price > 50: 
                     if self.last_action == "sell" or self.current_stage == 0:
                         self.last_action, self.current_stage, self.total_units = "buy", 2, coin_bal
                         self.avg_price = current_price if self.avg_price == 0 else self.avg_price
                         self._save_state()
-                        logger.info("🔄 Re-sync: Found coins in wallet. Setting state to Stage 2.")
 
-                # 4. ตรวจสอบ Order ขายค้าง (Anti-Stuck)
                 self.check_and_cancel_sell_orders(current_price, ema_val)
-
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY LOGIC ---
+                # --- BUY/SELL LOGIC (Same as V5.1) ---
                 if is_uptrend and self.current_stage < 2:
                     res_open = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
-                    if not res_open.get('result'):
+                    if res_open and not res_open.get('result'):
                         if self.current_stage == 0 and thb >= 10:
                             res = self.place_order_v3("buy", thb * 0.49, current_price)
-                            if res.get('error') == 0:
+                            if res and res.get('error') == 0:
                                 self.total_units, self.avg_price, self.current_stage, self.last_action = float(res['result']['rec']), float(res['result']['rat']), 1, "buy"
                                 self.highest_price = self.avg_price
                                 self._save_state()
                                 self.notify(f"🟢 [BUY 1/2] @ {self.avg_price:,.2f}")
-
                         elif self.current_stage == 1 and pnl >= 0.5 and thb >= 10:
                             res = self.place_order_v3("buy", thb * 0.95, current_price)
-                            if res.get('error') == 0:
+                            if res and res.get('error') == 0:
                                 nq, nr = float(res['result']['rec']), float(res['result']['rat'])
                                 self.avg_price = ((self.avg_price * self.total_units) + (nq * nr)) / (self.total_units + nq)
                                 self.total_units += nq
@@ -201,26 +199,21 @@ class BitkubBot:
                                 self._save_state()
                                 self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
 
-                # --- SELL LOGIC ---
                 if self.last_action == "buy" and self.total_units > 0:
-                    if current_price > self.highest_price:
-                        self.highest_price = current_price
-                        self._save_state()
-
+                    if current_price > self.highest_price: self.highest_price = current_price; self._save_state()
                     reason = None
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif current_price < (ema_val * 0.998): reason = "Trend Reversed (Below EMA)"
+                    elif current_price < (ema_val * 0.998): reason = "Trend Reversed"
 
                     if reason:
                         res = self.place_order_v3("sell", self.total_units, current_price)
-                        if res.get('error') == 0:
+                        if res and res.get('error') == 0:
                             self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
 
-                # รายงานสรุปทุก 3 ชม.
                 if time.time() - self.last_report_time >= 10800:
                     self.send_detailed_report(current_price, pnl)
                     self.last_report_time = time.time()
