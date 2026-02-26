@@ -8,14 +8,14 @@ logger = logging.getLogger(__name__)
 
 class BitkubBot:
     def __init__(self):
-        # API & Notification Config
+        # API & Notification Config (เปลี่ยนจาก Line เป็น Telegram)
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
-        self.line_token = os.getenv("LINE_ACCESS_TOKEN")
-        self.line_id = os.getenv("LINE_USER_ID")
+        self.tg_token = os.getenv("TELEGRAM_TOKEN")  # เปลี่ยนใหม่
+        self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID") # เปลี่ยนใหม่
         self.host = "https://api.bitkub.com"
 
-        # Strategy Config
+        # Strategy Config (เหมือนเดิม)
         self.symbol = os.getenv("SYMBOL", "THB_XRP").upper()
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1500.00))
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
@@ -29,6 +29,28 @@ class BitkubBot:
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
+
+    # --- ส่วนที่แก้ไข: ฟังก์ชันแจ้งเตือนใหม่ ---
+    def notify(self, msg):
+        if not self.tg_token or not self.tg_chat_id:
+            logger.info(f"Notification (No Token): {msg}")
+            return
+        
+        try:
+            # ใช้ Telegram Bot API
+            url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+            payload = {
+                "chat_id": self.tg_chat_id,
+                "text": msg,
+                "parse_mode": "HTML" # เพื่อให้รองรับการทำตัวหนา/จัดรูปแบบ
+            }
+            res = requests.post(url, json=payload, timeout=10)
+            if res.status_code != 200:
+                logger.error(f"Telegram Error: {res.text}")
+        except Exception as e:
+            logger.error(f"Notify Error: {e}")
+
+    # --- (ส่วนที่เหลือของ Class BitkubBot ด้านล่างนี้เหมือนเดิมทุกประการ) ---
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
@@ -84,7 +106,7 @@ class BitkubBot:
                 if order['side'].lower() == "sell":
                     if current_price > (ema_val * 1.002):
                         self._request("POST", "/api/v3/market/cancel-order", {"sym": self.symbol, "id": order['id']}, private=True)
-                        self.notify(f"⚠️ [REVIVE] ราคากลับตัวขึ้นเหนือ EMA! ยกเลิกการขายที่ค้างอยู่เพื่อถือต่อ")
+                        self.notify(f"⚠️ <b>[REVIVE]</b> ราคากลับตัวขึ้นเหนือ EMA! ยกเลิกการขายที่ค้างอยู่")
                         return True
         return False
 
@@ -107,14 +129,6 @@ class BitkubBot:
             ema_list.append(ema)
         return ema_list
 
-    def notify(self, msg):
-        if not self.line_token: logger.info(msg); return
-        try:
-            headers = {"Authorization": f"Bearer {self.line_token}", "Content-Type": "application/json"}
-            payload = {"to": self.line_id, "messages": [{"type": "text", "text": msg}]}
-            requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload, timeout=10)
-        except: pass
-
     def send_detailed_report(self, price, pnl, ema_val=None):
         thb_bal, coin_bal = self.get_balance()
         total_equity = thb_bal + (coin_bal * price)
@@ -122,19 +136,19 @@ class BitkubBot:
         now_th = self.get_local_time()
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
-        # ส่วนที่เพิ่ม: คำนวณความห่างจาก EMA
         ema_str = f"{ema_val:,.2f}" if ema_val else "Calculating..."
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
 
+        # ปรับรูปแบบ Message เล็กน้อยให้เข้ากับ Telegram (ใช้ <b> เพื่อตัวหนา)
         report = (
-            "💎 [ULTIMATE REPORT V5.5.1]\n"
+            "<b>💎 [ULTIMATE REPORT V5.5.1]</b>\n"
             "━━━━━━━━━━━━━━━\n"
             f"📊 MARKET: {self.symbol}\n"
             f"💵 Price: {price:,.2f} | P/L: {pnl:+.2f}%\n"
-            f"📈 EMA(50): {ema_str} {diff_ema}\n" # บรรทัดที่เพิ่มใหม่
+            f"📈 EMA(50): {ema_str} {diff_ema}\n"
             f"🕒 Time: {now_th.strftime('%d/%m %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
-            "🏦 ASSET SUMMARY\n"
+            "<b>🏦 ASSET SUMMARY</b>\n"
             f"💰 Cash: {thb_bal:,.2f} THB\n"
             f"🪙 Coin: {coin_bal:,.4f} {self.symbol.replace('THB_', '')}\n"
             f"📈 Equity: {total_equity:,.2f} THB\n"
@@ -146,12 +160,13 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 Bot V5.5 Ultimate Started\nMonitoring {self.symbol}")
+        # เปลี่ยนข้อความเริ่มบอทให้เข้ากับ Telegram
+        self.notify(f"<b>🚀 Bot V5.5 Ultimate Started</b>\nMonitoring {self.symbol}")
         search_sym = f"{self.symbol.split('_')[1]}_{self.symbol.split('_')[0]}"
 
         while True:
             try:
-                # 1. ข้อมูลราคา (Fix List Search)
+                # 1. ข้อมูลราคา
                 ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
                 current_price = None
                 if isinstance(ticker_res, list):
@@ -177,7 +192,7 @@ class BitkubBot:
                 ema_val, ema_prev = ema_series[-1], ema_series[-2]
                 is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
 
-                # 3. Sync Wallet (กันหลงไม้)
+                # 3. Sync Wallet
                 thb, coin_bal = self.get_balance()
                 if coin_bal * current_price > 50: 
                     if self.last_action == "sell" or self.current_stage == 0:
@@ -189,7 +204,7 @@ class BitkubBot:
                 self.check_and_cancel_sell_orders(current_price, ema_val)
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY LOGIC (2 Stages) ---
+                # --- BUY LOGIC ---
                 if is_uptrend and self.current_stage < 2:
                     res_open = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
                     if res_open and not res_open.get('result'):
@@ -198,7 +213,7 @@ class BitkubBot:
                             if res and res.get('error') == 0:
                                 self.total_units, self.avg_price, self.current_stage, self.last_action = float(res['result']['rec']), float(res['result']['rat']), 1, "buy"
                                 self.highest_price = self.avg_price
-                                self._save_state(); self.notify(f"🟢 [BUY 1/2] @ {self.avg_price:,.2f}")
+                                self._save_state(); self.notify(f"<b>🟢 [BUY 1/2]</b> @ {self.avg_price:,.2f}")
 
                         elif self.current_stage == 1 and pnl >= 0.5 and thb >= 10:
                             res = self.place_order_v3("buy", thb * 0.95, current_price)
@@ -207,7 +222,7 @@ class BitkubBot:
                                 self.avg_price = ((self.avg_price * self.total_units) + (nq * nr)) / (self.total_units + nq)
                                 self.total_units += nq
                                 self.current_stage = 2
-                                self._save_state(); self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
+                                self._save_state(); self.notify(f"<b>🟢 [BUY 2/2]</b> New Avg: {self.avg_price:,.2f}")
 
                 # --- SELL LOGIC ---
                 if self.last_action == "buy" and self.total_units > 0:
@@ -221,13 +236,13 @@ class BitkubBot:
                     if reason:
                         res = self.place_order_v3("sell", self.total_units, current_price)
                         if res and res.get('error') == 0:
-                            self.notify(f"🔴 [SELL ALL]\nReason: {reason}\nP/L: {pnl:+.2f}%")
+                            self.notify(f"<b>🔴 [SELL ALL]</b>\nReason: {reason}\nP/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
 
                 # Report every 3 hours
                 if time.time() - self.last_report_time >= 10800:
-                    self.send_detailed_report(current_price, pnl, ema_val) # เพิ่ม ema_val เข้าไป
+                    self.send_detailed_report(current_price, pnl, ema_val)
                     self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"🔥 Loop Error: {e}")
