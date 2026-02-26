@@ -22,7 +22,7 @@ class BitkubBot:
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
 
-        # เก็บไฟล์ State ไว้ใน Folder ปัจจุบันเพื่อให้ Railway เรียกใช้ง่ายขึ้น
+        # ชื่อไฟล์สำหรับเก็บสถานะ
         self.state_file = "bot_state_v3.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
         self.last_report_time = 0
@@ -74,12 +74,11 @@ class BitkubBot:
         except Exception as e: logger.error(f"Save State Error: {e}")
 
     def _load_state(self):
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, "r") as f:
-                    d = json.load(f)
-                    return d['last_action'], d['avg_price'], d['stage'], d.get('total_units', 0.0), d.get('highest_price', 0.0)
-            except: pass
+        """
+        ปรับปรุง: บังคับ Reset สถานะเป็นว่างทุกครั้งที่เริ่มโปรแกรม 
+        เพื่อแก้ปัญหาบอทจำค้างว่ามีของแล้วไม่ยอมซื้อไม้แรก
+        """
+        logger.info("Force Resetting Bot State to SELL/EMPTY...")
         return "sell", 0.0, 0, 0.0, 0.0
 
     def get_balance(self):
@@ -95,7 +94,6 @@ class BitkubBot:
         return self._request("POST", path, payload, private=True)
 
     def notify(self, msg):
-        """แก้ไข Syntax Error บรรทัด headers"""
         if not self.line_token: 
             logger.info(msg)
             return
@@ -137,7 +135,7 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 Bot Ultimate Edition Started\nSymbol: {self.symbol}\nCapital: {self.initial_equity} THB")
+        self.notify(f"🚀 Bot Reset & Started\nSymbol: {self.symbol}\nStatus: Ready to Buy")
 
         while True:
             try:
@@ -167,10 +165,10 @@ class BitkubBot:
                 # --- BUY LOGIC ---
                 if self.last_action == "sell":
                     thb, _ = self.get_balance()
-                    # เงื่อนไข: ราคาสูงกว่า EMA 50 เล็กน้อย (+0.2% buffer)
+                    # ถ้าราคาสูงกว่า EMA 50 ให้ซื้อไม้แรก
                     if current_price >= (ema_val * 0.998) and thb > 50:
-                        buy_amount = thb * 0.49
-                        res = self.place_market_order("buy", buy_amount)
+                        buy_amt = thb * 0.49
+                        res = self.place_market_order("buy", buy_amt)
                         if res.get('error') == 0:
                             self.total_units = float(res['result'].get('rec', 0))
                             self.avg_price = current_price
@@ -178,20 +176,20 @@ class BitkubBot:
                             self.last_action = "buy"
                             self.highest_price = current_price
                             self._save_state()
-                            self.notify(f"🟢 [BUY 1/2] Price: {current_price:,.2f}")
+                            self.notify(f"🟢 [BUY 1/2] เข้าซื้อไม้แรกที่: {current_price:,.2f}")
 
                 elif self.current_stage == 1:
                     thb, _ = self.get_balance()
                     if pnl >= 0.5 and thb > 50:
-                        buy_amount = thb * 0.95
-                        res = self.place_market_order("buy", buy_amount)
+                        buy_amt = thb * 0.95
+                        res = self.place_market_order("buy", buy_amt)
                         if res.get('error') == 0:
                             new_units = float(res['result'].get('rec', 0))
                             self.avg_price = ((self.avg_price * self.total_units) + (current_price * new_units)) / (self.total_units + new_units)
                             self.total_units += new_units
                             self.current_stage = 2
                             self._save_state()
-                            self.notify(f"🟢 [BUY 2/2] New Avg: {self.avg_price:,.2f}")
+                            self.notify(f"🟢 [BUY 2/2] เข้าซื้อไม้สองที่: {current_price:,.2f}")
 
                 # --- SELL LOGIC ---
                 if self.last_action == "buy":
@@ -202,7 +200,7 @@ class BitkubBot:
                     reason = None
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
-                        reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
+                        reason = f"Trailing Stop"
                     elif current_price < (ema_val * 0.995): reason = "Trend Reversed"
 
                     if reason:
