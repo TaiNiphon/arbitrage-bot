@@ -107,6 +107,10 @@ class BitkubBot:
         all_time_pnl = ((total_equity - self.initial_equity) / self.initial_equity) * 100
         ema_diff = ((price - ema_val) / ema_val * 100) if ema_val else 0
 
+        # ปรับเวลาให้เป็นประเทศไทย (UTC+7)
+        import datetime as dt
+        thai_time = (dt.datetime.utcnow() + dt.timedelta(hours=7)).strftime('%H:%M')
+
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Wait for Target"
 
         report = (
@@ -114,7 +118,7 @@ class BitkubBot:
             "━━━━━━━━━━━━━━━\n"
             f"💰 Market: {self.symbol}: {price:,.2f}\n"
             f"📈 EMA(50): {ema_val:,.2f} ({ema_diff:+.2f}%)\n"
-            f"🕒 Time: {datetime.now().strftime('%H:%M')}\n"
+            f"🕒 Time (TH): {thai_time}\n"  # แสดงเวลาไทย
             "━━━━━━━━━━━━━━━\n"
             f"📦 Position: Stage {self.current_stage}/2\n"
             f"📉 Avg Cost: {self.avg_price:,.2f}\n"
