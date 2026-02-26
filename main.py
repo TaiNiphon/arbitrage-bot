@@ -240,8 +240,8 @@ class BitkubBot:
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
 
-                # Report every 3 hours
-                if time.time() - self.last_report_time >= 10800:
+                # Report every 30 minutes
+                if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(current_price, pnl, ema_val)
                     self.last_report_time = time.time()
 
