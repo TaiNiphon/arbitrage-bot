@@ -45,6 +45,10 @@ class BitkubBot:
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
+        return hmac.new(self.api_secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).heigest()
+
+    def _get_signature(self, ts, method, path, body_str):
+        payload = ts + method + path + body_str
         return hmac.new(self.api_secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
 
     def _request(self, method, path, payload=None, private=False):
@@ -101,7 +105,6 @@ class BitkubBot:
         return 0.0, 0.0
 
     def calculate_net_pnl(self, current_price):
-        """ คำนวณกำไรสุทธิแบบหักค่าธรรมเนียม 0.25% ทั้งไปและกลับ """
         if self.avg_price <= 0: return 0.0
         buy_cost = self.avg_price * (1 + self.fee_pct)
         sell_value = current_price * (1 - self.fee_pct)
@@ -200,7 +203,6 @@ class BitkubBot:
 
                 thb, coin_bal = self.get_balance()
                 
-                # Sync State
                 if coin_bal * current_price > self.min_trade: 
                     if self.last_action == "sell" or self.current_stage == 0:
                         cost_price, _ = self.get_actual_cost()
@@ -209,7 +211,6 @@ class BitkubBot:
                         self.highest_price = max(self.avg_price, current_price)
                         self._save_state()
 
-                # คำนวณ PNL แบบหักค่าธรรมเนียม
                 pnl = self.calculate_net_pnl(current_price)
 
                 if is_uptrend and self.current_stage < 2:
@@ -259,6 +260,20 @@ class BitkubBot:
             except Exception as e: logger.error(f"🔥 Loop Error: {e}")
             time.sleep(30)
 
+# --- ฟังก์ชันที่หายไป (Health Check) ---
+def run_health_check():
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self): 
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot Active")
+        def log_message(self, *a): return
+    # ดึงพอร์ตจาก ENV ถ้าไม่มีให้ใช้ 8080
+    port = int(os.environ.get("PORT", 8080))
+    HTTPServer(('0.0.0.0', port), H).serve_forever()
+
 if __name__ == "__main__":
-    threading.Thread(target=run_health_check, daemon=True).start() # คงฟังก์ชันเดิมไว้
+    # เริ่มต้น Health Check ใน Thread แยก
+    threading.Thread(target=run_health_check, daemon=True).start()
+    # เริ่มต้นการทำงานของบอท
     BitkubBot().run()
