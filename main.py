@@ -20,9 +20,10 @@ class BitkubBot:
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
         
-        # เพิ่มตัวแปรค่าธรรมเนียม (Default 0.25%)
+        # เพิ่มตัวแปร EMA_PERIOD ให้ดึงจาก Railway ได้
+        self.ema_period = int(os.getenv("EMA_PERIOD", 50))
         self.fee_pct = float(os.getenv("FEE_PCT", 0.25)) / 100 
-        self.min_trade = 50.0  # ขั้นต่ำ Bitkub
+        self.min_trade = float(os.getenv("MIN_TRADE", 50.0))
 
         self.state_file = "bot_state_v5.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
@@ -42,10 +43,6 @@ class BitkubBot:
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
             logger.error(f"Notify Error: {e}")
-
-    def _get_signature(self, ts, method, path, body_str):
-        payload = ts + method + path + body_str
-        return hmac.new(self.api_secret.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).heigest()
 
     def _get_signature(self, ts, method, path, body_str):
         payload = ts + method + path + body_str
@@ -130,7 +127,7 @@ class BitkubBot:
             "━━━━━━━━━━━━━━━\n"
             f"<b>📊 MARKET: {self.symbol}</b>\n"
             f"💵 Price: {price:,.2f} THB\n"
-            f"📈 EMA(50): {ema_str} {diff_ema}\n"
+            f"📈 EMA({self.ema_period}): {ema_str} {diff_ema}\n"
             f"🕒 Net P/L: {pnl:+.2f}% (Fee Incl.)\n"
             "━━━━━━━━━━━━━━━\n"
             "<b>🏦 PORTFOLIO</b>\n"
@@ -161,7 +158,7 @@ class BitkubBot:
         }
         return self._request("POST", path, payload, private=True)
 
-    def calculate_ema(self, prices, period=50):
+    def calculate_ema(self, prices, period):
         if not prices or len(prices) < period: return None
         k = 2 / (period + 1)
         ema = sum(prices[:period]) / period
@@ -172,7 +169,7 @@ class BitkubBot:
         return ema_list
 
     def run(self):
-        self.notify(f"<b>🚀 Bot V5.5 Ultimate Started</b>\nMonitoring {self.symbol}")
+        self.notify(f"<b>🚀 Bot V5.6 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
         search_sym = f"{self.symbol.split('_')[1]}_{self.symbol.split('_')[0]}" if "_" in self.symbol else self.symbol
 
         while True:
@@ -190,12 +187,12 @@ class BitkubBot:
                 if current_price is None:
                     time.sleep(30); continue
 
-                history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
+                history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-259200}&to={int(time.time())}")
                 if not isinstance(history, dict) or 'c' not in history:
                     time.sleep(30); continue
 
                 prices = history.get('c', [])
-                ema_series = self.calculate_ema(prices, 50)
+                ema_series = self.calculate_ema(prices, self.ema_period)
                 if not ema_series: time.sleep(30); continue
 
                 ema_val, ema_prev = ema_series[-1], ema_series[-2]
@@ -260,20 +257,14 @@ class BitkubBot:
             except Exception as e: logger.error(f"🔥 Loop Error: {e}")
             time.sleep(30)
 
-# --- ฟังก์ชันที่หายไป (Health Check) ---
 def run_health_check():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): 
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Bot Active")
+            self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
         def log_message(self, *a): return
-    # ดึงพอร์ตจาก ENV ถ้าไม่มีให้ใช้ 8080
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(('0.0.0.0', port), H).serve_forever()
 
 if __name__ == "__main__":
-    # เริ่มต้น Health Check ใน Thread แยก
     threading.Thread(target=run_health_check, daemon=True).start()
-    # เริ่มต้นการทำงานของบอท
     BitkubBot().run()
