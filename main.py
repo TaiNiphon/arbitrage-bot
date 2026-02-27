@@ -20,11 +20,12 @@ class BitkubBot:
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 1.5))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
         
-        # --- Sideways Filter Config ---
-        self.buy_buffer = 1.005 # Price > EMA by 0.5%
+        self.buy_buffer = 1.005 
         self.state_file = "bot_state_v5.json"
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
-        self.last_report_time = 0
+        
+        # ปรับให้ค่าเริ่มต้นเป็น 0 เพื่อให้ส่งรายงานทันทีที่เริ่มรัน
+        self.last_report_time = 0 
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
@@ -145,12 +146,12 @@ class BitkubBot:
         return self._request("POST", path, payload, private=True)
 
     def run(self):
-        now_th = self.get_local_time()
-        self.notify(f"<b>🚀 Bot V5.6.1 Professional Started</b>\n<code>System Online: {now_th.strftime('%H:%M:%S')}</code>")
+        self.notify(f"<b>🚀 Bot V5.6.1 Professional Started</b>")
         search_sym = f"{self.symbol.split('_')[1]}_{self.symbol.split('_')[0]}" if "_" in self.symbol else self.symbol
 
         while True:
             try:
+                current_time_ts = self.get_local_time().timestamp()
                 ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
                 current_price = None
                 if isinstance(ticker_res, dict):
@@ -167,8 +168,8 @@ class BitkubBot:
                 prices = history.get('c', [])
                 ema_series = self.calculate_ema(prices, 50)
                 if not ema_series: time.sleep(30); continue
-
                 ema_val = ema_series[-1]
+
                 is_above_ema = current_price > (ema_val * self.buy_buffer)
                 is_slope_up = ema_series[-1] > ema_series[-2] > ema_series[-3]
                 is_strong_uptrend = is_above_ema and is_slope_up
@@ -176,7 +177,12 @@ class BitkubBot:
                 thb, coin_bal = self.get_balance()
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
-                # --- BUY LOGIC (2-Stage Entry) ---
+                # --- Report Trigger (ทุก 10 นาที หรือรอบแรกทันที) ---
+                if current_time_ts - self.last_report_time >= 600:
+                    self.send_detailed_report(current_price, pnl, ema_val)
+                    self.last_report_time = current_time_ts
+
+                # --- BUY LOGIC ---
                 if is_strong_uptrend and self.current_stage < 2:
                     if self.current_stage == 0 and thb >= 10:
                         res = self.place_order_v3("buy", thb * 0.49, current_price)
@@ -184,7 +190,7 @@ class BitkubBot:
                             self.total_units, self.avg_price, self.current_stage, self.last_action = float(res['result']['rec']), float(res['result']['rat']), 1, "buy"
                             self.highest_price = self.avg_price
                             self._save_state()
-                            self.notify(f"<b>🟢 [EXECUTE BUY 1/2]</b>\nPrice: {self.avg_price:,.2f}\nStatus: Entering Position")
+                            self.notify(f"<b>🟢 [EXECUTE BUY 1/2]</b>\nPrice: {self.avg_price:,.2f}")
 
                     elif self.current_stage == 1 and pnl >= 0.5 and thb >= 10:
                         res = self.place_order_v3("buy", thb * 0.95, current_price)
@@ -194,7 +200,7 @@ class BitkubBot:
                             self.total_units += nq
                             self.current_stage = 2
                             self._save_state()
-                            self.notify(f"<b>🟢 [EXECUTE BUY 2/2]</b>\nAvg Price: {self.avg_price:,.2f}\nStatus: Position Scaled")
+                            self.notify(f"<b>🟢 [EXECUTE BUY 2/2]</b>\nNew Avg: {self.avg_price:,.2f}")
 
                 # --- SELL LOGIC ---
                 if self.last_action == "buy" and self.total_units > 0:
@@ -214,10 +220,6 @@ class BitkubBot:
                             self.notify(f"<b>🔴 [EXECUTE SELL ALL]</b>\nReason: {reason}\nFinal P/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
-
-                if time.time() - self.last_report_time >= 1800:
-                    self.send_detailed_report(current_price, pnl, ema_val)
-                    self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"🔥 Loop Error: {e}")
             time.sleep(30)
