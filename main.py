@@ -223,7 +223,7 @@ class BitkubBot:
                             self._save_state()
 
                 # รายงานสถานะบอททุก 30 นาที
-                if time.time() - self.last_report_time >= 1800:
+                if time.time() - self.last_report_time >= 120:
                     self.send_detailed_report(current_price, pnl, ema_val)
                     self.last_report_time = time.time()
 
