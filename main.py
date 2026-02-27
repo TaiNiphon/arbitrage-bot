@@ -187,7 +187,7 @@ class BitkubBot:
                 if not ema_series: time.sleep(30); continue
 
                 ema_val, ema_prev = ema_series[-1], ema_series[-2]
-                is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
+                is_uptrend = current_price > (ema_val * 1.005) and ema_val > (ema_prev * 1.001)
 
                 thb, coin_bal = self.get_balance()
                 if coin_bal * current_price > 50: 
@@ -218,12 +218,24 @@ class BitkubBot:
                                 self._save_state(); self.notify(f"<b>🟢 [BUY 2/2]</b> New Avg: {self.avg_price:,.2f}")
 
                 if self.last_action == "buy" and self.total_units > 0:
-                    if current_price > self.highest_price: self.highest_price = current_price; self._save_state()
+                    if current_price > self.highest_price: 
+                        self.highest_price = current_price
+                        self._save_state()
+                    
                     reason = None
-                    if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
+                    
+                    # 1. Stop Loss (ปรับให้ยืดหยุ่นขึ้น หรือใช้ค่าเดิม)
+                    if pnl <= -self.stop_loss: 
+                        reason = f"Stop Loss ({pnl:.2f}%)"
+                    
+                    # 2. Trailing Stop (รักษาไว้เพื่อ Lock กำไร)
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif current_price < (ema_val * 0.998): reason = "Trend Reversed"
+                    
+                    # 3. แก้ไขเงื่อนไข Trend Reversed (กันโดนหลอกช่วง Sideway)
+                    # เพิ่มเงื่อนไข: ราคาต้องหลุด 1% (0.990) และเส้น EMA ต้องเริ่มหักหัวลง (ema_val < ema_prev)
+                    elif current_price < (ema_val * 0.990) and ema_val < ema_prev:
+                        reason = "Trend Reversed (Confirmed Down)"
 
                     if reason:
                         res = self.place_order_v3("sell", self.total_units, current_price)
