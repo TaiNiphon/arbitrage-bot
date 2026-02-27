@@ -1,4 +1,4 @@
-import os, requests, time, hmac, hashlib, json, threading, logging
+import os, requests, time, hmac, hashlib, json, threading, logging, math
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta, timezone
 
@@ -15,7 +15,6 @@ class BitkubBot:
         self.host = "https://api.bitkub.com"
 
         self.symbol = os.getenv("SYMBOL", "THB_XRP").upper()
-        # แนะนำให้ตั้ง INITIAL_EQUITY ใน Railway ให้ตรงกับยอดรวม (Cash + Coin) เริ่มต้นจริง
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 5000.00)) 
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
@@ -26,7 +25,9 @@ class BitkubBot:
         self.last_report_time = 0
 
     def get_local_time(self):
-        return datetime.now(timezone.utc) + timedelta(hours=7)
+        # ปรับให้ยืดหยุ่น ถ้าเครื่องเป็นไทยอยู่แล้วจะไม่บวกซ้ำ
+        now = datetime.now(timezone.utc)
+        return now + timedelta(hours=7)
 
     def notify(self, msg):
         if not self.tg_token or not self.tg_chat_id:
@@ -79,10 +80,18 @@ class BitkubBot:
             except: pass
         return "sell", 0.0, 0, 0.0, 0.0
 
+    def get_actual_cost(self):
+        """ จุดเสี่ยง 2: ดึงต้นทุนจริงจากประวัติการเทรดล่าสุด """
+        res = self._request("GET", f"/api/v3/market/my-order-history?sym={self.symbol}&p=1&l=1", private=True)
+        if res and res.get('error') == 0 and res.get('result'):
+            last_order = res['result'][0]
+            if last_order['side'].lower() == 'buy':
+                return float(last_order['rat']), float(last_order['amount'])
+        return 0.0, 0.0
+
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res and res.get('error') == 0:
-            # แก้ไข: ตัดคำว่า THB ออกเพื่อให้เหลือแค่ชื่อเหรียญ (เช่น XRP) สำหรับดึงค่าจาก API
             coin_key = self.symbol.replace("THB_", "").replace("_THB", "")
             thb_bal = float(res['result'].get('THB', 0))
             coin_bal = float(res['result'].get(coin_key, 0))
@@ -93,8 +102,6 @@ class BitkubBot:
         thb_bal, coin_bal = self.get_balance()
         coin_value = coin_bal * price
         total_equity = thb_bal + coin_value
-
-        # คำนวณกำไร/ขาดทุนสะสมจริง
         net_profit = total_equity - self.initial_equity
         growth_pct = (net_profit / self.initial_equity) * 100
 
@@ -127,7 +134,6 @@ class BitkubBot:
         )
         self.notify(report)
 
-    # ... (ฟังก์ชันอื่นๆ: place_order_v3, calculate_ema, run ยังคงเหมือนเดิม) ...
     def check_and_cancel_sell_orders(self, current_price, ema_val):
         res = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
         if res and res.get('error') == 0 and res.get('result'):
@@ -140,11 +146,18 @@ class BitkubBot:
         return False
 
     def place_order_v3(self, side, amount, price):
+        """ จุดเสี่ยง 1: จัดการทศนิยม (Precision) ให้เหมาะสมกับ XRP """
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         typ = "limit" if side == "buy" else "market"
+        
+        # ตัดทศนิยมเหลือ 4 ตำแหน่งสำหรับเหรียญ XRP/THB เพื่อความปลอดภัย
+        clean_amount = math.floor(amount * 10000) / 10000 if side == "sell" else int(amount)
+        
         payload = {
-            "sym": self.symbol, "amt": int(amount) if side == "buy" else round(amount, 6),
-            "rat": round(price, 4) if typ == "limit" else 0, "typ": typ
+            "sym": self.symbol, 
+            "amt": clean_amount,
+            "rat": round(price, 4) if typ == "limit" else 0, 
+            "typ": typ
         }
         return self._request("POST", path, payload, private=True)
 
@@ -159,7 +172,7 @@ class BitkubBot:
         return ema_list
 
     def run(self):
-        self.notify(f"<b>🚀 Bot V5.5 Ultimate Started</b>\nMonitoring {self.symbol}")
+        self.notify(f"<b>🚀 Bot V5.5 Pro-Fixed Started</b>\nMonitoring {self.symbol}")
         search_sym = f"{self.symbol.split('_')[1]}_{self.symbol.split('_')[0]}" if "_" in self.symbol else self.symbol
 
         while True:
@@ -189,18 +202,25 @@ class BitkubBot:
                 is_uptrend = current_price > (ema_val * 1.005) and ema_val > (ema_prev * 1.001)
 
                 thb, coin_bal = self.get_balance()
+                
+                # จุดเสี่ยง 2: Sync สถานะพร้อมดึงต้นทุนจริง
                 if coin_bal * current_price > 50: 
                     if self.last_action == "sell" or self.current_stage == 0:
+                        cost_price, _ = self.get_actual_cost()
                         self.last_action, self.current_stage, self.total_units = "buy", 2, coin_bal
-                        self.avg_price = current_price if self.avg_price == 0 else self.avg_price
+                        self.avg_price = cost_price if cost_price > 0 else current_price
+                        self.highest_price = max(self.avg_price, current_price)
                         self._save_state()
 
                 self.check_and_cancel_sell_orders(current_price, ema_val)
                 pnl = ((current_price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0.0
 
                 if is_uptrend and self.current_stage < 2:
+                    # จุดเสี่ยง 4: เช็กเฉพาะ Order ฝั่ง Buy ที่ค้าง
                     res_open = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
-                    if res_open and not res_open.get('result'):
+                    has_buy_order = any(o['side'].lower() == 'buy' for o in res_open.get('result', [])) if res_open.get('result') else False
+                    
+                    if not has_buy_order:
                         if self.current_stage == 0 and thb >= 10:
                             res = self.place_order_v3("buy", thb * 0.49, current_price)
                             if res and res.get('error') == 0:
@@ -222,19 +242,13 @@ class BitkubBot:
                         self._save_state()
 
                     reason = None
-
-                    # 1. Stop Loss (ปรับให้ยืดหยุ่นขึ้น หรือใช้ค่าเดิม)
                     if pnl <= -self.stop_loss: 
                         reason = f"Stop Loss ({pnl:.2f}%)"
-
-                    # 2. Trailing Stop (รักษาไว้เพื่อ Lock กำไร)
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-
-                    # 3. แก้ไขเงื่อนไข Trend Reversed (กันโดนหลอกช่วง Sideway)
-                    # เพิ่มเงื่อนไข: ราคาต้องหลุด 1% (0.990) และเส้น EMA ต้องเริ่มหักหัวลง (ema_val < ema_prev)
-                    elif current_price < (ema_val * 0.990) and ema_val < ema_prev:
-                        reason = "Trend Reversed (Confirmed Down)"
+                    # จุดเสี่ยง 3: ปรับ Trend Reversed ให้กระชับขึ้น
+                    elif current_price < (ema_val * 0.990):
+                        reason = "Trend Reversed (Price below EMA 1%)"
 
                     if reason:
                         res = self.place_order_v3("sell", self.total_units, current_price)
