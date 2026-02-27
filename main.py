@@ -95,7 +95,8 @@ class BitkubBot:
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
         if res and res.get('error') == 0:
-            coin = self.symbol.replace("THB_", "")
+            # แก้ไขตรงนี้: ตัดคำว่า THB_ หรือ _THB ออกเพื่อให้เหลือแค่ชื่อเหรียญ XRP
+            coin = self.symbol.replace("THB_", "").replace("_THB", "")
             return float(res['result'].get('THB', 0)), float(res['result'].get(coin, 0))
         return 0.0, 0.0
 
