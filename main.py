@@ -99,7 +99,7 @@ class BitkubBot:
         growth_pct = (net_profit / self.initial_equity) * 100
 
         now_th = self.get_local_time()
-        status = "💰 HOLDING CASH" if coin_bal * price < 50 else "🚀 [ULTIMATE REPORT V5.5]"
+        status = "💰 HOLDING CASH" if coin_bal * price < 50 else "🚀 HOLDING COIN"
 
         ema_str = f"{ema_val:,.2f}" if ema_val else "N/A"
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
