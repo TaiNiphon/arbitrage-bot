@@ -220,17 +220,17 @@ class BitkubBot:
                     if current_price > self.highest_price: 
                         self.highest_price = current_price
                         self._save_state()
-                    
+
                     reason = None
-                    
+
                     # 1. Stop Loss (ปรับให้ยืดหยุ่นขึ้น หรือใช้ค่าเดิม)
                     if pnl <= -self.stop_loss: 
                         reason = f"Stop Loss ({pnl:.2f}%)"
-                    
+
                     # 2. Trailing Stop (รักษาไว้เพื่อ Lock กำไร)
                     elif pnl >= self.target_profit and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    
+
                     # 3. แก้ไขเงื่อนไข Trend Reversed (กันโดนหลอกช่วง Sideway)
                     # เพิ่มเงื่อนไข: ราคาต้องหลุด 1% (0.990) และเส้น EMA ต้องเริ่มหักหัวลง (ema_val < ema_prev)
                     elif current_price < (ema_val * 0.990) and ema_val < ema_prev:
