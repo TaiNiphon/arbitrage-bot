@@ -19,14 +19,14 @@ class BitkubBot:
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 3.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
-        
-        # เพิ่มตัวแปร EMA_PERIOD ให้ดึงจาก Railway ได้
+
         self.ema_period = int(os.getenv("EMA_PERIOD", 50))
         self.fee_pct = float(os.getenv("FEE_PCT", 0.25)) / 100 
         self.min_trade = float(os.getenv("MIN_TRADE", 50.0))
 
         self.state_file = "bot_state_v5.json"
-        self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = self._load_state()
+        # เพิ่มการโหลด last_pnl (ค่าที่ 6)
+        self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price, self.last_pnl = self._load_state()
         self.last_report_time = 0
 
     def get_local_time(self):
@@ -71,7 +71,8 @@ class BitkubBot:
                 json.dump({
                     "last_action": self.last_action, "avg_price": self.avg_price,
                     "stage": self.current_stage, "total_units": self.total_units,
-                    "highest_price": self.highest_price
+                    "highest_price": self.highest_price,
+                    "last_pnl": self.last_pnl # บันทึก P/L ล่าสุดลงไฟล์
                 }, f)
         except: pass
 
@@ -80,9 +81,14 @@ class BitkubBot:
             try:
                 with open(self.state_file, "r") as f:
                     d = json.load(f)
-                    return d['last_action'], d['avg_price'], d['stage'], d.get('total_units', 0.0), d.get('highest_price', 0.0)
+                    return (d.get('last_action', 'sell'), 
+                            d.get('avg_price', 0.0), 
+                            d.get('stage', 0), 
+                            d.get('total_units', 0.0), 
+                            d.get('highest_price', 0.0),
+                            d.get('last_pnl', 0.0)) # โหลดค่ากลับมา
             except: pass
-        return "sell", 0.0, 0, 0.0, 0.0
+        return "sell", 0.0, 0, 0.0, 0.0, 0.0
 
     def get_actual_cost(self):
         res = self._request("GET", f"/api/v3/market/my-order-history?sym={self.symbol}&p=1&l=1", private=True)
@@ -115,11 +121,16 @@ class BitkubBot:
         growth_pct = (net_profit / self.initial_equity) * 100
 
         now_th = self.get_local_time()
-        status = "💰 HOLDING CASH" if coin_bal * price < self.min_trade else "🚀 HOLDING COIN"
+        is_holding = coin_bal * price > self.min_trade
+        status = "🚀 HOLDING COIN" if is_holding else "💰 HOLDING CASH"
 
         ema_str = f"{ema_val:,.2f}" if ema_val else "N/A"
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.last_action == "buy" and pnl >= self.target_profit else "Waiting..."
+
+        # ปรับการแสดงผล P/L ให้จำค่าไม้ล่าสุดแม้ขายไปแล้ว
+        display_pnl = pnl if is_holding else self.last_pnl
+        pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
 
         report = (
             f"<b>{status}</b>\n"
@@ -128,7 +139,7 @@ class BitkubBot:
             f"<b>📊 MARKET: {self.symbol}</b>\n"
             f"💵 Price: {price:,.2f} THB\n"
             f"📈 EMA({self.ema_period}): {ema_str} {diff_ema}\n"
-            f"🕒 Net P/L: {pnl:+.2f}% (Fee Incl.)\n"
+            f"🕒 {pnl_label}: {display_pnl:+.2f}% (Fee Incl.)\n"
             "━━━━━━━━━━━━━━━\n"
             "<b>🏦 PORTFOLIO</b>\n"
             f"💰 Cash: {thb_bal:,.2f} THB\n"
@@ -147,11 +158,11 @@ class BitkubBot:
         if amount < (self.min_trade if side == "buy" else 0.0001): 
             logger.warning(f"Order too small: {amount}")
             return None
-            
+
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         typ = "limit" if side == "buy" else "market"
         clean_amount = math.floor(amount * 10000) / 10000 if side == "sell" else int(amount)
-        
+
         payload = {
             "sym": self.symbol, "amt": clean_amount,
             "rat": round(price, 4) if typ == "limit" else 0, "typ": typ
@@ -169,7 +180,7 @@ class BitkubBot:
         return ema_list
 
     def run(self):
-        self.notify(f"<b>🚀 Bot V5.6 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
+        self.notify(f"<b>🚀 Bot V5.7 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
         search_sym = f"{self.symbol.split('_')[1]}_{self.symbol.split('_')[0]}" if "_" in self.symbol else self.symbol
 
         while True:
@@ -199,7 +210,7 @@ class BitkubBot:
                 is_uptrend = current_price > (ema_val * 1.005) and ema_val > (ema_prev * 1.001)
 
                 thb, coin_bal = self.get_balance()
-                
+
                 if coin_bal * current_price > self.min_trade: 
                     if self.last_action == "sell" or self.current_stage == 0:
                         cost_price, _ = self.get_actual_cost()
@@ -213,7 +224,7 @@ class BitkubBot:
                 if is_uptrend and self.current_stage < 2:
                     res_open = self._request("GET", f"/api/v3/market/my-open-orders?sym={self.symbol}", private=True)
                     has_buy_order = any(o['side'].lower() == 'buy' for o in res_open.get('result', [])) if res_open.get('result') else False
-                    
+
                     if not has_buy_order:
                         if self.current_stage == 0 and thb >= self.min_trade:
                             res = self.place_order_v3("buy", thb * 0.49, current_price)
@@ -246,6 +257,8 @@ class BitkubBot:
                     if reason:
                         res = self.place_order_v3("sell", self.total_units, current_price)
                         if res and res.get('error') == 0:
+                            # บันทึก P/L ไม้ที่ขายก่อนรีเซ็ต
+                            self.last_pnl = pnl 
                             self.notify(f"<b>🔴 [SELL ALL]</b>\nReason: {reason}\nNet P/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
