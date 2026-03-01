@@ -65,8 +65,14 @@ class BitkubBot:
             })
         try:
             response = requests.request(method, url, headers=headers, data=body_str, timeout=15)
-            return response.json()
-        except: return {"error": 999}
+            data = response.json()
+            # จัดการกรณี API ส่ง Error กลับมา
+            if isinstance(data, dict) and data.get('error') != 0:
+                logger.warning(f"API Error {path}: {data}")
+            return data
+        except Exception as e:
+            logger.error(f"Request Exception {path}: {e}")
+            return {"error": 999}
 
     def _save_state(self):
         try:
@@ -93,9 +99,10 @@ class BitkubBot:
 
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", {}, private=True)
-        if res and res.get('error') == 0:
+        if isinstance(res, dict) and res.get('error') == 0:
             coin_key = self.symbol.split('_')[1]
-            return float(res['result'].get('THB', 0)), float(res['result'].get(coin_key, 0))
+            result = res.get('result', {})
+            return float(result.get('THB', 0)), float(result.get(coin_key, 0))
         return 0.0, 0.0
 
     def calculate_net_pnl(self, current_price):
@@ -116,7 +123,7 @@ class BitkubBot:
         return self._request("POST", path, payload, private=True)
 
     def calculate_ema(self, prices, period):
-        if len(prices) < period: return None
+        if not prices or len(prices) < period: return None
         k = 2 / (period + 1)
         ema = sum(prices[:period]) / period
         for p in prices[period:]:
@@ -137,7 +144,7 @@ class BitkubBot:
         else: status = "🚀 HOLDING COIN" if is_holding else "💰 HOLDING CASH"
 
         ema_str = f"{ema_val:,.2f}" if ema_val else "N/A"
-        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
+        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val and ema_val > 0 else ""
         t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if is_holding and (pnl >= self.target_profit or self.current_stage == 3) else "Waiting..."
 
         display_pnl = pnl if is_holding else self.last_pnl
@@ -166,23 +173,36 @@ class BitkubBot:
         self.notify(report)
 
     def run(self):
-        self.notify(f"<b>🚀 Bot V6.1 Final Started</b>")
+        self.notify(f"<b>🚀 Bot V6.2 Robust Started</b>")
         
         while True:
             try:
-                # แก้ไขบรรทัดที่ทำให้เกิด Error โดยแยก Parameter ออกมา
-                end_ts = int(time.time())
-                start_ts = end_ts - 172800
-                path_hist = f"/tradingview/history?symbol={self.symbol}&resolution=15&from={start_ts}&to={end_ts}"
+                # แก้ไขการดึงราคาให้รองรับทั้งแบบ Dict และ List
+                ticker_res = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
+                current_price = 0.0
                 
-                ticker = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
-                current_price = float(ticker.get('result', {}).get(self.symbol, {}).get('last', 0))
+                if isinstance(ticker_res, dict):
+                    # รูปแบบ Bitkub V3 ปกติ
+                    current_price = float(ticker_res.get('result', {}).get(self.symbol, {}).get('last', 0))
+                elif isinstance(ticker_res, list):
+                    # รูปแบบสำรองถ้า Bitkub ส่งมาเป็น List
+                    for item in ticker_res:
+                        if item.get('symbol') == self.symbol:
+                            current_price = float(item.get('last', 0))
                 
                 if current_price <= 0:
                     time.sleep(30); continue
 
+                # ดึง History
+                end_ts = int(time.time())
+                start_ts = end_ts - 172800
+                path_hist = f"/tradingview/history?symbol={self.symbol}&resolution=15&from={start_ts}&to={end_ts}"
                 history = self._request("GET", path_hist)
-                prices = history.get('c', [])
+                
+                prices = []
+                if isinstance(history, dict) and 'c' in history:
+                    prices = history.get('c', [])
+                
                 ema_val = self.calculate_ema(prices, self.ema_period)
                 ema_prev = self.calculate_ema(prices[:-1], self.ema_period) if len(prices) > self.ema_period else ema_val
 
@@ -198,11 +218,11 @@ class BitkubBot:
                 thb, coin_bal = self.get_balance()
                 pnl = self.calculate_net_pnl(current_price)
 
-                # Logic การซื้อ
+                # Logic การซื้อ/ขาย (เหมือนเดิมแต่ปลอดภัยขึ้น)
                 if is_uptrend and self.current_stage < 2:
                     if self.current_stage == 0 and thb >= self.min_trade:
                         res = self.place_order_v3("buy", thb * 0.48, current_price)
-                        if res and res.get('error') == 0:
+                        if isinstance(res, dict) and res.get('error') == 0:
                             self.total_units = float(res['result']['rec'])
                             self.avg_price = float(res['result']['rat'])
                             self.current_stage, self.last_action = 1, "buy"
@@ -212,7 +232,7 @@ class BitkubBot:
                     
                     elif self.current_stage == 1 and pnl >= 0.3 and thb >= self.min_trade:
                         res = self.place_order_v3("buy", thb * 0.95, current_price)
-                        if res and res.get('error') == 0:
+                        if isinstance(res, dict) and res.get('error') == 0:
                             nq, nr = float(res['result']['rec']), float(res['result']['rat'])
                             self.avg_price = ((self.avg_price * self.total_units) + (nq * nr)) / (self.total_units + nq)
                             self.total_units += nq
@@ -220,7 +240,6 @@ class BitkubBot:
                             self._save_state()
                             self.notify(f"<b>🟢 [BUY 2/2]</b> New Avg: {self.avg_price:,.2f}")
 
-                # Logic การขาย
                 if self.last_action == "buy" and self.total_units > 0:
                     self.highest_price = max(self.highest_price, current_price)
                     reason, sell_all = None, False
@@ -230,7 +249,7 @@ class BitkubBot:
                     elif self.current_stage == 2 and pnl >= self.target_profit:
                         sell_amount = self.total_units * 0.5
                         res = self.place_order_v3("sell", sell_amount, current_price)
-                        if res and res.get('error') == 0:
+                        if isinstance(res, dict) and res.get('error') == 0:
                             self.total_units -= sell_amount
                             self.current_stage = 3
                             self._save_state()
@@ -243,14 +262,13 @@ class BitkubBot:
                             reason, sell_all = "Trend Reversed (Final)", True
 
                     if sell_all and reason:
-                        res = self.place_order_v3("sell", self.total_units, current_price)
-                        if res and res.get('error') == 0:
+                        res = self.place_order_all_v3("sell", current_price)
+                        if isinstance(res, dict) and res.get('error') == 0:
                             self.last_pnl = pnl
                             self.notify(f"<b>🔴 [FINAL SELL]</b>\nReason: {reason}\nNet P/L: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
 
-                # ส่งรายงานทุก 1 ชม.
                 if time.time() - self.last_report_time >= 3600:
                     self.send_detailed_report(current_price, pnl, ema_val)
                     self.last_report_time = time.time()
@@ -259,6 +277,16 @@ class BitkubBot:
             except Exception as e: 
                 logger.error(f"🔥 Loop Error: {e}")
             time.sleep(30)
+
+    def place_order_all_v3(self, side, price):
+        # ฟังก์ชันพิเศษสำหรับขายหมดจด 100%
+        _, coin_bal = self.get_balance()
+        if coin_bal <= 0: return {"error": 1}
+        path = "/api/v3/market/place-ask"
+        # ใช้ 10000000 เพื่อปัดทศนิยม 7 ตำแหน่งให้ Bitkub ยอมรับ
+        clean_amount = math.floor(coin_bal * 10000000) / 10000000
+        payload = {"sym": self.symbol, "amt": clean_amount, "rat": 0, "typ": "market"}
+        return self._request("POST", path, payload, private=True)
 
 def run_health_check():
     class H(BaseHTTPRequestHandler):
