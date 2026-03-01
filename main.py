@@ -27,8 +27,8 @@ class BitkubBot:
         self.state_file = "bot_state_v6_final.json"
         self.time_offset = 0
         self._sync_server_time()
-        self._load_symbol_config()
-
+        
+        # โหลด State (ดึง last_pnl มาด้วย)
         self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price, self.last_pnl = self._load_state()
         self.last_report_time = 0
 
@@ -39,15 +39,6 @@ class BitkubBot:
             self.time_offset = server_ts - int(time.time() * 1000)
             logger.info(f"Time synced. Offset: {self.time_offset}ms")
         except: logger.error("Failed to sync time")
-
-    def _load_symbol_config(self):
-        try:
-            res = requests.get(f"{self.host}/api/v3/market/symbols").json()
-            for s in res.get('result', []):
-                if s['symbol'] == self.symbol:
-                    logger.info(f"Symbol {self.symbol} configured.")
-                    break
-        except: pass
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
@@ -75,8 +66,7 @@ class BitkubBot:
             })
         try:
             response = requests.request(method, url, headers=headers, data=body_str, timeout=15)
-            data = response.json()
-            return data
+            return response.json()
         except: return {"error": 999}
 
     def _save_state(self):
@@ -119,7 +109,7 @@ class BitkubBot:
         if side == "buy" and amount < self.min_trade: return None
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         typ = "limit" if side == "buy" else "market"
-        # ปรับทศนิยมให้ปลอดภัย (Bitkub API มักต้องการ 8 ตำแหน่งสำหรับเหรียญ)
+        # ปรับทศนิยมให้แม่นยำขึ้น
         clean_amount = math.floor(amount * 10000000) / 10000000 if side == "sell" else round(amount, 2)
         payload = {
             "sym": self.symbol, "amt": clean_amount,
@@ -135,132 +125,67 @@ class BitkubBot:
             ema = (p * k) + (ema * (1 - k))
         return ema
 
+    def send_detailed_report(self, price, pnl, ema_val=None):
+        thb_bal, coin_bal = self.get_balance()
+        coin_value = coin_bal * price
+        total_equity = thb_bal + coin_value
+        net_profit = total_equity - self.initial_equity
+        growth_pct = (net_profit / self.initial_equity) * 100
+
+        now_th = self.get_local_time()
+        is_holding = coin_bal * price > self.min_trade
+        # ปรับสถานะให้รู้ว่ากำลังรันกำไรไม้ที่เหลือหรือไม่
+        if self.current_stage == 3: status = "🚀 RUNNING PROFIT"
+        else: status = "🚀 HOLDING COIN" if is_holding else "💰 HOLDING CASH"
+
+        ema_str = f"{ema_val:,.2f}" if ema_val else "N/A"
+        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
+        t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if is_holding and (pnl >= self.target_profit or self.current_stage == 3) else "Waiting..."
+
+        display_pnl = pnl if is_holding else self.last_pnl
+        pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
+
+        report = (
+            f"<b>{status}</b>\n"
+            f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
+            "━━━━━━━━━━━━━━━\n"
+            f"<b>📊 MARKET: {self.symbol}</b>\n"
+            f"💵 Price: {price:,.2f} THB\n"
+            f"📈 EMA({self.ema_period}): {ema_str} {diff_ema}\n"
+            f"🕒 {pnl_label}: {display_pnl:+.2f}% (Fee Incl.)\n"
+            "━━━━━━━━━━━━━━━\n"
+            "<b>🏦 PORTFOLIO</b>\n"
+            f"💰 Cash: {thb_bal:,.2f} THB\n"
+            f"🪙 Coin: {coin_bal:,.4f} ({coin_value:,.2f} THB)\n"
+            f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "<b>📈 PERFORMANCE</b>\n"
+            f"💵 Net Profit: {net_profit:,.2f} THB\n"
+            f"🚀 Growth: {growth_pct:+.2f}%\n"
+            f"🛡️ Trailing @: {t_stop_price}\n"
+            "━━━━━━━━━━━━━━━"
+        )
+        self.notify(report)
+
     def run(self):
-        self.notify(f"<b>🚀 Bot V6.1 Partial TP Started</b>\nMonitoring {self.symbol}")
+        self.notify(f"<b>🚀 Bot V6.1 Final Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
         
+        # --- ส่งรายงานทันทีตอนเริ่มเหมือน V5.7 ---
+        ticker_init = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
+        price_init = float(ticker_init.get('result', {}).get(self.symbol, {}).get('last', 0))
+        if price_init > 0:
+            # ดึงประวัติมาหา EMA เบื้องต้นสำหรับรายงานแรก
+            hist_init = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
+            ema_init = self.calculate_ema(hist_init.get('c', []), self.ema_period)
+            self.send_detailed_report(price_init, self.calculate_net_pnl(price_init), ema_init)
+            self.last_report_time = time.time()
+
         while True:
             try:
-                # 1. Fetch Price
+                # 1. ข้อมูลราคาและ EMA
                 ticker = self._request("GET", f"/api/v3/market/ticker?sym={self.symbol}")
                 current_price = float(ticker.get('result', {}).get(self.symbol, {}).get('last', 0))
                 if current_price <= 0: 
                     time.sleep(30); continue
 
-                # 2. Fetch History & EMA
-                history = self._request("GET", f"/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}")
-                prices = history.get('c', [])
-                if len(prices) < self.ema_period + 1:
-                    time.sleep(30); continue
-                
-                ema_val = self.calculate_ema(prices, self.ema_period)
-                ema_prev = self.calculate_ema(prices[:-1], self.ema_period)
-                is_uptrend = current_price > (ema_val * 1.002) and ema_val > ema_prev
-
-                # 3. Handle Portfolio
-                thb, coin_bal = self.get_balance()
-                pnl = self.calculate_net_pnl(current_price)
-
-                # 4. Trading Logic (Buy Logic 2 stages)
-                if is_uptrend and self.current_stage < 2:
-                    if self.current_stage == 0 and thb >= self.min_trade:
-                        res = self.place_order_v3("buy", thb * 0.48, current_price)
-                        if res and res.get('error') == 0:
-                            self.total_units = float(res['result']['rec'])
-                            self.avg_price = float(res['result']['rat'])
-                            self.current_stage, self.last_action = 1, "buy"
-                            self.highest_price = self.avg_price
-                            self._save_state()
-                            self.notify(f"<b>🟢 [BUY 1/2]</b> @ {self.avg_price:,.2f}")
-                    
-                    elif self.current_stage == 1 and pnl >= 0.3 and thb >= self.min_trade:
-                        res = self.place_order_v3("buy", thb * 0.95, current_price)
-                        if res and res.get('error') == 0:
-                            nq, nr = float(res['result']['rec']), float(res['result']['rat'])
-                            self.avg_price = ((self.avg_price * self.total_units) + (nq * nr)) / (self.total_units + nq)
-                            self.total_units += nq
-                            self.current_stage = 2
-                            self._save_state()
-                            self.notify(f"<b>🟢 [BUY 2/2]</b> New Avg: {self.avg_price:,.2f}")
-
-                # 5. Trading Logic (Sell Logic with Partial Take Profit)
-                if self.last_action == "buy" and self.total_units > 0:
-                    self.highest_price = max(self.highest_price, current_price)
-                    
-                    reason = None
-                    sell_all = False
-
-                    # กรณี A: Stop Loss (ขายทิ้งทั้งหมด)
-                    if pnl <= -self.stop_loss:
-                        reason = f"Stop Loss ({pnl:.2f}%)"
-                        sell_all = True
-                    
-                    # กรณี B: แบ่งขายกำไรไม้แรก (Take Profit 50%)
-                    elif self.current_stage == 2 and pnl >= self.target_profit:
-                        sell_amount = self.total_units * 0.5
-                        res = self.place_order_v3("sell", sell_amount, current_price)
-                        if res and res.get('error') == 0:
-                            self.total_units -= sell_amount
-                            self.current_stage = 3 # เข้าสู่สถานะรันกำไรไม้ที่เหลือ
-                            self._save_state()
-                            self.notify(f"<b>💰 [PARTIAL SELL 50%]</b>\nLocked: {pnl:+.2f}%\nRunning rest: {self.total_units:.4f}")
-                        continue # รันลูปต่อไปเพื่อเช็ค Trailing สำหรับไม้ที่เหลือ
-
-                    # กรณี C: Trailing Stop หรือ Trend Reversed สำหรับส่วนที่เหลือ (หรือทั้งหมด)
-                    elif self.current_stage == 3:
-                        if current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
-                            reason = f"Trailing Stop (Final @ {pnl:.2f}%)"
-                            sell_all = True
-                        elif current_price < (ema_val * 0.995):
-                            reason = "Trend Reversed (Final)"
-                            sell_all = True
-
-                    # ดำเนินการขายถ้าเข้าเงื่อนไข sell_all
-                    if sell_all and reason:
-                        res = self.place_order_v3("sell", self.total_units, current_price)
-                        if res and res.get('error') == 0:
-                            self.last_pnl = pnl
-                            self.notify(f"<b>🔴 [FINAL SELL]</b>\nReason: {reason}\nNet P/L: {pnl:+.2f}%")
-                            self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
-                            self._save_state()
-
-                # 6. Reporting
-                if time.time() - self.last_report_time >= 3600:
-                    self._send_report(current_price, pnl, ema_val, thb, coin_bal)
-                    self.last_report_time = time.time()
-                    self._sync_server_time()
-
-            except Exception as e: 
-                logger.error(f"Loop Error: {e}")
-            time.sleep(30)
-
-    def _send_report(self, price, pnl, ema_val, thb_bal, coin_bal):
-        coin_value = coin_bal * price
-        total_equity = thb_bal + coin_value
-        net_profit = total_equity - self.initial_equity
-        growth_pct = (net_profit / self.initial_equity) * 100
-        is_holding = coin_bal * price > self.min_trade
-        status = "🚀 RUNNING PROFIT" if self.current_stage == 3 else ("🚀 HOLDING COIN" if is_holding else "💰 HOLDING CASH")
-        
-        t_stop_price = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if is_holding and (pnl >= self.target_profit or self.current_stage == 3) else "Waiting..."
-        
-        report = (
-            f"<b>{status}</b>\n📅 {self.get_local_time().strftime('%d/%m/%Y %H:%M')}\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"<b>📊 MARKET: {self.symbol}</b>\n💵 Price: {price:,.2f} THB\n"
-            f"📈 EMA: {ema_val:,.2f}\n🕒 P/L: {pnl if is_holding else self.last_pnl:+.2f}%\n"
-            f"📦 Stage: {self.current_stage}/3\n"
-            "━━━━━━━━━━━━━━━\n"
-            f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n🚀 Growth: {growth_pct:+.2f}%\n"
-            f"🛡️ Trailing @: {t_stop_price}\n━━━━━━━━━━━━━━━"
-        )
-        self.notify(report)
-
-def run_health_check():
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
-        def log_message(self, *a): return
-    HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
-
-if __name__ == "__main__":
-    threading.Thread(target=run_health_check, daemon=True).start()
-    BitkubBot().run()
+                history = self._request("GET", f"/tradingview
