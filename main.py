@@ -255,7 +255,7 @@ class BitkubProBotV6:
                             self._save_state()
 
                 # Health Check & Report (ทุก 1 ชม.)
-                if time.time() - self.last_report_time >= 3600:
+                if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(current_price, pnl, ema_val)
                     self.last_report_time = time.time()
 
