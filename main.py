@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubProBotV6:
+class BitkubProBotV6_1:
     def __init__(self):
         # API Config
         self.api_key = os.getenv("BITKUB_KEY")
@@ -17,7 +17,7 @@ class BitkubProBotV6:
 
         # Trading Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2030.71)) # ปรับตามมูลค่าพอร์ตจริงล่าสุด
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2030.71))
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
         self.target_profit = float(os.getenv("TARGET_PROFIT_PCT", 5.0)) 
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
@@ -111,10 +111,11 @@ class BitkubProBotV6:
 
     def place_order(self, side, amt, rate=0, typ="market"):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+        # ใช้ Market Order สำหรับฝั่งซื้อเพื่อให้มั่นใจว่าได้ของชัวร์ (แก้จุดอ่อนเรื่อง Limit ค้าง)
         payload = {
             "sym": self.symbol.lower(),
             "amt": self.clean_num(amt, 2 if side=="buy" else 4),
-            "rat": self.clean_num(rate, 2) if typ == "limit" else 0,
+            "rat": 0 if typ == "market" else self.clean_num(rate, 2),
             "typ": typ
         }
         return self._request("POST", path, payload=payload, private=True)
@@ -170,7 +171,7 @@ class BitkubProBotV6:
         self.notify(report)
 
     def run(self):
-        self.notify(f"<b>🚀 Bot V6.0 Pro Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
+        self.notify(f"<b>🚀 Bot V6.1 Pro Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
 
         while True:
             try:
@@ -185,49 +186,58 @@ class BitkubProBotV6:
                 if current_price == 0: 
                     time.sleep(30); continue
 
-                # 2. Indicators
+                # 2. Indicators (แก้เรื่อง Repaint: ใช้แท่งที่ปิดแล้ว)
                 hist = self._request("GET", "/tradingview/history", params={
                     "symbol": self.symbol, "resolution": "15",
                     "from": int(time.time()) - 259200, "to": int(time.time())
                 })
                 prices = hist.get('c', [])
-                ema_val = self.calculate_ema(prices, self.ema_period)
-                ema_prev = self.calculate_ema(prices[:-1], self.ema_period)
+                # ใช้ prices[:-1] เพื่อตัดแท่งปัจจุบันที่ยังไม่จบออก
+                ema_val = self.calculate_ema(prices[:-1], self.ema_period) if len(prices) > 1 else None
+                ema_prev = self.calculate_ema(prices[:-2], self.ema_period) if len(prices) > 2 else None
+
+                if not ema_val:
+                    time.sleep(30); continue
 
                 thb, coin_bal = self.get_balance()
                 pnl = 0.0
                 if self.avg_price > 0:
+                    # คำนวณ PnL แบบหักค่าธรรมเนียมจริง (Buy + Sell)
                     pnl = (((current_price * (1-self.fee_pct)) - (self.avg_price * (1+self.fee_pct))) / (self.avg_price * (1+self.fee_pct))) * 100
 
-                # --- 3. Strategy Logic: Entry (ปรับปรุงใหม่ 1% Gap) ---
-                # เงื่อนไข: ราคา > EMA 1% และ EMA ต้องลาดเอียงขึ้น (ema_val > ema_prev)
-                is_uptrend_confirmed = current_price > (ema_val * 1.01) and ema_val > ema_prev
+                # --- 3. Strategy Logic: Entry (Confirm 1% Gap) ---
+                is_uptrend_confirmed = current_price > (ema_val * 1.01) and ema_val > (ema_prev or 0)
 
-                # ไม้ที่ 1: เข้าซื้อ 45% ของเงินสดเมื่อ Confirm Trend
+                # ไม้ที่ 1: เข้าซื้อ (ใช้ Market เพื่อกัน Order ค้าง)
                 if is_uptrend_confirmed and self.last_action == "sell" and thb > self.min_trade:
-                    res = self.place_order("buy", thb * 0.45, current_price, "limit")
+                    res = self.place_order("buy", thb * 0.45, 0, "market")
                     if res.get('error') == 0:
-                        self.avg_price, self.total_units = float(res['result']['rat']), float(res['result']['rec'])
-                        self.current_stage, self.last_action, self.highest_price = 1, "buy", self.avg_price
+                        time.sleep(2) # รอ API อัปเดตยอด
+                        _, new_coin = self.get_balance()
+                        self.avg_price = current_price
+                        self.total_units = new_coin
+                        self.current_stage, self.last_action, self.highest_price = 1, "buy", current_price
                         self._save_state()
-                        self.notify(f"<b>🟢 [BUY 1/2] Confirmed 1%</b>\nPrice: {current_price:,.2f}\nEMA: {ema_val:,.2f}")
+                        self.notify(f"<b>🟢 [BUY 1/2] Confirmed</b>\nPrice: {current_price:,.2f}\nUnits: {self.total_units:,.4f}")
 
-                # ไม้ที่ 2: ซื้อถัวอีก 95% ของเงินที่เหลือ เมื่อไม้แรกมีกำไร > 0.5%
+                # ไม้ที่ 2: ซื้อถัว (ใช้ Market)
                 elif is_uptrend_confirmed and self.current_stage == 1 and pnl > 0.5 and thb > self.min_trade:
-                    res = self.place_order("buy", thb * 0.95, current_price, "limit")
+                    res = self.place_order("buy", thb * 0.95, 0, "market")
                     if res.get('error') == 0:
-                        nr, nq = float(res['result']['rat']), float(res['result']['rec'])
-                        self.avg_price = ((self.avg_price * self.total_units) + (nr * nq)) / (self.total_units + nq)
-                        self.total_units += nq
+                        time.sleep(2)
+                        _, new_coin_total = self.get_balance()
+                        added_units = new_coin_total - self.total_units
+                        self.avg_price = ((self.avg_price * self.total_units) + (current_price * added_units)) / new_coin_total
+                        self.total_units = new_coin_total
                         self.current_stage = 2
                         self._save_state()
-                        self.notify(f"<b>🟢 [BUY 2/2] Add Position</b>\nNew Avg: {self.avg_price:,.2f}")
+                        self.notify(f"<b>🟢 [BUY 2/2] Pyramiding</b>\nNew Avg: {self.avg_price:,.2f}")
 
-                # --- 4. Strategy Logic: Exit (แบ่งขาย 2 จังหวะ) ---
+                # --- 4. Strategy Logic: Exit ---
                 if self.last_action == "buy" and self.total_units > 0:
                     self.highest_price = max(self.highest_price, current_price)
 
-                    # ไม้ 1: ขายครึ่งหนึ่ง (50%) เมื่อกำไรถึงเป้า
+                    # ไม้ 1: Partial TP
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         sell_amt = self.total_units * 0.5
                         res = self.place_order("sell", sell_amt, 0, "market")
@@ -237,14 +247,14 @@ class BitkubProBotV6:
                             self._save_state()
                             self.notify(f"<b>🟠 [TP 50%]</b> Locked: {pnl:+.2f}%")
 
-                    # ไม้ 2: Trailing Stop / Stop Loss หรือราคาหลุด EMA ลงมาชัดเจน
+                    # ไม้ 2: Trailing / SL / Trend Exit
                     reason = None
                     if pnl <= -self.stop_loss: 
                         reason = f"Stop Loss ({pnl:.2f}%)"
                     elif self.current_stage == 3 and current_price <= (self.highest_price * (1 - (self.trailing_pct/100))):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif current_price < (ema_val * 0.985): # หลุด EMA เกิน 1.5%
-                        reason = "Trend Reversed"
+                    elif current_price < (ema_val * 0.985): 
+                        reason = "Trend Reversed (Below EMA)"
 
                     if reason:
                         res = self.place_order("sell", self.total_units, 0, "market")
@@ -254,7 +264,7 @@ class BitkubProBotV6:
                             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
                             self._save_state()
 
-                # Health Check & Report (ทุก 1 ชม.)
+                # Health Check (ทุก 30 นาที)
                 if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(current_price, pnl, ema_val)
                     self.last_report_time = time.time()
@@ -263,4 +273,4 @@ class BitkubProBotV6:
             time.sleep(30)
 
 if __name__ == "__main__":
-    BitkubProBotV6().run()
+    BitkubProBotV6_1().run()
