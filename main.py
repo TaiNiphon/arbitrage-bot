@@ -2,69 +2,58 @@ import os, requests, time, hmac, hashlib, json, threading, logging, math
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta, timezone
 
-# --- Configuration & Logging ---
+# --- Config & Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubProBotV6_3:
+class BitkubClassicProBot:
     def __init__(self):
-        # API Config
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # Trading Strategy Config
-        self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
+        self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.coin = self.symbol.split('_')[0]
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 5000.00))
-        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
+        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
-        self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
+        self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0))
         self.ema_period = int(os.getenv("EMA_PERIOD", 50))
-        self.fee_pct = 0.0025 
-        self.min_trade = 10.0 
+        self.min_trade = 10.0
+        self.fee_pct = 0.0025
 
-        # --- Force Sync Logic ---
-        self.sync_and_setup()
+        # Force Sync State from Wallet
+        self.sync_from_wallet()
         self.last_report_time = 0
 
-    def sync_and_setup(self):
-        """ระบบตรวจสอบยอดจริงเพื่อป้องกันการซื้อซ้ำซ้อน"""
-        logger.info("Force Syncing with Bitkub Wallet...")
-        thb_bal, coin_bal = self.get_balance()
-        
-        # ดึงราคาล่าสุด
+    def sync_from_wallet(self):
+        thb, coin_bal = self.get_balance()
         ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
         curr_price = 0
         if isinstance(ticker, list):
             for item in ticker:
-                if item['symbol'].upper() == self.symbol:
-                    curr_price = float(item['last']); break
+                if item['symbol'].upper() == self.symbol: curr_price = float(item['last']); break
 
-        # ถ้ามีเหรียญในกระเป๋า (มูลค่า > 10 บาท) ให้ถือว่าซื้อครบแล้ว (Stage 2)
         if coin_bal * curr_price > self.min_trade:
             self.last_action = "buy"
             self.total_units = coin_bal
-            self.avg_price = curr_price # ใช้ราคาปัจจุบันอ้างอิง
-            self.current_stage = 2 
+            self.avg_price = curr_price
+            self.current_stage = 2 # ถ้ามีเหรียญเยอะถือว่าซื้อครบแล้ว
             self.highest_price = curr_price
-            logger.info(f"Detected {coin_bal} {self.coin}. Setting status to HOLDING (Stage 2).")
         else:
             self.last_action = "sell"
             self.total_units = 0.0
             self.avg_price = 0.0
             self.current_stage = 0
             self.highest_price = 0.0
-            logger.info("No assets detected. Ready for new signals.")
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
 
     def get_server_time(self):
-        try:
-            return requests.get(f"{self.host}/api/v3/servertime", timeout=10).text.strip()
+        try: return requests.get(f"{self.host}/api/v3/servertime", timeout=10).text.strip()
         except: return str(int(time.time() * 1000))
 
     def _get_signature(self, ts, method, path, query="", body=""):
@@ -105,8 +94,7 @@ class BitkubProBotV6_3:
 
     def notify(self, msg):
         if not self.tg_token: return
-        try:
-            requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
+        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
                           json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
@@ -119,15 +107,14 @@ class BitkubProBotV6_3:
         now_th = self.get_local_time()
         
         status = "🚀 HOLDING" if coin_value > self.min_trade else "💰 WAITING"
-        ema_str = f"{ema_val:,.2f}" if ema_val else "N/A"
         t_stop = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.current_stage == 3 else "Waiting..."
 
         report = (
-            f"<b>{status} | {self.symbol} (V6.3)</b>\n"
+            f"<b>{status} | {self.symbol} (V6.4)</b>\n"
             f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
             f"💵 Price: {price:,.2f} THB\n"
-            f"📈 EMA({self.ema_period}): {ema_str}\n"
+            f"📈 EMA({self.ema_period}): {ema_val:,.2f}\n"
             f"🕒 Current P/L: {pnl:+.2f}%\n"
             "━━━━━━━━━━━━━━━\n"
             f"💰 Cash: {thb_bal:,.2f} THB\n"
@@ -141,11 +128,10 @@ class BitkubProBotV6_3:
         self.notify(report)
 
     def run(self):
-        self.notify(f"<b>🤖 Bitkub V6.3 Hybrid Started</b>\nSync Complete: {'Holding' if self.current_stage > 0 else 'Waiting Signal'}")
+        self.notify(f"🤖 <b>Bitkub V6.4 Classic Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
         
         while True:
             try:
-                # 1. Fetch Data
                 ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
                 price = 0
                 if isinstance(ticker, list):
@@ -159,30 +145,39 @@ class BitkubProBotV6_3:
                 thb, coin_bal = self.get_balance()
                 pnl = ((price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0
 
-                # 2. Strategy Logic: Buy (Only if NO assets)
+                # Logic Buy ไม้ที่ 1
                 if self.last_action == "sell" and ema and price > ema * 1.01:
-                    res = self.place_order("buy", thb * 0.95)
+                    buy_amt = thb * 0.48 # แบ่งซื้อไม้แรกประมาณครึ่งหนึ่ง
+                    res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        self.last_action, self.current_stage, self.avg_price = "buy", 2, price
+                        units = res['result']['rec'] if 'result' in res else (buy_amt/price)
+                        self.last_action, self.current_stage, self.avg_price = "buy", 1, price
                         self.highest_price = price
-                        self.notify(f"🟢 <b>[BUY] Signal Confirmed</b>\nPrice: {price:,.2f}")
+                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}")
 
-                # 3. Strategy Logic: Exit (If HOLDING)
+                # Logic Buy ไม้ที่ 2 (ถ้าถัวเฉลี่ยลงมา 1.5%)
+                elif self.current_stage == 1 and price < self.avg_price * 0.985:
+                    buy_amt = thb * 0.95 # ใช้เงินที่เหลือซื้อ
+                    res = self.place_order("buy", buy_amt)
+                    if res.get('error') == 0:
+                        self.current_stage = 2
+                        self.avg_price = (self.avg_price + price) / 2
+                        self.notify(f"🟢 <b>[BUY 2/2] Confirmed</b>\nPrice: {price:,.2f}")
+
+                # Logic Sell
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
                     
-                    # Partial TP
-                    if self.current_stage == 2 and pnl >= self.tp_stage_1:
+                    if self.current_stage >= 1 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPNL: {pnl:+.2f}%")
                     
-                    # Full Exit Conditions
                     reason = None
                     if pnl <= -self.stop_loss: reason = "Stop Loss"
                     elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100): reason = "Trailing Stop"
-                    elif ema and price < ema * 0.985: reason = "Trend Reversed (EMA)"
+                    elif ema and price < ema * 0.985: reason = "Trend Reversed"
 
                     if reason:
                         res = self.place_order("sell", coin_bal)
@@ -190,7 +185,6 @@ class BitkubProBotV6_3:
                             self.last_action, self.current_stage, self.avg_price = "sell", 0, 0
                             self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPNL: {pnl:+.2f}%")
 
-                # 4. Detailed Report (Every 30 Mins)
                 if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(price, pnl, ema)
                     self.last_report_time = time.time()
@@ -198,7 +192,6 @@ class BitkubProBotV6_3:
             except Exception as e: logger.error(f"Error: {e}")
             time.sleep(30)
 
-# --- Health Check ---
 def run_health():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
@@ -206,4 +199,4 @@ def run_health():
 
 if __name__ == "__main__":
     threading.Thread(target=run_health, daemon=True).start()
-    BitkubProBotV6_3().run()
+    BitkubClassicProBot().run()
