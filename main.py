@@ -6,16 +6,14 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateBotV65:
+class BitkubUltimateBotV66:
     def __init__(self):
-        # API Config
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # Trading Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.coin = self.symbol.split('_')[0]
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 5000.00))
@@ -26,8 +24,7 @@ class BitkubUltimateBotV65:
         self.fee_pct = 0.0025
         self.min_trade = 10.0
 
-        # State Management
-        self.state_file = "bot_state_v65.json"
+        self.state_file = "bot_state_v66.json"
         self._load_state()
         self.last_report_time = 0
 
@@ -92,6 +89,7 @@ class BitkubUltimateBotV65:
 
     def place_order(self, side, amt, typ="market"):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+        # Bitkub Limit: THB uses 2 decimal points, Coins use 4 or more
         payload = {
             "sym": self.symbol.lower(),
             "amt": math.floor(amt * 100) / 100 if side == "buy" else math.floor(amt * 10000) / 10000,
@@ -115,16 +113,13 @@ class BitkubUltimateBotV65:
 
         is_holding = coin_value > self.min_trade
         status = "HOLDING COIN" if is_holding else "HOLDING CASH"
-        
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
         pnl_display = pnl if is_holding else self.last_pnl
         pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
         t_stop = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.current_stage == 3 else "Waiting..."
 
-        # รายงานแบบ V6.1 เป๊ะ (จัดหมวดหมู่และเว้นบรรทัด)
         report = (
-            f"💰 <b>{status}</b>\n"
-            f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
+            f"💰 <b>{status}</b>\n📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
             f"📊 <b>MARKET: {self.symbol}</b>\n"
             f"💵 Price: {price:,.2f} THB\n"
@@ -145,7 +140,7 @@ class BitkubUltimateBotV65:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 <b>Bitkub V6.5 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
+        self.notify(f"🚀 <b>Bitkub V6.6 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
 
         while True:
             try:
@@ -160,45 +155,50 @@ class BitkubUltimateBotV65:
                 ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
 
                 thb, coin_bal = self.get_balance()
-                
+                equity = thb + (coin_bal * price)
+
                 pnl = 0
                 if self.avg_price > 0:
                     buy_cost = self.avg_price * (1 + self.fee_pct)
                     sell_value = price * (1 - self.fee_pct)
                     pnl = ((sell_value - buy_cost) / buy_cost) * 100
 
-                # Logic การซื้อ
-                if self.last_action == "sell" and ema and price > ema * 1.005:
+                # Logic การซื้อไม้ที่ 1
+                if coin_bal * price < self.min_trade and ema and price > ema * 1.005:
                     buy_amt = thb * 0.48
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
+                        units = float(res['result']['rec']) if 'result' in res else (buy_amt/price)
                         self.last_action, self.current_stage, self.avg_price = "buy", 1, price
-                        self.total_units = float(res['result']['rec']) if 'result' in res else (buy_amt/price)
+                        self.total_units = units
                         self.highest_price = price
                         self._save_state()
-                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}")
+                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}")
 
-                elif self.current_stage == 1 and price < self.avg_price * 0.99:
+                # Logic การซื้อไม้ที่ 2 (Fix: เช็คจากสัดส่วน Asset)
+                elif coin_bal * price > self.min_trade and thb > (equity * 0.40) and price < self.avg_price * 0.99:
                     buy_amt = thb * 0.95
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        rec_units = float(res['result']['rec']) if 'result' in res else (buy_amt/price)
-                        self.avg_price = ((self.avg_price * self.total_units) + (price * rec_units)) / (self.total_units + rec_units)
-                        self.total_units += rec_units
+                        units = float(res['result']['rec']) if 'result' in res else (buy_amt/price)
+                        self.avg_price = ((self.avg_price * self.total_units) + (price * units)) / (self.total_units + units)
+                        self.total_units += units
                         self.current_stage = 2
                         self._save_state()
-                        self.notify(f"🟢 <b>[BUY 2/2] Confirmed</b>\nAvg Price: {self.avg_price:,.2f}")
+                        self.notify(f"🟢 <b>[BUY 2/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}\nAvg Price: {self.avg_price:,.2f}")
 
                 # Logic การขาย
-                elif self.last_action == "buy" and coin_bal > 0:
+                elif coin_bal * price > self.min_trade:
                     self.highest_price = max(self.highest_price, price)
 
+                    # ทยอยขาย 50%
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
-                        res = self.place_order("sell", coin_bal * 0.5)
+                        sell_units = coin_bal * 0.5
+                        res = self.place_order("sell", sell_units)
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self._save_state()
-                            self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPNL: {pnl:+.2f}%")
+                            self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPrice: {price:,.2f}\nUnits: {sell_units:,.4f}\nPNL: {pnl:+.2f}%")
 
                     reason = None
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
@@ -212,7 +212,7 @@ class BitkubUltimateBotV65:
                             self.last_pnl = pnl
                             self.last_action, self.current_stage, self.avg_price, self.total_units = "sell", 0, 0, 0
                             self._save_state()
-                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPNL: {pnl:+.2f}%")
+                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPrice: {price:,.2f}\nUnits: {coin_bal:,.4f}\nPNL: {pnl:+.2f}%")
 
                 if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(price, pnl, ema)
@@ -228,4 +228,4 @@ def run_health():
 
 if __name__ == "__main__":
     threading.Thread(target=run_health, daemon=True).start()
-    BitkubUltimateBotV65().run()
+    BitkubUltimateBotV66().run()
