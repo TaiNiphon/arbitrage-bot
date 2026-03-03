@@ -23,6 +23,7 @@ class BitkubClassicProBot:
         self.ema_period = int(os.getenv("EMA_PERIOD", 50))
         self.min_trade = 10.0
         self.fee_pct = 0.0025
+        self.last_pnl = 0.0 # เพิ่มเพื่อเก็บค่ากำไรไม้ล่าสุด
 
         # Force Sync State from Wallet
         self.sync_from_wallet()
@@ -40,7 +41,7 @@ class BitkubClassicProBot:
             self.last_action = "buy"
             self.total_units = coin_bal
             self.avg_price = curr_price
-            self.current_stage = 2 # ถ้ามีเหรียญเยอะถือว่าซื้อครบแล้ว
+            self.current_stage = 2
             self.highest_price = curr_price
         else:
             self.last_action = "sell"
@@ -105,8 +106,17 @@ class BitkubClassicProBot:
         net_profit = total_equity - self.initial_equity
         growth_pct = (net_profit / self.initial_equity) * 100
         now_th = self.get_local_time()
+
+        is_holding = coin_value > self.min_trade
+        status = "🚀 HOLDING" if is_holding else "💰 WAITING"
         
-        status = "🚀 HOLDING" if coin_value > self.min_trade else "💰 WAITING"
+        # ส่วนต่าง EMA
+        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
+        
+        # การเลือกโชว์ P/L (Current หรือ Last Trade)
+        pnl_display = pnl if is_holding else self.last_pnl
+        pnl_label = "Current P/L" if is_holding else "Last Trade P/L"
+        
         t_stop = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.current_stage == 3 else "Waiting..."
 
         report = (
@@ -114,13 +124,14 @@ class BitkubClassicProBot:
             f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
             f"💵 Price: {price:,.2f} THB\n"
-            f"📈 EMA({self.ema_period}): {ema_val:,.2f}\n"
-            f"🕒 Current P/L: {pnl:+.2f}%\n"
+            f"📈 EMA({self.ema_period}): {ema_val:,.2f} {diff_ema}\n"
+            f"🕒 {pnl_label}: {pnl_display:+.2f}% (Fee Incl.)\n"
             "━━━━━━━━━━━━━━━\n"
             f"💰 Cash: {thb_bal:,.2f} THB\n"
             f"🪙 Asset: {coin_bal:,.4f} ({coin_value:,.2f})\n"
-            f"💎 Equity: {total_equity:,.2f} THB\n"
+            f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
             "━━━━━━━━━━━━━━━\n"
+            f"💵 <b>Net Profit: {net_profit:,.2f} THB</b>\n" # เพิ่ม Net Profit
             f"🚀 Total Growth: {growth_pct:+.2f}%\n"
             f"🛡️ Trailing @: {t_stop}\n"
             "━━━━━━━━━━━━━━━"
@@ -129,7 +140,7 @@ class BitkubClassicProBot:
 
     def run(self):
         self.notify(f"🤖 <b>Bitkub V6.4 Classic Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
-        
+
         while True:
             try:
                 ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
@@ -137,27 +148,32 @@ class BitkubClassicProBot:
                 if isinstance(ticker, list):
                     for item in ticker:
                         if item['symbol'].upper() == self.symbol: price = float(item['last']); break
-                
+
                 hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
                 prices = hist.get('c', [])
                 ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
 
                 thb, coin_bal = self.get_balance()
-                pnl = ((price - self.avg_price) / self.avg_price * 100) if self.avg_price > 0 else 0
+                
+                # คำนวณ P/L แบบรวม Fee เพื่อความแม่นยำในรายงาน
+                pnl = 0
+                if self.avg_price > 0:
+                    buy_cost = self.avg_price * (1 + self.fee_pct)
+                    sell_value = price * (1 - self.fee_pct)
+                    pnl = ((sell_value - buy_cost) / buy_cost) * 100
 
                 # Logic Buy ไม้ที่ 1
                 if self.last_action == "sell" and ema and price > ema * 1.01:
-                    buy_amt = thb * 0.48 # แบ่งซื้อไม้แรกประมาณครึ่งหนึ่ง
+                    buy_amt = thb * 0.48
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        units = res['result']['rec'] if 'result' in res else (buy_amt/price)
                         self.last_action, self.current_stage, self.avg_price = "buy", 1, price
                         self.highest_price = price
-                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}")
+                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}")
 
-                # Logic Buy ไม้ที่ 2 (ถ้าถัวเฉลี่ยลงมา 1.5%)
+                # Logic Buy ไม้ที่ 2
                 elif self.current_stage == 1 and price < self.avg_price * 0.985:
-                    buy_amt = thb * 0.95 # ใช้เงินที่เหลือซื้อ
+                    buy_amt = thb * 0.95
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
                         self.current_stage = 2
@@ -167,13 +183,13 @@ class BitkubClassicProBot:
                 # Logic Sell
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
-                    
+
                     if self.current_stage >= 1 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPNL: {pnl:+.2f}%")
-                    
+
                     reason = None
                     if pnl <= -self.stop_loss: reason = "Stop Loss"
                     elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100): reason = "Trailing Stop"
@@ -182,6 +198,7 @@ class BitkubClassicProBot:
                     if reason:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
+                            self.last_pnl = pnl # เก็บกำไรไม้ล่าสุดก่อนล้างค่า
                             self.last_action, self.current_stage, self.avg_price = "sell", 0, 0
                             self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPNL: {pnl:+.2f}%")
 
