@@ -19,14 +19,14 @@ class BitkubUltimateBotV65:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.coin = self.symbol.split('_')[0]
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 5000.00))
-        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    # ขายไม้ 1 (50%)
-        self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0)) # ระยะถอยล็อคกำไร
-        self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0))   # ตัดขาดทุนด่านสุดท้าย
+        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))
+        self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
+        self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0))
         self.ema_period = int(os.getenv("EMA_PERIOD", 50))
-        self.fee_pct = 0.0025 # Bitkub Fee 0.25%
+        self.fee_pct = 0.0025
         self.min_trade = 10.0
 
-        # State Management (V6.5 Hybrid: JSON + Sync Check)
+        # State Management
         self.state_file = "bot_state_v65.json"
         self._load_state()
         self.last_report_time = 0
@@ -116,13 +116,12 @@ class BitkubUltimateBotV65:
         is_holding = coin_value > self.min_trade
         status = "HOLDING COIN" if is_holding else "HOLDING CASH"
         
-        # --- Report Layout Style V6.1 ---
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
         pnl_display = pnl if is_holding else self.last_pnl
         pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
-        
         t_stop = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.current_stage == 3 else "Waiting..."
 
+        # รายงานแบบ V6.1 เป๊ะ (จัดหมวดหมู่และเว้นบรรทัด)
         report = (
             f"💰 <b>{status}</b>\n"
             f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
@@ -162,14 +161,13 @@ class BitkubUltimateBotV65:
 
                 thb, coin_bal = self.get_balance()
                 
-                # คำนวณ P/L แบบ Net Fee (V6.5 Special)
                 pnl = 0
                 if self.avg_price > 0:
                     buy_cost = self.avg_price * (1 + self.fee_pct)
                     sell_value = price * (1 - self.fee_pct)
                     pnl = ((sell_value - buy_cost) / buy_cost) * 100
 
-                # --- ENTRY LOGIC (2 Stages) ---
+                # Logic การซื้อ
                 if self.last_action == "sell" and ema and price > ema * 1.005:
                     buy_amt = thb * 0.48
                     res = self.place_order("buy", buy_amt)
@@ -180,7 +178,7 @@ class BitkubUltimateBotV65:
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}")
 
-                elif self.current_stage == 1 and price < self.avg_price * 0.99: 
+                elif self.current_stage == 1 and price < self.avg_price * 0.99:
                     buy_amt = thb * 0.95
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
@@ -191,11 +189,10 @@ class BitkubUltimateBotV65:
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 2/2] Confirmed</b>\nAvg Price: {self.avg_price:,.2f}")
 
-                # --- EXIT LOGIC (TP, SL, Trailing) ---
+                # Logic การขาย
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
 
-                    # 1. Partial Take Profit
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
@@ -203,7 +200,6 @@ class BitkubUltimateBotV65:
                             self._save_state()
                             self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPNL: {pnl:+.2f}%")
 
-                    # 2. Final Sell Check
                     reason = None
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
                     elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100):
@@ -218,7 +214,6 @@ class BitkubUltimateBotV65:
                             self._save_state()
                             self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPNL: {pnl:+.2f}%")
 
-                # Health Check ทุก 30 นาที
                 if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(price, pnl, ema)
                     self.last_report_time = time.time()
