@@ -16,7 +16,7 @@ class BitkubUltimateBotV66:
 
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.coin = self.symbol.split('_')[0]
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 5000.00))
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10090.61)) # ปรับทุนเริ่มต้นตามจริง
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0))
@@ -24,7 +24,7 @@ class BitkubUltimateBotV66:
         self.fee_pct = 0.0025
         self.min_trade = 10.0
 
-        self.state_file = "bot_state_xrp_10k.json"
+        self.state_file = "bot_state_xrp_10k.json" # ใช้ชื่อไฟล์ใหม่เพื่อ Reset
         self._load_state()
         self.last_report_time = 0
 
@@ -112,7 +112,7 @@ class BitkubUltimateBotV66:
 
         is_holding = coin_value > self.min_trade
         status = "HOLDING COIN" if is_holding else "HOLDING CASH"
-        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
+        diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val and ema_val > 0 else "(N/A)"
         pnl_display = pnl if is_holding else self.last_pnl
         pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
         t_stop = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.current_stage == 3 else "Waiting..."
@@ -122,7 +122,7 @@ class BitkubUltimateBotV66:
             "━━━━━━━━━━━━━━━\n"
             f"📊 <b>MARKET: {self.symbol}</b>\n"
             f"💵 Price: {price:,.2f} THB\n"
-            f"📈 EMA({self.ema_period}): {ema_val:,.2f} {diff_ema}\n"
+            f"📈 EMA({self.ema_period}): {ema_val if ema_val else 0:,.2f} {diff_ema}\n"
             f"🕒 {pnl_label}: {pnl_display:+.2f}% (Fee Incl.)\n"
             "━━━━━━━━━━━━━━━\n"
             f"🏦 <b>PORTFOLIO</b>\n"
@@ -139,16 +139,18 @@ class BitkubUltimateBotV66:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 <b>Bitkub V6.6 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
+        self.notify(f"🚀 <b>Bitkub V6.6 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period} / TF 1h)")
 
         while True:
             try:
+                # 1. Get Current Price
                 ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
                 price = 0
                 if isinstance(ticker, list):
                     for item in ticker:
                         if item['symbol'].upper() == self.symbol: price = float(item['last']); break
 
+                # 2. Get EMA Data (TF 1h)
                 hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-172800, "to": int(time.time())})
                 prices = hist.get('c', [])
                 ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
@@ -162,30 +164,31 @@ class BitkubUltimateBotV66:
                     sell_value = price * (1 - self.fee_pct)
                     pnl = ((sell_value - buy_cost) / buy_cost) * 100
 
-                # Logic การซื้อไม้ที่ 1 (ปรับปรุง Units แบบ V6.1)
+                # --- Initial Report (ส่งทันทีที่เริ่ม Loop แรก) ---
+                if self.last_report_time == 0:
+                    self.send_detailed_report(price, pnl, ema)
+                    self.last_report_time = time.time()
+
+                # Logic การซื้อไม้ที่ 1
                 if coin_bal * price < self.min_trade and ema and price > ema * 1.005:
                     buy_amt = thb * 0.48
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        # พยายามดึงค่า rec ถ้าเป็น 0 ให้คำนวณสำรอง (Fallback) แบบ V6.1
                         units = float(res['result'].get('rec', 0))
                         if units == 0: units = (buy_amt * (1 - self.fee_pct)) / price
-                        
                         self.last_action, self.current_stage, self.avg_price = "buy", 1, price
                         self.total_units = units
                         self.highest_price = price
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}")
 
-                # Logic การซื้อไม้ที่ 2 (ปรับปรุง Units แบบ V6.1)
+                # Logic การซื้อไม้ที่ 2
                 elif coin_bal * price > self.min_trade and thb > (equity * 0.40) and price < self.avg_price * 0.99:
                     buy_amt = thb * 0.95
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        # พยายามดึงค่า rec ถ้าเป็น 0 ให้คำนวณสำรอง (Fallback) แบบ V6.1
                         units = float(res['result'].get('rec', 0))
                         if units == 0: units = (buy_amt * (1 - self.fee_pct)) / price
-                        
                         self.avg_price = ((self.avg_price * self.total_units) + (price * units)) / (self.total_units + units)
                         self.total_units += units
                         self.current_stage = 2
@@ -195,7 +198,6 @@ class BitkubUltimateBotV66:
                 # Logic การขาย
                 elif coin_bal * price > self.min_trade:
                     self.highest_price = max(self.highest_price, price)
-
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         sell_units = coin_bal * 0.5
                         res = self.place_order("sell", sell_units)
@@ -218,6 +220,7 @@ class BitkubUltimateBotV66:
                             self._save_state()
                             self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPrice: {price:,.2f}\nUnits: {coin_bal:,.4f}\nPNL: {pnl:+.2f}%")
 
+                # Regular Report Every 30 Mins
                 if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(price, pnl, ema)
                     self.last_report_time = time.time()
