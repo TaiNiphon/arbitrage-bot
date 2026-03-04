@@ -204,7 +204,7 @@ class BitkubUltimateBotV66:
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
                     elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif ema and price < ema * 0.99: reason = "Trend Reversed"
+                    elif ema and price < ema * 0.98: reason = "Trend Reversed"
 
                     if reason:
                         res = self.place_order("sell", coin_bal)
