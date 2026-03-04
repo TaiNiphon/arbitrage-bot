@@ -24,7 +24,7 @@ class BitkubUltimateBotV66:
         self.fee_pct = 0.0025
         self.min_trade = 10.0
 
-        self.state_file"bot_state_xrp_10k.json"
+        self.state_file = "bot_state_xrp_10k.json"
         self._load_state()
         self.last_report_time = 0
 
