@@ -89,7 +89,6 @@ class BitkubUltimateBotV66:
 
     def place_order(self, side, amt, typ="market"):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        # Bitkub Limit: THB uses 2 decimal points, Coins use 4 or more
         payload = {
             "sym": self.symbol.lower(),
             "amt": math.floor(amt * 100) / 100 if side == "buy" else math.floor(amt * 10000) / 10000,
@@ -163,24 +162,30 @@ class BitkubUltimateBotV66:
                     sell_value = price * (1 - self.fee_pct)
                     pnl = ((sell_value - buy_cost) / buy_cost) * 100
 
-                # Logic การซื้อไม้ที่ 1
+                # Logic การซื้อไม้ที่ 1 (ปรับปรุง Units แบบ V6.1)
                 if coin_bal * price < self.min_trade and ema and price > ema * 1.005:
                     buy_amt = thb * 0.48
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        units = float(res['result']['rec']) if 'result' in res else (buy_amt/price)
+                        # พยายามดึงค่า rec ถ้าเป็น 0 ให้คำนวณสำรอง (Fallback) แบบ V6.1
+                        units = float(res['result'].get('rec', 0))
+                        if units == 0: units = (buy_amt * (1 - self.fee_pct)) / price
+                        
                         self.last_action, self.current_stage, self.avg_price = "buy", 1, price
                         self.total_units = units
                         self.highest_price = price
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}")
 
-                # Logic การซื้อไม้ที่ 2 (Fix: เช็คจากสัดส่วน Asset)
+                # Logic การซื้อไม้ที่ 2 (ปรับปรุง Units แบบ V6.1)
                 elif coin_bal * price > self.min_trade and thb > (equity * 0.40) and price < self.avg_price * 0.99:
                     buy_amt = thb * 0.95
                     res = self.place_order("buy", buy_amt)
                     if res.get('error') == 0:
-                        units = float(res['result']['rec']) if 'result' in res else (buy_amt/price)
+                        # พยายามดึงค่า rec ถ้าเป็น 0 ให้คำนวณสำรอง (Fallback) แบบ V6.1
+                        units = float(res['result'].get('rec', 0))
+                        if units == 0: units = (buy_amt * (1 - self.fee_pct)) / price
+                        
                         self.avg_price = ((self.avg_price * self.total_units) + (price * units)) / (self.total_units + units)
                         self.total_units += units
                         self.current_stage = 2
@@ -191,7 +196,6 @@ class BitkubUltimateBotV66:
                 elif coin_bal * price > self.min_trade:
                     self.highest_price = max(self.highest_price, price)
 
-                    # ทยอยขาย 50%
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         sell_units = coin_bal * 0.5
                         res = self.place_order("sell", sell_units)
