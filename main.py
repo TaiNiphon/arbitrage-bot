@@ -16,7 +16,7 @@ class BitkubUltimateBotV66:
 
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.coin = self.symbol.split('_')[0]
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10090.61)) # ปรับทุนเริ่มต้นตามจริง
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10090.61)) # ทุนเริ่มต้นจากไฟล์ JSON ล่าสุด
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0))
@@ -24,7 +24,7 @@ class BitkubUltimateBotV66:
         self.fee_pct = 0.0025
         self.min_trade = 10.0
 
-        self.state_file = "bot_state_xrp_10k.json" # ใช้ชื่อไฟล์ใหม่เพื่อ Reset
+        self.state_file = "bot_state_xrp_10k.json"
         self._load_state()
         self.last_report_time = 0
 
@@ -150,8 +150,8 @@ class BitkubUltimateBotV66:
                     for item in ticker:
                         if item['symbol'].upper() == self.symbol: price = float(item['last']); break
 
-                # 2. Get EMA Data (TF 1h)
-                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-172800, "to": int(time.time())})
+                # 2. Get EMA Data (ปรับเพิ่มช่วงเวลาเป็น 300000 วินาที เพื่อให้ได้ข้อมูลครบ 50 แท่งสำหรับ TF 1h)
+                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-300000, "to": int(time.time())})
                 prices = hist.get('c', [])
                 ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
 
