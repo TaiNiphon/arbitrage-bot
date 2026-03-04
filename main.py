@@ -24,7 +24,7 @@ class BitkubUltimateBotV66:
         self.fee_pct = 0.0025
         self.min_trade = 10.0
 
-        self.state_file = "bot_state_v66.json"
+        self.state_file"bot_state_xrp_10k.json"
         self._load_state()
         self.last_report_time = 0
 
@@ -149,7 +149,7 @@ class BitkubUltimateBotV66:
                     for item in ticker:
                         if item['symbol'].upper() == self.symbol: price = float(item['last']); break
 
-                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
+                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-172800, "to": int(time.time())})
                 prices = hist.get('c', [])
                 ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
 
