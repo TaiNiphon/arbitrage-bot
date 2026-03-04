@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateBotV66:
+class BitkubUltimateBotV66_Final:
     def __init__(self):
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
@@ -16,7 +16,7 @@ class BitkubUltimateBotV66:
 
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.coin = self.symbol.split('_')[0]
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10090.61)) # ทุนเริ่มต้นจากไฟล์ JSON ล่าสุด
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10090.61)) 
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0))
@@ -27,6 +27,15 @@ class BitkubUltimateBotV66:
         self.state_file = "bot_state_xrp_10k.json"
         self._load_state()
         self.last_report_time = 0
+
+    # --- [เพิ่มฟังก์ชัน EMA แท้] ---
+    def calculate_ema_proper(self, prices, period):
+        if len(prices) < period: return None
+        multiplier = 2 / (period + 1)
+        ema = sum(prices[:period]) / period  # เริ่มต้นด้วย SMA
+        for price in prices[period:]:
+            ema = (price - ema) * multiplier + ema
+        return ema
 
     def _load_state(self):
         if os.path.exists(self.state_file):
@@ -139,21 +148,20 @@ class BitkubUltimateBotV66:
         self.notify(report)
 
     def run(self):
-        self.notify(f"🚀 <b>Bitkub V6.6 Ultimate Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period} / TF 1h)")
+        self.notify(f"🚀 <b>Bitkub V6.6 Proper EMA Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period} / TF 1h)")
 
         while True:
             try:
-                # 1. Get Current Price
                 ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
                 price = 0
                 if isinstance(ticker, list):
                     for item in ticker:
                         if item['symbol'].upper() == self.symbol: price = float(item['last']); break
 
-                # 2. Get EMA Data (ปรับเพิ่มช่วงเวลาเป็น 300000 วินาที เพื่อให้ได้ข้อมูลครบ 50 แท่งสำหรับ TF 1h)
-                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-300000, "to": int(time.time())})
-                prices = hist.get('c', [])
-                ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
+                # ดึงข้อมูลย้อนหลัง 120 ชม. เพื่อความแม่นยำของ EMA
+                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-432000, "to": int(time.time())})
+                prices_list = hist.get('c', [])
+                ema = self.calculate_ema_proper(prices_list, self.ema_period) # ใช้สูตร EMA แท้
 
                 thb, coin_bal = self.get_balance()
                 equity = thb + (coin_bal * price)
@@ -164,7 +172,6 @@ class BitkubUltimateBotV66:
                     sell_value = price * (1 - self.fee_pct)
                     pnl = ((sell_value - buy_cost) / buy_cost) * 100
 
-                # --- Initial Report (ส่งทันทีที่เริ่ม Loop แรก) ---
                 if self.last_report_time == 0:
                     self.send_detailed_report(price, pnl, ema)
                     self.last_report_time = time.time()
@@ -180,7 +187,7 @@ class BitkubUltimateBotV66:
                         self.total_units = units
                         self.highest_price = price
                         self._save_state()
-                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}")
+                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nEMA: {ema:,.2f}")
 
                 # Logic การซื้อไม้ที่ 2
                 elif coin_bal * price > self.min_trade and thb > (equity * 0.40) and price < self.avg_price * 0.99:
@@ -193,7 +200,7 @@ class BitkubUltimateBotV66:
                         self.total_units += units
                         self.current_stage = 2
                         self._save_state()
-                        self.notify(f"🟢 <b>[BUY 2/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {units:,.4f}\nAvg Price: {self.avg_price:,.2f}")
+                        self.notify(f"🟢 <b>[BUY 2/2] Confirmed</b>\nPrice: {price:,.2f}\nAvg Price: {self.avg_price:,.2f}")
 
                 # Logic การขาย
                 elif coin_bal * price > self.min_trade:
@@ -204,13 +211,14 @@ class BitkubUltimateBotV66:
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self._save_state()
-                            self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPrice: {price:,.2f}\nUnits: {sell_units:,.4f}\nPNL: {pnl:+.2f}%")
+                            self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPrice: {price:,.2f}\nPNL: {pnl:+.2f}%")
 
                     reason = None
                     if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
                     elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100):
                         reason = f"Trailing Stop (Exit @ {pnl:.2f}%)"
-                    elif ema and price < ema * 0.98: reason = "Trend Reversed"
+                    elif ema and price < ema: # ขายทันทีเมื่อหลุดเส้น EMA (เพิ่มความปลอดภัย)
+                        reason = "Price below EMA (Trend Changed)"
 
                     if reason:
                         res = self.place_order("sell", coin_bal)
@@ -218,9 +226,8 @@ class BitkubUltimateBotV66:
                             self.last_pnl = pnl
                             self.last_action, self.current_stage, self.avg_price, self.total_units = "sell", 0, 0, 0
                             self._save_state()
-                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPrice: {price:,.2f}\nUnits: {coin_bal:,.4f}\nPNL: {pnl:+.2f}%")
+                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPrice: {price:,.2f}\nPNL: {pnl:+.2f}%")
 
-                # Regular Report Every 30 Mins
                 if time.time() - self.last_report_time >= 1800:
                     self.send_detailed_report(price, pnl, ema)
                     self.last_report_time = time.time()
@@ -235,4 +242,4 @@ def run_health():
 
 if __name__ == "__main__":
     threading.Thread(target=run_health, daemon=True).start()
-    BitkubUltimateBotV66().run()
+    BitkubUltimateBotV66_Final().run()
