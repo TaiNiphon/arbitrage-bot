@@ -1,5 +1,4 @@
 import os, requests, time, hmac, hashlib, json, threading, logging, math
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta, timezone
 
 # --- Configuration & Logging ---
@@ -15,7 +14,7 @@ class BitkubProBotV6_Fixed:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # Strategy Config (ถอดแบบจาก V.6.0 Pro เป๊ะ)
+        # Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
         self.coin = self.symbol.split('_')[0]
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2030.71)) 
@@ -27,10 +26,9 @@ class BitkubProBotV6_Fixed:
         self.fee_pct = 0.0025 
         self.min_trade = 10.0 
 
-        self.state_file = f"bot_state_v6_pro.json"
+        self.state_file = "bot_state_v6_pro.json"
         self.last_report_time = 0
 
-        # --- เสริมจุดบอด: Force Sync กับ Wallet จริงตอนเริ่ม ---
         self._sync_setup()
 
     def _sync_setup(self):
@@ -46,7 +44,6 @@ class BitkubProBotV6_Fixed:
             self.last_action, self.total_units, self.current_stage = "buy", coin_bal, 2
             self.avg_price = price
             self.highest_price = price
-            # พยายามโหลดทุนจริงถ้ามีไฟล์เดิม
             if os.path.exists(self.state_file):
                 try:
                     with open(self.state_file, "r") as f:
@@ -104,7 +101,6 @@ class BitkubProBotV6_Fixed:
 
     def place_order(self, side, amt, typ="market"):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        # ปรับทศนิยมให้ Bitkub ยอมรับ
         clean_amt = math.floor(amt * 100) / 100 if side == "buy" else math.floor(amt * 10000) / 10000
         payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": typ}
         return self._request("POST", path, payload=payload, private=True)
@@ -115,7 +111,6 @@ class BitkubProBotV6_Fixed:
                           json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
-    # --- รายงานหน้าตาแบบ V.6.0 Pro เป๊ะ ---
     def send_detailed_report(self, price, pnl, ema_val):
         thb_bal, coin_bal = self.get_balance()
         coin_value = coin_bal * price
@@ -127,9 +122,8 @@ class BitkubProBotV6_Fixed:
         is_holding = coin_value > self.min_trade
         status = "HOLDING COIN" if is_holding else "HOLDING CASH"
 
-        # แก้ไขจุดนี้: ใช้ :+.2f เพื่อให้เครื่องหมาย + หรือ - แสดงผลตามค่าจริงอัตโนมัติ
+        # จุดที่แก้ไข: ใช้ :+ เพื่อให้โชว์เครื่องหมายบวก/ลบตามจริง
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
-        
         pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
         pnl_display = pnl if is_holding else self.last_pnl
 
@@ -156,8 +150,7 @@ class BitkubProBotV6_Fixed:
         self.notify(report)
 
     def run(self):
-        self.notify(f"<b>🚀 Bot V6.0 Pro Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
-
+        self.notify(f"<b>🚀 Bot V6.0 Pro Started</b>\nMonitoring {self.symbol}")
         while True:
             try:
                 ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
@@ -174,7 +167,6 @@ class BitkubProBotV6_Fixed:
                 thb, coin_bal = self.get_balance()
                 pnl = (((price*0.9975) - (self.avg_price*1.0025)) / (self.avg_price*1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- กลยุทธ์ V.6.0 Pro: ไม้ 1 (Confirm Trend) ---
                 if self.last_action == "sell" and ema and price > ema * 1.01 and ema > ema_prev:
                     res = self.place_order("buy", thb * 0.45)
                     if res.get('error') == 0:
@@ -182,9 +174,8 @@ class BitkubProBotV6_Fixed:
                         self.total_units = float(res['result'].get('rec', (thb*0.45/price)*0.9975))
                         self.highest_price = price
                         self._save_state()
-                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {self.total_units:,.4f}")
+                        self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}")
 
-                # --- กลยุทธ์ V.6.0 Pro: ไม้ 2 (Pyramiding เมื่อกำไร) ---
                 elif self.current_stage == 1 and pnl > 0.5 and ema and price > ema * 1.01:
                     res = self.place_order("buy", thb * 0.95)
                     if res.get('error') == 0:
@@ -193,6 +184,34 @@ class BitkubProBotV6_Fixed:
                         self.total_units += new_units
                         self.current_stage = 2
                         self._save_state()
-                        self.notify(f"🟢 <b>[BUY 2/2] Pyramiding</b>\nAdded: {new_units:,.4f}\nNew Avg: {self.avg_price:,.2f}")
+                        self.notify(f"🟢 <b>[BUY 2/2] Pyramiding</b>\nNew Avg: {self.avg_price:,.2f}")
 
-                #
+                elif self.last_action == "buy" and coin_bal > 0:
+                    self.highest_price = max(self.highest_price, price)
+                    if self.current_stage == 2 and pnl >= self.tp_stage_1:
+                        res = self.place_order("sell", coin_bal * 0.5)
+                        if res.get('error') == 0:
+                            self.total_units -= (coin_bal * 0.5); self.current_stage = 3
+                            self._save_state()
+
+                    reason = None
+                    if pnl <= -self.stop_loss: reason = "Stop Loss"
+                    elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100): reason = "Trailing Stop"
+                    elif ema and price < ema * 0.985: reason = "Trend Reversed"
+
+                    if reason:
+                        res = self.place_order("sell", coin_bal)
+                        if res.get('error') == 0:
+                            self.last_pnl = pnl
+                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPNL: {pnl:+.2f}%")
+                            self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0
+                            self._save_state()
+
+                if time.time() - self.last_report_time >= 1800:
+                    self.send_detailed_report(price, pnl, ema)
+                    self.last_report_time = time.time()
+            except Exception as e: logger.error(f"Error: {e}")
+            time.sleep(30)
+
+if __name__ == "__main__":
+    BitkubProBotV6_Fixed().run()
