@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubProBotV6_Final:
+class BitkubProBotV6_Fixed:
     def __init__(self):
         # API Config
         self.api_key = os.getenv("BITKUB_KEY")
@@ -15,7 +15,7 @@ class BitkubProBotV6_Final:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # Trading Strategy Config (Logic จาก V6.0 Pro)
+        # Strategy Config (ถอดแบบจาก V.6.0 Pro เป๊ะ)
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
         self.coin = self.symbol.split('_')[0]
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2030.71)) 
@@ -27,47 +27,36 @@ class BitkubProBotV6_Final:
         self.fee_pct = 0.0025 
         self.min_trade = 10.0 
 
-        self.state_file = f"bot_state_{self.symbol.lower()}.json"
-        self.last_buy_time = 0
+        self.state_file = f"bot_state_v6_pro.json"
         self.last_report_time = 0
         
-        # --- Boot Up: Sync With Wallet ---
-        self._sync_with_wallet()
+        # --- เสริมจุดบอด: Force Sync กับ Wallet จริงตอนเริ่ม ---
+        self._sync_setup()
 
-    def _sync_with_wallet(self):
-        """ระบบตรวจสอบยอดจริงเพื่อป้องกันการหลงลืมสถานะ"""
-        logger.info("🛠️ Syncing with Bitkub Wallet...")
+    def _sync_setup(self):
+        logger.info("🛠️ Syncing with Wallet...")
         thb, coin_bal = self.get_balance()
-        
-        # ดึงราคาล่าสุดเพื่อประเมินมูลค่า
         ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
         price = 0
         if isinstance(ticker, list):
             for item in ticker:
                 if item['symbol'].upper() == self.symbol: price = float(item['last'])
 
-        # ถ้ามีเหรียญในกระเป๋าเกินขั้นต่ำ ให้ถือว่าสถานะคือ BUY (Stage 2)
         if coin_bal * price > self.min_trade:
-            self.last_action = "buy"
-            self.total_units = coin_bal
-            self.avg_price = price # ใช้ราคาปัจจุบันเป็นทุนอ้างอิงถ้าหาไฟล์ state ไม่เจอ
-            self.current_stage = 2
+            self.last_action, self.total_units, self.current_stage = "buy", coin_bal, 2
+            self.avg_price = price
             self.highest_price = price
-            self._load_state() # พยายามโหลดทุนเดิมจากไฟล์ถ้ามี
-            logger.info(f"✅ Detected {coin_bal} {self.coin}. Setting status to HOLDING.")
+            # พยายามโหลดทุนจริงถ้ามีไฟล์เดิม
+            if os.path.exists(self.state_file):
+                try:
+                    with open(self.state_file, "r") as f:
+                        d = json.load(f)
+                        self.avg_price = d.get('avg_price', price)
+                        self.current_stage = d.get('stage', 2)
+                except: pass
         else:
-            self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price, self.last_pnl = "sell", 0.0, 0, 0.0, 0.0, 0.0
-            logger.info("💰 No assets detected. Ready for new signals.")
-
-    def _load_state(self):
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, "r") as f:
-                    d = json.load(f)
-                    self.avg_price = d.get('avg_price', self.avg_price)
-                    self.current_stage = d.get('stage', self.current_stage)
-                    self.highest_price = d.get('highest_price', self.highest_price)
-            except: pass
+            self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
+        self.last_pnl = 0.0
 
     def _save_state(self):
         try:
@@ -75,9 +64,9 @@ class BitkubProBotV6_Final:
                 json.dump({
                     "last_action": self.last_action, "avg_price": self.avg_price,
                     "stage": self.current_stage, "total_units": self.total_units,
-                    "highest_price": self.highest_price, "last_pnl": getattr(self, 'last_pnl', 0.0)
+                    "highest_price": self.highest_price
                 }, f)
-        except Exception as e: logger.error(f"Save State Error: {e}")
+        except: pass
 
     def get_local_time(self):
         return datetime.now(timezone.utc) + timedelta(hours=7)
@@ -103,15 +92,9 @@ class BitkubProBotV6_Final:
                 'X-BTK-SIGN': self._get_signature(ts, method, path, query_str, body_str)
             })
         try:
-            response = requests.request(method, url, headers=headers, data=body_str, timeout=15)
-            return response.json()
+            res = requests.request(method, url, headers=headers, data=body_str, timeout=15)
+            return res.json()
         except: return {"error": 999}
-
-    def notify(self, msg):
-        if not self.tg_token: return
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
-                          json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
-        except: pass
 
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", private=True)
@@ -119,25 +102,20 @@ class BitkubProBotV6_Final:
             return float(res['result'].get('THB', 0)), float(res['result'].get(self.coin, 0))
         return 0.0, 0.0
 
-    def clean_num(self, n, decimals=4):
-        return math.floor(n * (10**decimals)) / (10**decimals)
-
     def place_order(self, side, amt, typ="market"):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        payload = {
-            "sym": self.symbol.lower(),
-            "amt": self.clean_num(amt, 2 if side=="buy" else 4),
-            "rat": 0, "typ": typ
-        }
+        # ปรับทศนิยมให้ Bitkub ยอมรับ
+        clean_amt = math.floor(amt * 100) / 100 if side == "buy" else math.floor(amt * 10000) / 10000
+        payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": typ}
         return self._request("POST", path, payload=payload, private=True)
 
-    def calculate_ema(self, prices, period):
-        if len(prices) < period: return None
-        k = 2 / (period + 1)
-        ema = sum(prices[:period]) / period
-        for p in prices[period:]: ema = (p * k) + (ema * (1 - k))
-        return ema
+    def notify(self, msg):
+        if not self.tg_token: return
+        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
+                          json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
+        except: pass
 
+    # --- รายงานหน้าตาแบบ V.6.0 Pro เป๊ะ ---
     def send_detailed_report(self, price, pnl, ema_val):
         thb_bal, coin_bal = self.get_balance()
         coin_value = coin_bal * price
@@ -146,111 +124,97 @@ class BitkubProBotV6_Final:
         growth_pct = (net_profit / self.initial_equity) * 100
         now_th = self.get_local_time()
 
-        status = "🚀 HOLDING" if coin_value > self.min_trade else "💰 WAITING"
-        t_stop = f"{self.highest_price * (1 - (self.trailing_pct/100)):,.2f}" if self.current_stage == 3 else "Waiting..."
+        is_holding = coin_value > self.min_trade
+        status = "HOLDING COIN" if is_holding else "HOLDING CASH"
+        
+        diff_ema = f"(+{((price - ema_val)/ema_val*100):.2f}%)" if ema_val else ""
+        pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
+        pnl_display = pnl if is_holding else self.last_pnl
 
         report = (
-            f"<b>{status} | {self.symbol}</b>\n"
+            f"🚀 <b>{status}</b>\n"
             f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
+            f"📊 <b>MARKET: {self.symbol}</b>\n"
             f"💵 Price: {price:,.2f} THB\n"
-            f"📈 EMA({self.ema_period}): {ema_val:,.2f}\n"
-            f"🕒 P/L: {pnl:+.2f}% (Fee Incl.)\n"
+            f"📈 EMA({self.ema_period}): {ema_val:,.2f} {diff_ema}\n"
+            f"🕒 {pnl_label}: {pnl_display:+.2f}% (Fee Incl.)\n"
             "━━━━━━━━━━━━━━━\n"
+            "<b>🏦 PORTFOLIO</b>\n"
             f"💰 Cash: {thb_bal:,.2f} THB\n"
-            f"🪙 Asset: {coin_bal:,.4f} ({coin_value:,.2f})\n"
-            f"💎 Equity: {total_equity:,.2f} THB\n"
+            f"🪙 Coin: {coin_bal:,.4f} ({coin_value:,.2f} THB)\n"
+            f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
             "━━━━━━━━━━━━━━━\n"
+            "<b>📈 PERFORMANCE</b>\n"
+            f"💵 Net Profit: {net_profit:,.2f} THB\n"
             f"🚀 Growth: {growth_pct:+.2f}%\n"
-            f"🛡️ Trailing @: {t_stop}\n"
+            f"🛡️ Trailing @: {f'{self.highest_price * 0.99:,.2f}' if self.current_stage == 3 else 'Waiting...'}\n"
             "━━━━━━━━━━━━━━━"
         )
         self.notify(report)
 
     def run(self):
-        self.notify(f"<b>🤖 Bot V6.0 Special Edition</b>\nStrict Mode: Pyramiding Only")
+        self.notify(f"<b>🚀 Bot V6.0 Pro Started</b>\nMonitoring {self.symbol} (EMA {self.ema_period})")
 
         while True:
             try:
-                # 1. Fetch Price & Indicators
                 ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
                 price = 0
                 if isinstance(ticker, list):
                     for item in ticker:
                         if item['symbol'].upper() == self.symbol: price = float(item['last'])
 
-                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-259200, "to": int(time.time())})
+                hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
                 prices = hist.get('c', [])
-                ema = self.calculate_ema(prices, self.ema_period)
-                ema_prev = self.calculate_ema(prices[:-1], self.ema_period)
+                ema = sum(prices[-self.ema_period:]) / self.ema_period if len(prices) >= self.ema_period else None
+                ema_prev = sum(prices[-(self.ema_period+1):-1]) / self.ema_period if len(prices) > self.ema_period else None
 
                 thb, coin_bal = self.get_balance()
-                
-                # คำนวณ P/L แบบหัก Fee จริง
-                pnl = 0.0
-                if self.avg_price > 0:
-                    buy_cost = self.avg_price * (1 + self.fee_pct)
-                    sell_val = price * (1 - self.fee_pct)
-                    pnl = ((sell_val - buy_cost) / buy_cost) * 100
+                pnl = (((price*0.9975) - (self.avg_price*1.0025)) / (self.avg_price*1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- 2. Entry Logic (V6.0 Pro) ---
-                is_uptrend = ema and price > (ema * 1.01) and ema > ema_prev
-
-                # ไม้ 1: ซื้อเมื่อ Trend Confirm
-                if is_uptrend and self.last_action == "sell" and thb > self.min_trade:
-                    buy_amt = thb * 0.45
-                    res = self.place_order("buy", buy_amt)
+                # --- กลยุทธ์ V.6.0 Pro: ไม้ 1 (Confirm Trend) ---
+                if self.last_action == "sell" and ema and price > ema * 1.01 and ema > ema_prev:
+                    res = self.place_order("buy", thb * 0.45)
                     if res.get('error') == 0:
-                        self.avg_price = price
-                        self.total_units = float(res['result'].get('rec', buy_amt/price * (1-self.fee_pct)))
-                        self.current_stage, self.last_action, self.highest_price = 1, "buy", price
-                        self.last_buy_time = time.time()
+                        self.avg_price, self.last_action, self.current_stage = price, "buy", 1
+                        self.total_units = float(res['result'].get('rec', (thb*0.45/price)*0.9975))
+                        self.highest_price = price
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 1/2] Confirmed</b>\nPrice: {price:,.2f}\nUnits: {self.total_units:,.4f}")
 
-                # ไม้ 2: ซื้อเมื่อกำไรเขียว (Pyramiding)
-                elif is_uptrend and self.current_stage == 1 and pnl > 0.5 and thb > self.min_trade:
-                    buy_amt = thb * 0.95
-                    res = self.place_order("buy", buy_amt)
+                # --- กลยุทธ์ V.6.0 Pro: ไม้ 2 (Pyramiding เมื่อกำไร) ---
+                elif self.current_stage == 1 and pnl > 0.5 and ema and price > ema * 1.01:
+                    res = self.place_order("buy", thb * 0.95)
                     if res.get('error') == 0:
-                        new_units = float(res['result'].get('rec', buy_amt/price * (1-self.fee_pct)))
+                        new_units = float(res['result'].get('rec', (thb*0.95/price)*0.9975))
                         self.avg_price = ((self.avg_price * self.total_units) + (price * new_units)) / (self.total_units + new_units)
                         self.total_units += new_units
-                        self.current_stage, self.last_buy_time = 2, time.time()
+                        self.current_stage = 2
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 2/2] Pyramiding</b>\nAdded: {new_units:,.4f}\nNew Avg: {self.avg_price:,.2f}")
 
-                # --- 3. Exit Logic (V6.0 Pro) ---
+                # --- การขาย (Exit Logic) ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
-                    hold_time = time.time() - self.last_buy_time
-
-                    # Partial TP 50%
+                    
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
-                        sell_amt = self.total_units * 0.5
-                        res = self.place_order("sell", sell_amt)
+                        res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
-                            self.total_units -= sell_amt
-                            self.current_stage = 3
+                            self.total_units -= (coin_bal * 0.5); self.current_stage = 3
                             self._save_state()
                             self.notify(f"🟠 <b>[TP 50%] Locked</b>\nPNL: {pnl:+.2f}%")
 
-                    # Exit Conditions (พร้อม Buffer ป้องกัน Noise)
                     reason = None
-                    if pnl <= -self.stop_loss: reason = f"Stop Loss ({pnl:.2f}%)"
-                    elif hold_time > 900: # ต้องถือเกิน 15 นาทีถึงจะยอมให้ EMA/Trailing ทำงาน
-                        if self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100):
-                            reason = f"Trailing Stop ({pnl:.2f}%)"
-                        elif price < (ema * 0.985): # หลุด EMA 1.5%
-                            reason = "Trend Reversed"
+                    if pnl <= -self.stop_loss: reason = "Stop Loss"
+                    elif self.current_stage == 3 and price < self.highest_price * (1 - self.trailing_pct/100): reason = "Trailing Stop"
+                    elif ema and price < ema * 0.985: reason = "Trend Reversed"
 
                     if reason:
-                        res = self.place_order("sell", self.total_units)
+                        res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
-                            received = (self.total_units * price) * (1 - self.fee_pct)
-                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nReceived: {received:,.2f} THB")
-                            self.last_action, self.current_stage, self.avg_price, self.total_units = "sell", 0, 0, 0
                             self.last_pnl = pnl
+                            self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nSold: {coin_bal:,.4f} Units\nPNL: {pnl:+.2f}%")
+                            self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0
                             self._save_state()
 
                 if time.time() - self.last_report_time >= 1800:
@@ -261,4 +225,4 @@ class BitkubProBotV6_Final:
             time.sleep(30)
 
 if __name__ == "__main__":
-    BitkubProBotV6_Final().run()
+    BitkubProBotV6_Fixed().run()
