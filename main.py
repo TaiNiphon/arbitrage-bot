@@ -207,7 +207,7 @@ class BitkubProBotV6_Fixed:
                             self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0
                             self._save_state()
 
-                if time.time() - self.last_report_time >= 1800:
+                if time.time() - self.last_report_time >= 21600:
                     self.send_detailed_report(price, pnl, ema)
                     self.last_report_time = time.time()
             except Exception as e: logger.error(f"Error: {e}")
