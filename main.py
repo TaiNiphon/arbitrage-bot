@@ -18,16 +18,16 @@ class BitkubHybridV7:
         # Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
         self.coin = self.symbol.split('_')[0] if '_' in self.symbol else self.symbol
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2688.0)) 
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2681.65)) 
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
-        self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
+        self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0)) # ปรับตาม Variables ในรูป
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
-        self.ema_period = 50
+        self.ema_period = int(os.getenv("EMA_PERIOD", 50))
         
         # State Management
         self.state_file = "bot_state_v7_pro.json"
         self.last_report_time = 0
-        self.report_interval = 1800 # 30 mins
+        self.report_interval = 1800 
         self.last_pnl = 0.0
         self._sync_setup()
 
@@ -42,17 +42,9 @@ class BitkubHybridV7:
 
         if coin_bal * price > 50:
             self.last_action, self.total_units, self.current_stage = "buy", coin_bal, 2
-            # ดึงต้นทุนจริงจากประวัติ (ความสามารถจาก V5.5 Pro-Fixed)
             actual_avg, _ = self.get_actual_cost()
             self.avg_price = actual_avg if actual_avg > 0 else price
             self.highest_price = max(self.avg_price, price)
-            
-            if os.path.exists(self.state_file):
-                try:
-                    with open(self.state_file, "r") as f:
-                        d = json.load(f)
-                        self.current_stage = d.get('stage', 2)
-                except: pass
         else:
             self.last_action, self.avg_price, self.current_stage, self.total_units, self.highest_price = "sell", 0.0, 0, 0.0, 0.0
         self._save_state()
@@ -67,7 +59,6 @@ class BitkubHybridV7:
                 }, f)
         except: pass
 
-    # --- API Helper Methods ---
     def _request(self, method, path, params=None, payload=None, private=False):
         url = f"{self.host}{path}"
         query_str = "?" + "&".join([f"{k}={v}" for k, v in params.items()]) if params else ""
@@ -94,14 +85,13 @@ class BitkubHybridV7:
     def get_actual_cost(self):
         res = self._request("GET", f"/api/v3/market/my-order-history?sym={self.symbol.lower()}&p=1&l=1", private=True)
         if res and res.get('error') == 0 and res.get('result'):
-            last_order = res['result'][0]
-            if last_order['side'].lower() == 'buy':
-                return float(last_order['rat']), float(last_order['amount'])
+            for order in res['result']:
+                if order['side'].lower() == 'buy':
+                    return float(order['rat']), float(order['amount'])
         return 0.0, 0.0
 
     def place_order(self, side, amt, typ="market"):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        # จัดการทศนิยม (Precision) ตาม V5.5 Pro-Fixed
         clean_amt = math.floor(amt * 100) / 100 if side == "buy" else math.floor(amt * 10000) / 10000
         payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": typ}
         return self._request("POST", path, payload=payload, private=True)
@@ -121,20 +111,18 @@ class BitkubHybridV7:
         growth_pct = (net_profit / self.initial_equity) * 100
         now_th = datetime.now(timezone.utc) + timedelta(hours=7)
 
-        is_holding = coin_value > 50
-        status = "HOLDING COIN" if is_holding else "HOLDING CASH"
+        status_icon = "🚀" if coin_value > 50 else "⚪️"
+        status_text = "HOLDING COIN" if coin_value > 50 else "HOLDING CASH"
         diff_ema = f"({((price - ema_val)/ema_val*100):+.2f}%)" if ema_val else ""
-        pnl_label = "Net P/L" if is_holding else "Last Trade P/L"
-        pnl_display = pnl if is_holding else self.last_pnl
 
         report = (
-            f"🚀 <b>{status}</b>\n"
+            f"{status_icon} <b>{status_text} | Hybrid V7</b>\n"
             f"📅 {now_th.strftime('%d/%m/%Y %H:%M')}\n"
             "━━━━━━━━━━━━━━━\n"
             f"📊 <b>MARKET: {self.symbol}</b>\n"
             f"💵 Price: {price:,.2f} THB\n"
             f"📈 EMA({self.ema_period}): {ema_val:,.2f} {diff_ema}\n"
-            f"🕒 {pnl_label}: {pnl_display:+.2f}% (Fee Incl.)\n"
+            f"🕒 Net P/L: {pnl:+.2f}% (Fee Incl.)\n"
             "━━━━━━━━━━━━━━━\n"
             "<b>🏦 PORTFOLIO</b>\n"
             f"💰 Cash: {thb_bal:,.2f} THB\n"
@@ -171,7 +159,7 @@ class BitkubHybridV7:
                 thb, coin_bal = self.get_balance()
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # BUY LOGIC (Hybrid Slope Filter)
+                # BUY Logic (Pyramiding + Slope)
                 if self.last_action == "sell" and price > (ema * 1.005) and ema > (ema_prev * 1.001):
                     res = self.place_order("buy", thb * 0.48)
                     if res.get('error') == 0:
@@ -191,7 +179,7 @@ class BitkubHybridV7:
                         self._save_state()
                         self.notify(f"🟢 <b>[BUY 2/2] Pyramiding</b>\nNew Avg: {self.avg_price:,.2f}")
 
-                # SELL LOGIC (Partial TP + Trailing)
+                # SELL Logic (Partial TP + Trailing)
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
@@ -209,7 +197,6 @@ class BitkubHybridV7:
                     if reason:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
-                            self.last_pnl = pnl
                             self.notify(f"🔴 <b>[SELL ALL]</b>\nReason: {reason}\nPNL: {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0
                             self._save_state()
@@ -220,10 +207,9 @@ class BitkubHybridV7:
             except Exception as e: logger.error(f"Error: {e}")
             time.sleep(30)
 
-# --- Health Check Server ---
 def run_health_check():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Active")
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot V7.1 Active")
         def log_message(self, *a): return
     HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
 
