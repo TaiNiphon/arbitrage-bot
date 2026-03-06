@@ -17,7 +17,7 @@ class BitkubProBotV6_Fixed:
         # Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
         self.coin = self.symbol.split('_')[0]
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2030.71)) 
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2688)) 
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
