@@ -18,7 +18,7 @@ class BitkubHybridV7:
         # Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper() 
         self.coin = self.symbol.split('_')[0] if '_' in self.symbol else self.symbol
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 681.65)) 
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 5000)) 
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
         self.stop_loss = float(os.getenv("STOP_LOSS_PCT", 5.0)) # ปรับตาม Variables ในรูป
         self.trailing_pct = float(os.getenv("TRAILING_PCT", 1.0))
