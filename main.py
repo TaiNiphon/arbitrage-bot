@@ -124,7 +124,7 @@ class BitkubUltimateV8_5:
         except: return None
 
     def run(self):
-        self.notify(f"<b>🔥 Hybrid Master V8.5 Activated</b>\nTarget: {self.symbol}\nMode: Trend Pyramiding + ATR Guard")
+        self.notify(f"<b>🔥 Hybrid Master V8.5 Activated</b>\nTarget: {self.symbol}\nMode: Net Profit Guard")
         while True:
             try:
                 data = self.update_data()
@@ -138,6 +138,8 @@ class BitkubUltimateV8_5:
                 self.market_phase = "SIDEWAYS" if is_sideways else ("UPTREND" if ema > ema_prev else "DOWNTREND")
 
                 thb, coin_bal = self.get_balance()
+                
+                # --- [CORE UPDATE] Net PNL Calculation (หักค่า Fee 0.5% ไป-กลับ) ---
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
                 if self.last_action == "sell":
@@ -152,6 +154,13 @@ class BitkubUltimateV8_5:
                     self.highest_price = max(self.highest_price, price)
                     self.dynamic_sl = self.highest_price - (atr * self.atr_multiplier)
 
+                    # --- [CORE UPDATE] Partial Take Profit (ต้องกำไรสุทธิเท่านั้น) ---
+                    if self.current_stage == 2 and pnl >= self.tp_stage_1:
+                        res = self.place_order("sell", coin_bal * 0.5)
+                        if res.get('error') == 0:
+                            self.total_units -= (coin_bal * 0.5); self.current_stage = 3
+                            self.notify(f"💰 <b>[PARTIAL TP 50%]</b>\nPNL (Net): {pnl:+.2f}%")
+
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss"
                     elif price <= self.dynamic_sl: reason = "ATR Trail Stop"
@@ -160,7 +169,7 @@ class BitkubUltimateV8_5:
                     if reason:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
-                            self.notify(f"🔴 <b>[SELL ALL] {reason}</b>\nPNL: {pnl:+.2f}%")
+                            self.notify(f"🔴 <b>[SELL ALL] {reason}</b>\nPNL (Net): {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0
                             self._save_state()
 
@@ -187,7 +196,7 @@ class BitkubUltimateV8_5:
                 f"📈 <b>MARKET: {self.symbol}</b>\n"
                 f"💵 Price: {price:,.2f} THB\n"
                 f"📊 EMA({self.ema_period}): {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
-                f"🕒 P/L: {pnl:+.2f}% (Avg: {self.avg_price:,.2f})\n\n"
+                f"🕒 <b>P/L (Net): {pnl:+.2f}%</b> (Avg: {self.avg_price:,.2f})\n\n"
                 f"💰 <b>PORTFOLIO</b>\n"
                 f"💵 Cash: {thb_bal:,.2f} THB\n"
                 f"🪙 Coin: {coin_bal:.4f} ({ (coin_bal * price):,.2f} THB)\n"
