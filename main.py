@@ -16,7 +16,7 @@ class BitkubUltimateV8_5:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # Strategy Config (ดึงค่าจาก Variables พร้อมกันเหนียวด้วยการล้างช่องว่าง)
+        # Strategy Config
         self.symbol = os.getenv("SYMBOL", "XRP_THB").strip().upper() 
         self.coin = self.symbol.split('_')[0]
         
@@ -27,8 +27,7 @@ class BitkubUltimateV8_5:
             self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 3.0))
             self.atr_multiplier = float(os.getenv("ATR_MULTIPLIER", 2.5))
             self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.02))
-        except Exception as e:
-            logger.error(f"❌ Variable Error: {e}")
+        except:
             self.initial_equity, self.ema_period, self.tp_stage_1, self.stop_loss_pct, self.atr_multiplier, self.slope_threshold = 5000, 50, 2.5, 3.0, 2.5, 0.02
 
         self.rsi_period = 14
@@ -48,34 +47,18 @@ class BitkubUltimateV8_5:
 
         self._sync_setup()
 
-    # --- Core System Functions ---
     def _sync_setup(self):
         logger.info("🛠️ Syncing Master System...")
         thb, coin_bal = self.get_balance()
-        
-        # แก้ไขจุดที่ทำให้เกิด Error: ดึงราคาแบบปลอดภัย
         try:
             ticker_res = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
-            if isinstance(ticker_res, list) and len(ticker_res) > 0:
-                price = float(ticker_res[0].get('last', 0))
-            else:
-                price = 0.0
-        except:
-            price = 0.0
+            price = float(ticker_res[0].get('last', 0)) if isinstance(ticker_res, list) else 0.0
+        except: price = 0.0
 
-        # ป้องกัน TypeError บรรทัดที่เคยพัง
         if float(coin_bal) * float(price) > 50:
             self.last_action, self.total_units, self.current_stage = "buy", float(coin_bal), 2
-            
-            # ดึงต้นทุนจาก Variables ก่อนเพื่อความแม่นยำ (ไม้ 43.43 ของคุณ)
             manual_avg = os.getenv("MY_AVG_PRICE")
-            if manual_avg:
-                self.avg_price = float(str(manual_avg).replace(',', ''))
-            else:
-                res = self._request("GET", f"/api/v3/market/my-order-history?sym={self.symbol.lower()}&p=1&l=1", private=True)
-                if isinstance(res, dict) and res.get('error') == 0 and res.get('result'):
-                    self.avg_price = float(res['result'][0]['rat'])
-            
+            self.avg_price = float(str(manual_avg).replace(',', '')) if manual_avg else 0.0
             self.highest_price = max(self.avg_price, price)
         else:
             self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0.0, 0, 0.0
@@ -84,10 +67,7 @@ class BitkubUltimateV8_5:
     def _save_state(self):
         try:
             with open(self.state_file, "w") as f:
-                json.dump({
-                    "last_action": self.last_action, "avg_price": self.avg_price,
-                    "stage": self.current_stage, "total_units": self.total_units
-                }, f)
+                json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "stage": self.current_stage, "total_units": self.total_units}, f)
         except: pass
 
     def _request(self, method, path, params=None, payload=None, private=False):
@@ -129,22 +109,17 @@ class BitkubUltimateV8_5:
         try:
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
             if not hist or 'c' not in hist: return None
-
             c = np.array(hist['c'], dtype=float)
             h = np.array(hist['h'], dtype=float)
             l = np.array(hist['l'], dtype=float)
-
             ema = np.mean(c[-self.ema_period:])
             ema_prev = np.mean(c[-(self.ema_period+1):-1])
-
             diff = np.diff(c)
             up, down = diff.clip(min=0), -1 * diff.clip(max=0)
             ma_up, ma_down = np.mean(up[-self.rsi_period:]), np.mean(down[-self.rsi_period:])
             rsi = 100 - (100 / (1 + (ma_up / ma_down))) if ma_down != 0 else 100
-
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
             atr = np.mean(tr[-self.atr_period:])
-
             return {"ema": ema, "ema_prev": ema_prev, "rsi": rsi, "atr": atr, "price": c[-1]}
         except: return None
 
@@ -154,7 +129,7 @@ class BitkubUltimateV8_5:
             try:
                 data = self.update_data()
                 if not data: 
-                    time.sleep(10)
+                    time.sleep(15)
                     continue
 
                 price, ema, ema_prev, rsi, atr = data['price'], data['ema'], data['ema_prev'], data['rsi'], data['atr']
@@ -165,33 +140,17 @@ class BitkubUltimateV8_5:
                 thb, coin_bal = self.get_balance()
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- BUY LOGIC ---
                 if self.last_action == "sell":
                     if price > (ema * 1.005) and ema > (ema_prev * 1.001) and rsi < 65:
-                        res = self.place_order("buy", thb * 0.45)
+                        res = self.place_order("buy", thb * 0.95)
                         if res.get('error') == 0:
-                            self.avg_price, self.last_action, self.current_stage, self.total_units = price, "buy", 1, float(res['result']['rec'])
+                            self.avg_price, self.last_action, self.current_stage, self.total_units = price, "buy", 2, float(res['result']['rec'])
                             self.highest_price = price
-                            self.notify(f"🟢 <b>[BUY 1/2] Entry</b>\nPrice: {price}")
+                            self.notify(f"🟢 <b>[BUY] Entry</b>\nPrice: {price}")
 
-                elif self.current_stage == 1 and pnl > 0.5 and price > (ema * 1.005):
-                    res = self.place_order("buy", thb * 0.95)
-                    if res.get('error') == 0:
-                        new_units = float(res['result']['rec'])
-                        self.avg_price = ((self.avg_price * self.total_units) + (price * new_units)) / (self.total_units + new_units)
-                        self.total_units += new_units; self.current_stage = 2
-                        self.notify(f"🟢 <b>[BUY 2/2] Pyramiding</b>\nNew Avg: {self.avg_price:.2f}")
-
-                # --- SELL LOGIC (Partial TP + ATR Trail Stop) ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
                     self.dynamic_sl = self.highest_price - (atr * self.atr_multiplier)
-
-                    if self.current_stage == 2 and pnl >= self.tp_stage_1:
-                        res = self.place_order("sell", coin_bal * 0.5)
-                        if res.get('error') == 0:
-                            self.total_units -= (coin_bal * 0.5); self.current_stage = 3
-                            self.notify(f"💰 <b>[PARTIAL TP 50%]</b> PNL: {pnl:+.2f}%")
 
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss"
@@ -216,19 +175,26 @@ class BitkubUltimateV8_5:
         try:
             thb_bal, coin_bal = self.get_balance()
             total_equity = thb_bal + (coin_bal * price)
+            net_profit = total_equity - self.initial_equity
+            growth = (net_profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
+
             report = (
                 f"💠 <b>STATUS: {'HOLDING' if coin_bal > 0 else 'IDLE'} | V8.5</b>\n"
                 f"📅 {now.strftime('%d/%m/%Y %H:%M')}\n"
                 f"🧩 <b>PHASE: {self.market_phase}</b>\n"
-                f"📊 <b>Sentiment: RSI {rsi:.1f} | ATR {atr:.2f}</b>\n"
-                "━━━━━━━━━━━━━━━\n"
+                f"📊 <b>Sentiment: RSI {rsi:.1f} | ATR {atr:.2f}</b>\n\n"
+                f"📈 <b>MARKET: {self.symbol}</b>\n"
                 f"💵 Price: {price:,.2f} THB\n"
-                f"📈 EMA: {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
-                f"🕒 P/L: {pnl:+.2f}% (Avg: {self.avg_price:,.2f})\n"
-                "━━━━━━━━━━━━━━━\n"
-                f"💰 Cash: {thb_bal:,.2f} THB\n"
-                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
+                f"📊 EMA({self.ema_period}): {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
+                f"🕒 P/L: {pnl:+.2f}% (Avg: {self.avg_price:,.2f})\n\n"
+                f"💰 <b>PORTFOLIO</b>\n"
+                f"💵 Cash: {thb_bal:,.2f} THB\n"
+                f"🪙 Coin: {coin_bal:.4f} ({ (coin_bal * price):,.2f} THB)\n"
+                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n\n"
+                f"🚀 <b>PERFORMANCE</b>\n"
+                f"💵 Net Profit: {net_profit:,.2f} THB\n"
+                f"📈 Growth: {growth:+.2f}%\n"
                 f"🛡️ Trail Stop @: {self.dynamic_sl:,.2f}\n"
                 "━━━━━━━━━━━━━━━"
             )
@@ -239,8 +205,7 @@ def run_hc():
     class H(BaseHTTPRequestHandler):
         def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.5 Active")
         def log_message(self, *a): return
-    try:
-        HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
+    try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
     except: pass
 
 if __name__ == "__main__":
