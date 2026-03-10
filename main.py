@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateV8_5_PRO:
+class BitkubUltimateV8_6_PRO:
     def __init__(self):
         # 1. API & Telegram Setup
         self.api_key = os.getenv("BITKUB_KEY")
@@ -20,29 +20,30 @@ class BitkubUltimateV8_5_PRO:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").strip().upper() 
         self.coin = self.symbol.split('_')[0]
 
-        # ดึงค่า Config
+        # ดึงค่า Config (แนะนำให้ปรับค่าใน Railway ตามคำแนะนำท้ายโค้ด)
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5000")).replace(',', ''))
         self.ema_period = int(os.getenv("EMA_PERIOD", 20))
-        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
-        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 3.0))
-        self.atr_multiplier = float(os.getenv("ATR_MULTIPLIER", 2.5))
-        self.breakeven_pct = float(os.getenv("BREAKEVEN_PCT", 0.7))
-        self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.01))
-        self.rsi_max = float(os.getenv("RSI_MAX", 75)) 
+        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 1.5))    
+        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 2.0))
+        self.atr_multiplier = float(os.getenv("ATR_MULTIPLIER", 1.5))
+        self.breakeven_pct = float(os.getenv("BREAKEVEN_PCT", 0.5))
+        self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.05))
+        self.rsi_max = float(os.getenv("RSI_MAX", 70)) 
         self.rsi_min = float(os.getenv("RSI_MIN", 35))
         self.buy_alloc_pct = float(os.getenv("SIDEWAYS_BUY_ALLOC", 50)) / 100
 
         # 3. Internal State
-        self.state_file = "bot_state_v8_5_pro.json"
+        self.state_file = "bot_state_v8_6_pro.json"
         self.last_action = "sell"
         self.avg_price = 0.0
         self.current_stage = 0 
         self.total_units = 0.0
         self.highest_price = 0.0
         self.last_report_time = 0
-        self.report_interval = 1800 
+        self.report_interval = 600 # รายงานทุก 10 นาที
         self.dynamic_sl = 0.0
         self.market_phase = "INITIALIZING"
+        self.last_sell_time = 0 # สำหรับระบบ Cool-down
 
         self._sync_setup()
 
@@ -124,11 +125,11 @@ class BitkubUltimateV8_5_PRO:
         except: return None
 
     def run(self):
-        self.notify(f"<b>🚀 V8.5 PRO HYBRID: ONLINE</b>\n{self.symbol} | Smart TP Logic")
+        self.notify(f"<b>🚀 V8.6 PRO HYBRID: ONLINE</b>\n{self.symbol} | Better Profit Locking")
         while True:
             try:
                 data = self.update_indicators()
-                if not data: time.sleep(20); continue
+                if not data: time.sleep(15); continue
 
                 price, ema, ema_prev, rsi, atr, high = data['price'], data['ema'], data['ema_prev'], data['rsi'], data['atr'], data['high']
                 ema_slope = abs((ema - ema_prev) / ema_prev * 100)
@@ -138,9 +139,11 @@ class BitkubUltimateV8_5_PRO:
                 thb, coin_bal = self.get_balance()
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- 🟢 BUY LOGIC ---
+                # --- 🟢 BUY LOGIC (เพิ่มระบบ Cool-down 10 นาที) ---
+                cooldown_passed = (time.time() - self.last_sell_time) > 600
+                
                 if self.last_action == "sell" or self.current_stage == 1:
-                    if self.current_stage == 0 and price > (ema * 1.001) and self.rsi_min < rsi < self.rsi_max:
+                    if self.current_stage == 0 and price > (ema * 1.001) and self.rsi_min < rsi < self.rsi_max and cooldown_passed:
                         buy_amt = thb * self.buy_alloc_pct
                         res = self.place_order("buy", buy_amt)
                         if res.get('error') == 0:
@@ -158,9 +161,11 @@ class BitkubUltimateV8_5_PRO:
                 # --- 🔴 SELL LOGIC ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, high)
-                    current_multiplier = self.atr_multiplier if pnl < self.tp_stage_1 else (self.atr_multiplier * 0.7)
+                    # เมื่อกำไรถึงเป้า บีบระยะลงเหลือ 50% ของ ATR ทันที
+                    current_multiplier = self.atr_multiplier if pnl < self.tp_stage_1 else (self.atr_multiplier * 0.5)
                     self.dynamic_sl = self.highest_price - (atr * current_multiplier)
 
+                    # Partial Take Profit 50%
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
@@ -182,7 +187,8 @@ class BitkubUltimateV8_5_PRO:
                         if res.get('error') == 0:
                             self.notify(f"🔴 <b>[EXIT] {reason}</b>\nPNL (Net): {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
-                            self.dynamic_sl = 0  # <--- Reset Trailing Display
+                            self.dynamic_sl = 0
+                            self.last_sell_time = time.time() # เริ่มจับเวลา Cool-down
                             self._save_state()
 
                 if time.time() - self.last_report_time >= self.report_interval:
@@ -190,7 +196,7 @@ class BitkubUltimateV8_5_PRO:
                     self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"Loop Error: {e}")
-            time.sleep(30)
+            time.sleep(15) # เช็กถี่ขึ้นทุก 15 วินาที
 
     def send_pro_report(self, price, pnl, ema, rsi, atr):
         try:
@@ -200,29 +206,19 @@ class BitkubUltimateV8_5_PRO:
             growth = (net_profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
             divider = "━━━━━━━━━━━━━━━"
-
-            stage_map = {0: "IDLE", 1: "STAGE 1 (50%)", 2: "STAGE 2 (FULL)", 3: "TRAILING PROFIT"}
+            stage_map = {0: "IDLE", 1: "STAGE 1", 2: "STAGE 2 (FULL)", 3: "TRAILING"}
             current_status = stage_map.get(self.current_stage, "UNKNOWN")
-
             trailing_display = f"{self.dynamic_sl:,.2f}" if self.dynamic_sl > 0 else "Waiting..."
-
+            
             report = (
-                f"⚪ <b>{current_status} | Hybrid V8.5 PRO</b>\n"
-                f"📅 {now.strftime('%d/%m/%Y %H:%M')}\n"
+                f"⚪ <b>{current_status} | V8.6 PRO</b>\n"
+                f"📅 {now.strftime('%H:%M:%S')}\n"
                 f"{divider}\n"
-                f"📊 <b>MARKET: {self.symbol}</b>\n"
                 f"💵 Price: {price:,.2f} THB\n"
-                f"📈 EMA({self.ema_period}): {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
-                f"🕒 Net P/L: {pnl:+.2f}% (Fee Incl.)\n"
+                f"🕒 Net P/L: {pnl:+.2f}%\n"
                 f"🧩 Phase: {self.market_phase}\n"
                 f"{divider}\n"
-                f"🏛️ <b>PORTFOLIO</b>\n"
-                f"💰 Cash: {thb_bal:,.2f} THB\n"
-                f"🪙 Coin: {coin_bal:.4f} ({(coin_bal*price):,.2f} THB)\n"
-                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
-                f"{divider}\n"
-                f"📈 <b>PERFORMANCE</b>\n"
-                f"💵 Net Profit: {net_profit:,.2f} THB\n"
+                f"💎 Equity: {total_equity:,.2f} THB\n"
                 f"🚀 Growth: {growth:+.2f}%\n"
                 f"🛡️ Trailing @: {trailing_display}\n"
                 f"📉 BreakEven @: {(self.avg_price * 1.0025 if self.avg_price > 0 else 0):,.2f}\n"
@@ -239,11 +235,11 @@ class BitkubUltimateV8_5_PRO:
 
 def run_hc():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.5 PRO ACTIVE")
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.6 PRO ACTIVE")
         def log_message(self, *a): return
     try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
     except: pass
 
 if __name__ == "__main__":
     threading.Thread(target=run_hc, daemon=True).start()
-    BitkubUltimateV8_5_PRO().run()
+    BitkubUltimateV8_6_PRO().run()
