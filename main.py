@@ -178,12 +178,13 @@ class BitkubUltimateV8_5_PRO:
                         reason = "Trend Down (Cut Loss)"
 
                     if reason:
-                        res = self.place_order("sell", coin_bal)
-                        if res.get('error') == 0:
-                            self.notify(f"🔴 <b>[EXIT] {reason}</b>\nPNL (Net): {pnl:+.2f}%")
-                            self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
-                            self._save_state()
-
+    res = self.place_order("sell", coin_bal)
+    if res.get('error') == 0:
+        self.notify(f"🔴 [EXIT] {reason}\nPNL (Net): {pnl:+.2f}%")
+        self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
+        self.dynamic_sl = 0
+Waiting...
+        self._save_state()
                 if time.time() - self.last_report_time >= self.report_interval:
                     self.send_pro_report(price, pnl, ema, rsi, atr)
                     self.last_report_time = time.time()
