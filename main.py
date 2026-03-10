@@ -183,7 +183,7 @@ class BitkubUltimateV8_5_PRO:
         self.notify(f"🔴 [EXIT] {reason}\nPNL (Net): {pnl:+.2f}%")
         self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
         self.dynamic_sl = 0
-Waiting...
+
                     self._save_state()
                 if time.time() - self.last_report_time >= self.report_interval:
                     self.send_pro_report(price, pnl, ema, rsi, atr)
