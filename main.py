@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateV8_5_PRO_PLUS:
+class BitkubUltimateV8_5_HYBRID:
     def __init__(self):
         # 1. API & Telegram Setup
         self.api_key = os.getenv("BITKUB_KEY")
@@ -16,27 +16,29 @@ class BitkubUltimateV8_5_PRO_PLUS:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # 2. Strategy Config (ดึงจาก Railway ทั้งหมด)
+        # 2. Strategy Config (ดึงจาก Variables ใน Railway)
         self.symbol = os.getenv("SYMBOL", "XRP_THB").strip().upper() 
         self.coin = self.symbol.split('_')[0]
 
         try:
             self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5000")).replace(',', ''))
-            self.ema_period = int(os.getenv("EMA_PERIOD", 50))
+            self.ema_period = int(os.getenv("EMA_PERIOD", 20))
             self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
             self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 3.0))
             self.atr_multiplier = float(os.getenv("ATR_MULTIPLIER", 2.5))
-            self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.02))
-            self.rsi_max = float(os.getenv("RSI_MAX", 75)) # ดึงค่า 75 ที่คุณตั้งไว้
-            self.rsi_min = float(os.getenv("RSI_MIN", 35)) # กันซื้อตอนกราฟพัง
+            self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.01))
+            self.rsi_max = float(os.getenv("RSI_MAX", 75)) 
+            self.rsi_min = float(os.getenv("RSI_MIN", 35))
+            # ตัวแปรสำหรับการแบ่งไม้ (ใช้ SIDEWAYS_BUY_ALLOC ถ้ามี หรือกำหนดเป็น 50%)
+            self.buy_alloc_pct = float(os.getenv("SIDEWAYS_BUY_ALLOC", 50)) / 100
         except:
-            self.initial_equity, self.ema_period, self.tp_stage_1, self.stop_loss_pct, self.atr_multiplier, self.slope_threshold, self.rsi_max, self.rsi_min = 5000, 50, 2.5, 3.0, 2.5, 0.02, 75, 35
+            self.initial_equity, self.ema_period, self.tp_stage_1, self.stop_loss_pct, self.atr_multiplier, self.slope_threshold, self.rsi_max, self.rsi_min, self.buy_alloc_pct = 5000, 20, 2.5, 3.0, 2.5, 0.01, 75, 35, 0.5
 
         # 3. Internal State
-        self.state_file = "bot_state_v8_5.json"
+        self.state_file = "bot_state_v8_5_hybrid.json"
         self.last_action = "sell"
         self.avg_price = 0.0
-        self.current_stage = 0 
+        self.current_stage = 0 # 0=IDLE, 1=ไม้1, 2=ไม้2(Full), 3=Partial Sell
         self.total_units = 0.0
         self.highest_price = 0.0
         self.last_report_time = 0
@@ -47,7 +49,6 @@ class BitkubUltimateV8_5_PRO_PLUS:
         self._sync_setup()
 
     def _sync_setup(self):
-        logger.info("🛠️ Syncing PRO PLUS System...")
         thb, coin_bal = self.get_balance()
         try:
             ticker_res = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
@@ -57,22 +58,16 @@ class BitkubUltimateV8_5_PRO_PLUS:
         manual_avg = os.getenv("MY_AVG_PRICE")
         manual_avg_val = float(str(manual_avg).replace(',', '')) if manual_avg else 0.0
 
-        if float(coin_bal) * price > 50 and manual_avg_val > 0:
-            self.last_action, self.total_units, self.current_stage = "buy", float(coin_bal), 2
-            self.avg_price = manual_avg_val
+        if float(coin_bal) * price > 50:
+            self.last_action, self.total_units = "buy", float(coin_bal)
+            self.avg_price = manual_avg_val if manual_avg_val > 0 else price
             self.highest_price = max(self.avg_price, price)
+            self.current_stage = 2 # สมมติว่าเป็นไม้เต็มพอร์ตถ้ามีการถืออยู่แล้ว
         else:
-            self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0.0, 0, 0.0
+            self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
         self._save_state()
 
-    def calculate_ema(self, prices, period):
-        if len(prices) < period: return np.mean(prices)
-        alpha = 2 / (period + 1)
-        ema = prices[0]
-        for p in prices[1:]:
-            ema = (p * alpha) + (ema * (1 - alpha))
-        return ema
-
+    # --- API Helper Functions ---
     def _request(self, method, path, params=None, payload=None, private=False):
         url = f"{self.host}{path}"
         query_str = "?" + "&".join([f"{k}={v}" for k, v in params.items()]) if params else ""
@@ -98,6 +93,7 @@ class BitkubUltimateV8_5_PRO_PLUS:
 
     def place_order(self, side, amt):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+        # ปรับทศนิยมให้เหมาะสม (THB=2 ตำแหน่ง, Coin=4-8 ตำแหน่ง)
         clean_amt = math.floor(float(amt) * 100) / 100 if side == "buy" else math.floor(float(amt) * 10000) / 10000
         payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": "market"}
         return self._request("POST", path, payload=payload, private=True)
@@ -108,24 +104,38 @@ class BitkubUltimateV8_5_PRO_PLUS:
                           json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
+    def calculate_ema(self, prices, period):
+        if len(prices) < period: return np.mean(prices)
+        alpha = 2 / (period + 1)
+        ema = prices[0]
+        for p in prices[1:]: ema = (p * alpha) + (ema * (1 - alpha))
+        return ema
+
     def update_indicators(self):
         try:
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
             if not hist or 'c' not in hist: return None
-            c, h, l = np.array(hist['c'], dtype=float), np.array(hist['h'], dtype=float), np.array(hist['l'], dtype=float)
+            c = np.array(hist['c'], dtype=float)
             ema = self.calculate_ema(c, self.ema_period)
             ema_prev = self.calculate_ema(c[:-1], self.ema_period)
+            
+            # RSI Calculation
             diff = np.diff(c)
             up, down = diff.clip(min=0), -1 * diff.clip(max=0)
             ma_up, ma_down = np.mean(up[-14:]), np.mean(down[-14:])
             rsi = 100 - (100 / (1 + (ma_up / ma_down))) if ma_down != 0 else 100
+            
+            # ATR Calculation
+            h, l = np.array(hist['h'], dtype=float), np.array(hist['l'], dtype=float)
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
             atr = np.mean(tr[-14:])
+            
             return {"ema": ema, "ema_prev": ema_prev, "rsi": rsi, "atr": atr, "price": c[-1]}
         except: return None
 
+    # --- Main Loop Logic ---
     def run(self):
-        self.notify(f"<b>🚀 V8.5 PRO PLUS: ACTIVATED</b>\nTarget: {self.symbol}\nMode: Optimized Railway Sync\nRSI Limit: {self.rsi_min}-{self.rsi_max}")
+        self.notify(f"<b>🚀 V8.5 HYBRID: ONLINE</b>\n{self.symbol} | Stage Logic Ready")
         while True:
             try:
                 data = self.update_indicators()
@@ -135,28 +145,43 @@ class BitkubUltimateV8_5_PRO_PLUS:
                 ema_slope = abs((ema - ema_prev) / ema_prev * 100)
                 is_sideways = ema_slope < self.slope_threshold
                 self.market_phase = "SIDEWAYS" if is_sideways else ("UPTREND" if ema > ema_prev else "DOWNTREND")
+                
                 thb, coin_bal = self.get_balance()
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # Logic การซื้อ (เชื่อมโยง RSI_MAX จาก Railway)
-                if self.last_action == "sell":
-                    if price > (ema * 1.002) and ema > (ema_prev) and self.rsi_min < rsi < self.rsi_max:
-                        res = self.place_order("buy", thb * 0.98)
+                # 🟢 Logic การซื้อ (แบบ 2 ไม้)
+                if self.last_action == "sell" or self.current_stage == 1:
+                    # เงื่อนไขไม้ที่ 1
+                    if self.current_stage == 0 and price > (ema * 1.001) and self.rsi_min < rsi < self.rsi_max:
+                        buy_amt = thb * self.buy_alloc_pct
+                        res = self.place_order("buy", buy_amt)
                         if res.get('error') == 0:
-                            self.avg_price, self.last_action, self.current_stage, self.total_units = price, "buy", 2, float(res['result']['rec'])
+                            self.avg_price, self.last_action, self.current_stage = price, "buy", 1
                             self.highest_price = price
-                            self.notify(f"🟢 <b>[BUY ENTRY]</b>\nPrice: {price}\nRSI: {rsi:.1f}\nPhase: {self.market_phase}")
+                            self.notify(f"🟢 <b>[BUY STAGE 1]</b>\nPrice: {price}\nAlloc: {self.buy_alloc_pct*100}%")
 
+                    # เงื่อนไขไม้ที่ 2 (เข้าซื้อเพิ่มเมื่อราคายืนเหนือไม้แรกและเทรนด์ชัด)
+                    elif self.current_stage == 1 and price > self.avg_price and ema > ema_prev and not is_sideways:
+                        res = self.place_order("buy", thb * 0.96) # ใช้เงินที่เหลือเกือบทั้งหมด
+                        if res.get('error') == 0:
+                            # คำนวณค่าเฉลี่ยใหม่โดยประมาณ
+                            self.avg_price = (self.avg_price + price) / 2
+                            self.current_stage = 2
+                            self.notify(f"🟢 <b>[BUY STAGE 2 - FULL]</b>\nPrice: {price}\nTrend Confirmed")
+
+                # 🔴 Logic การขาย
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
                     self.dynamic_sl = self.highest_price - (atr * self.atr_multiplier)
 
+                    # 💰 Partial Take Profit (แบ่งขายทำกำไร 50%)
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self.notify(f"💰 <b>[PARTIAL TP 50%]</b>\nPNL (Net): {pnl:+.2f}%")
 
+                    # 🛑 Exit Conditions
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss"
                     elif price <= self.dynamic_sl: reason = "ATR Trail Stop"
@@ -169,6 +194,7 @@ class BitkubUltimateV8_5_PRO_PLUS:
                             self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
                             self._save_state()
 
+                # ส่งรายงานตามรอบเวลา
                 if time.time() - self.last_report_time >= self.report_interval:
                     self.send_pro_report(price, pnl, ema, rsi, atr)
                     self.last_report_time = time.time()
@@ -176,6 +202,7 @@ class BitkubUltimateV8_5_PRO_PLUS:
             except Exception as e: logger.error(f"Loop Error: {e}")
             time.sleep(30)
 
+    # --- Reporting Logic (เส้นกั้นตามแบบที่คุณต้องการ) ---
     def send_pro_report(self, price, pnl, ema, rsi, atr):
         try:
             thb_bal, coin_bal = self.get_balance()
@@ -184,27 +211,29 @@ class BitkubUltimateV8_5_PRO_PLUS:
             growth = (net_profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
             
-            # คำนวณระยะห่างก่อนขายเป้าแรก
-            dist_to_tp = self.tp_stage_1 - pnl if self.current_stage == 2 else 0
-
+            # เส้นกั้นสัดส่วนแบบในรูป 1097.jpg
+            divider = "━━━━━━━━━━━━━━━"
+            
             report = (
-                f"💠 <b>STATUS: {'HOLDING' if coin_bal > 0 else 'IDLE'} | PLUS</b>\n"
+                f"⚪ <b>{'HOLDING' if coin_bal > 0 else 'IDLE'} | Hybrid V8.5</b>\n"
                 f"📅 {now.strftime('%d/%m/%Y %H:%M')}\n"
-                f"🧩 <b>PHASE: {self.market_phase}</b>\n"
-                f"📊 <b>RSI: {rsi:.1f} (Limit: {self.rsi_max})</b>\n\n"
-                f"📈 <b>MARKET: {self.symbol}</b>\n"
+                f"{divider}\n"
+                f"📊 <b>MARKET: {self.symbol}</b>\n"
                 f"💵 Price: {price:,.2f} THB\n"
-                f"📊 EMA: {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
-                f"🕒 <b>P/L (Net): {pnl:+.2f}%</b>\n"
-                f"🎯 <b>Next TP: {dist_to_tp:+.2f}%</b>\n\n"
-                f"💰 <b>PORTFOLIO</b>\n"
-                f"💵 Cash: {thb_bal:,.2f} THB\n"
-                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n\n"
-                f"🚀 <b>PERFORMANCE</b>\n"
-                f"💵 Profit: {net_profit:,.2f} THB\n"
-                f"📈 Growth: {growth:+.2f}%\n"
-                f"🛡️ Trail Stop @: {self.dynamic_sl:,.2f}\n"
-                "━━━━━━━━━━━━━━━"
+                f"📈 EMA({self.ema_period}): {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
+                f"🕒 Net P/L: {pnl:+.2f}% (Fee Incl.)\n"
+                f"🧩 Phase: {self.market_phase}\n"
+                f"{divider}\n"
+                f"🏛️ <b>PORTFOLIO</b>\n"
+                f"💰 Cash: {thb_bal:,.2f} THB\n"
+                f"🪙 Coin: {coin_bal:.4f} ({(coin_bal*price):,.2f} THB)\n"
+                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
+                f"{divider}\n"
+                f"📈 <b>PERFORMANCE</b>\n"
+                f"💵 Net Profit: {net_profit:,.2f} THB\n"
+                f"🚀 Growth: {growth:+.2f}%\n"
+                f"🛡️ Trailing @: {self.dynamic_sl if self.dynamic_sl > 0 else 'Waiting...'}\n"
+                f"{divider}"
             )
             self.notify(report)
         except: pass
@@ -217,11 +246,11 @@ class BitkubUltimateV8_5_PRO_PLUS:
 
 def run_hc():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.5 PLUS ACTIVE")
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.5 HYBRID ACTIVE")
         def log_message(self, *a): return
     try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
     except: pass
 
 if __name__ == "__main__":
     threading.Thread(target=run_hc, daemon=True).start()
-    BitkubUltimateV8_5_PRO_PLUS().run()
+    BitkubUltimateV8_5_HYBRID().run()
