@@ -20,7 +20,7 @@ class BitkubUltimateV8_5_PRO:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").strip().upper() 
         self.coin = self.symbol.split('_')[0]
 
-        # ดึงค่า Config (เพิ่มตัวแปรขยับ SL เมื่อกำไร)
+        # ดึงค่า Config
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5000")).replace(',', ''))
         self.ema_period = int(os.getenv("EMA_PERIOD", 20))
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 2.5))    
@@ -138,7 +138,7 @@ class BitkubUltimateV8_5_PRO:
                 thb, coin_bal = self.get_balance()
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- 🟢 BUY LOGIC (คงเดิม) ---
+                # --- 🟢 BUY LOGIC ---
                 if self.last_action == "sell" or self.current_stage == 1:
                     if self.current_stage == 0 and price > (ema * 1.001) and self.rsi_min < rsi < self.rsi_max:
                         buy_amt = thb * self.buy_alloc_pct
@@ -155,22 +155,18 @@ class BitkubUltimateV8_5_PRO:
                             self.current_stage = 2
                             self.notify(f"🟢 <b>[BUY STAGE 2 - FULL]</b>\nPrice: {price}\nTrend Confirmed")
 
-                # --- 🔴 SELL LOGIC (ปรับปรุงใหม่) ---
+                # --- 🔴 SELL LOGIC ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, high)
-                    
-                    # ปรับลดความกว้าง ATR เมื่อมีกำไรเกินเป้า เพื่อล็อคกำไรให้ไวขึ้น (Tighten Trailing Stop)
                     current_multiplier = self.atr_multiplier if pnl < self.tp_stage_1 else (self.atr_multiplier * 0.7)
                     self.dynamic_sl = self.highest_price - (atr * current_multiplier)
 
-                    # 💰 1. Partial TP (ขาย 50% เมื่อถึงเป้าแรก)
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self.notify(f"💰 <b>[PARTIAL TP 50%]</b>\nProfit Target Hit! Now Trailing the rest.")
 
-                    # 🛑 2. Exit Conditions
                     reason = None
                     if pnl <= -self.stop_loss_pct: 
                         reason = "Stop Loss"
@@ -203,10 +199,12 @@ class BitkubUltimateV8_5_PRO:
             growth = (net_profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
             divider = "━━━━━━━━━━━━━━━"
-            
-            # แปลง Stage เป็นข้อความที่เข้าใจง่าย
+
             stage_map = {0: "IDLE", 1: "STAGE 1 (50%)", 2: "STAGE 2 (FULL)", 3: "TRAILING PROFIT"}
             current_status = stage_map.get(self.current_stage, "UNKNOWN")
+
+            # แก้ไขส่วน Trailing @ ให้ตัดทศนิยมเหลือ 2 ตำแหน่ง
+            trailing_display = f"{self.dynamic_sl:,.2f}" if self.dynamic_sl > 0 else "Waiting..."
 
             report = (
                 f"⚪ <b>{current_status} | Hybrid V8.5 PRO</b>\n"
@@ -226,7 +224,7 @@ class BitkubUltimateV8_5_PRO:
                 f"📈 <b>PERFORMANCE</b>\n"
                 f"💵 Net Profit: {net_profit:,.2f} THB\n"
                 f"🚀 Growth: {growth:+.2f}%\n"
-                f"🛡️ Trailing @: {self.dynamic_sl if self.dynamic_sl > 0 else 'Waiting...'}\n"
+                f"🛡️ Trailing @: {trailing_display}\n"
                 f"📉 BreakEven @: {(self.avg_price * 1.0025):,.2f}\n"
                 f"{divider}"
             )
