@@ -178,13 +178,13 @@ class BitkubUltimateV8_5_PRO:
                         reason = "Trend Down (Cut Loss)"
 
                     if reason:
-    res = self.place_order("sell", coin_bal)
-    if res.get('error') == 0:
-        self.notify(f"🔴 [EXIT] {reason}\nPNL (Net): {pnl:+.2f}%")
-        self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
-        self.dynamic_sl = 0
+                        res = self.place_order("sell", coin_bal)
+                        if res.get('error') == 0:
+                            self.notify(f"🔴 <b>[EXIT] {reason}</b>\nPNL (Net): {pnl:+.2f}%")
+                            self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
+                            self.dynamic_sl = 0  # <--- Reset Trailing Display
+                            self._save_state()
 
-                    self._save_state()
                 if time.time() - self.last_report_time >= self.report_interval:
                     self.send_pro_report(price, pnl, ema, rsi, atr)
                     self.last_report_time = time.time()
@@ -204,7 +204,6 @@ class BitkubUltimateV8_5_PRO:
             stage_map = {0: "IDLE", 1: "STAGE 1 (50%)", 2: "STAGE 2 (FULL)", 3: "TRAILING PROFIT"}
             current_status = stage_map.get(self.current_stage, "UNKNOWN")
 
-            # แก้ไขส่วน Trailing @ ให้ตัดทศนิยมเหลือ 2 ตำแหน่ง
             trailing_display = f"{self.dynamic_sl:,.2f}" if self.dynamic_sl > 0 else "Waiting..."
 
             report = (
@@ -226,7 +225,7 @@ class BitkubUltimateV8_5_PRO:
                 f"💵 Net Profit: {net_profit:,.2f} THB\n"
                 f"🚀 Growth: {growth:+.2f}%\n"
                 f"🛡️ Trailing @: {trailing_display}\n"
-                f"📉 BreakEven @: {(self.avg_price * 1.0025):,.2f}\n"
+                f"📉 BreakEven @: {(self.avg_price * 1.0025 if self.avg_price > 0 else 0):,.2f}\n"
                 f"{divider}"
             )
             self.notify(report)
