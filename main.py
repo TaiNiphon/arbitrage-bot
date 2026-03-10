@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateV8_5_PRO:
+class BitkubUltimateV8_5_PRO_PLUS:
     def __init__(self):
         # 1. API & Telegram Setup
         self.api_key = os.getenv("BITKUB_KEY")
@@ -16,10 +16,10 @@ class BitkubUltimateV8_5_PRO:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.host = "https://api.bitkub.com"
 
-        # 2. Strategy Config (ปรับจากตัวแปร Railway)
+        # 2. Strategy Config (ดึงจาก Railway ทั้งหมด)
         self.symbol = os.getenv("SYMBOL", "XRP_THB").strip().upper() 
         self.coin = self.symbol.split('_')[0]
-        
+
         try:
             self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5000")).replace(',', ''))
             self.ema_period = int(os.getenv("EMA_PERIOD", 50))
@@ -27,10 +27,12 @@ class BitkubUltimateV8_5_PRO:
             self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 3.0))
             self.atr_multiplier = float(os.getenv("ATR_MULTIPLIER", 2.5))
             self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.02))
+            self.rsi_max = float(os.getenv("RSI_MAX", 75)) # ดึงค่า 75 ที่คุณตั้งไว้
+            self.rsi_min = float(os.getenv("RSI_MIN", 35)) # กันซื้อตอนกราฟพัง
         except:
-            self.initial_equity, self.ema_period, self.tp_stage_1, self.stop_loss_pct, self.atr_multiplier, self.slope_threshold = 5000, 50, 2.5, 3.0, 2.5, 0.02
+            self.initial_equity, self.ema_period, self.tp_stage_1, self.stop_loss_pct, self.atr_multiplier, self.slope_threshold, self.rsi_max, self.rsi_min = 5000, 50, 2.5, 3.0, 2.5, 0.02, 75, 35
 
-        # 3. Internal State & Sync logic
+        # 3. Internal State
         self.state_file = "bot_state_v8_5.json"
         self.last_action = "sell"
         self.avg_price = 0.0
@@ -45,25 +47,25 @@ class BitkubUltimateV8_5_PRO:
         self._sync_setup()
 
     def _sync_setup(self):
-        """ จุดเด่นจาก V4/V6: ดึงค่าไม้เดิมมาเฝ้าต่อทันที """
-        logger.info("🛠️ Syncing PRO Master System...")
+        logger.info("🛠️ Syncing PRO PLUS System...")
         thb, coin_bal = self.get_balance()
         try:
             ticker_res = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
             price = float(ticker_res[0].get('last', 0)) if isinstance(ticker_res, list) else 0.0
         except: price = 0.0
 
-        if float(coin_bal) * float(price) > 50:
+        manual_avg = os.getenv("MY_AVG_PRICE")
+        manual_avg_val = float(str(manual_avg).replace(',', '')) if manual_avg else 0.0
+
+        if float(coin_bal) * price > 50 and manual_avg_val > 0:
             self.last_action, self.total_units, self.current_stage = "buy", float(coin_bal), 2
-            manual_avg = os.getenv("MY_AVG_PRICE")
-            self.avg_price = float(str(manual_avg).replace(',', '')) if manual_avg else 0.0
+            self.avg_price = manual_avg_val
             self.highest_price = max(self.avg_price, price)
         else:
             self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0.0, 0, 0.0
         self._save_state()
 
     def calculate_ema(self, prices, period):
-        """ แก้ไขตามคำติชม: ใช้สูตร EMA ของจริง (Exponentially Weighted) """
         if len(prices) < period: return np.mean(prices)
         alpha = 2 / (period + 1)
         ema = prices[0]
@@ -96,7 +98,6 @@ class BitkubUltimateV8_5_PRO:
 
     def place_order(self, side, amt):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        # ปรับความละเอียดตัวเลขตามกฎ Bitkub
         clean_amt = math.floor(float(amt) * 100) / 100 if side == "buy" else math.floor(float(amt) * 10000) / 10000
         payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": "market"}
         return self._request("POST", path, payload=payload, private=True)
@@ -109,73 +110,57 @@ class BitkubUltimateV8_5_PRO:
 
     def update_indicators(self):
         try:
-            # ดึงข้อมูล 15 นาที เพื่อความเสถียรของเทรนด์
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
             if not hist or 'c' not in hist: return None
             c, h, l = np.array(hist['c'], dtype=float), np.array(hist['h'], dtype=float), np.array(hist['l'], dtype=float)
-            
             ema = self.calculate_ema(c, self.ema_period)
             ema_prev = self.calculate_ema(c[:-1], self.ema_period)
-            
-            # RSI calculation
             diff = np.diff(c)
             up, down = diff.clip(min=0), -1 * diff.clip(max=0)
             ma_up, ma_down = np.mean(up[-14:]), np.mean(down[-14:])
             rsi = 100 - (100 / (1 + (ma_up / ma_down))) if ma_down != 0 else 100
-            
-            # ATR calculation
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
             atr = np.mean(tr[-14:])
-            
             return {"ema": ema, "ema_prev": ema_prev, "rsi": rsi, "atr": atr, "price": c[-1]}
         except: return None
 
     def run(self):
-        self.notify(f"<b>💎 V8.5 PRO: ULTIMATE ACTIVATED</b>\nTarget: {self.symbol}\nMode: Real EMA + Net Profit Guard")
+        self.notify(f"<b>🚀 V8.5 PRO PLUS: ACTIVATED</b>\nTarget: {self.symbol}\nMode: Optimized Railway Sync\nRSI Limit: {self.rsi_min}-{self.rsi_max}")
         while True:
             try:
                 data = self.update_indicators()
-                if not data: 
-                    time.sleep(20); continue
+                if not data: time.sleep(20); continue
 
                 price, ema, ema_prev, rsi, atr = data['price'], data['ema'], data['ema_prev'], data['rsi'], data['atr']
-                
-                # Market Phase Detection
                 ema_slope = abs((ema - ema_prev) / ema_prev * 100)
                 is_sideways = ema_slope < self.slope_threshold
                 self.market_phase = "SIDEWAYS" if is_sideways else ("UPTREND" if ema > ema_prev else "DOWNTREND")
-
                 thb, coin_bal = self.get_balance()
-                
-                # --- [CORE] Net PNL Calculation (หัก Fee 0.5% เพื่อความคุ้มค่า) ---
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # Logic การซื้อ (V1/V2 Hybrid)
+                # Logic การซื้อ (เชื่อมโยง RSI_MAX จาก Railway)
                 if self.last_action == "sell":
-                    if price > (ema * 1.005) and ema > (ema_prev * 1.0005) and rsi < 65:
-                        res = self.place_order("buy", thb * 0.98) # ใช้ทุน 98% เผื่อค่าธรรมเนียม
+                    if price > (ema * 1.002) and ema > (ema_prev) and self.rsi_min < rsi < self.rsi_max:
+                        res = self.place_order("buy", thb * 0.98)
                         if res.get('error') == 0:
                             self.avg_price, self.last_action, self.current_stage, self.total_units = price, "buy", 2, float(res['result']['rec'])
                             self.highest_price = price
-                            self.notify(f"🟢 <b>[BUY ENTRY]</b>\nPrice: {price}\nPhase: {self.market_phase}")
+                            self.notify(f"🟢 <b>[BUY ENTRY]</b>\nPrice: {price}\nRSI: {rsi:.1f}\nPhase: {self.market_phase}")
 
-                # Logic การขาย (V8.5 Net Profit Guard)
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
                     self.dynamic_sl = self.highest_price - (atr * self.atr_multiplier)
 
-                    # 1. Partial TP (กำไรต้องชนะค่าธรรมเนียม)
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
                             self.current_stage = 3
                             self.notify(f"💰 <b>[PARTIAL TP 50%]</b>\nPNL (Net): {pnl:+.2f}%")
 
-                    # 2. Exit Conditions
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss"
                     elif price <= self.dynamic_sl: reason = "ATR Trail Stop"
-                    elif price < (ema * 0.995) and ema < ema_prev and not is_sideways: reason = "Trend Reverse"
+                    elif price < (ema * 0.998) and ema < ema_prev and not is_sideways: reason = "Trend Reverse"
 
                     if reason:
                         res = self.place_order("sell", coin_bal)
@@ -184,7 +169,6 @@ class BitkubUltimateV8_5_PRO:
                             self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
                             self._save_state()
 
-                # รายงานผลตามรอบเวลา (V8.1 Layout)
                 if time.time() - self.last_report_time >= self.report_interval:
                     self.send_pro_report(price, pnl, ema, rsi, atr)
                     self.last_report_time = time.time()
@@ -199,19 +183,22 @@ class BitkubUltimateV8_5_PRO:
             net_profit = total_equity - self.initial_equity
             growth = (net_profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
+            
+            # คำนวณระยะห่างก่อนขายเป้าแรก
+            dist_to_tp = self.tp_stage_1 - pnl if self.current_stage == 2 else 0
 
             report = (
-                f"💠 <b>STATUS: {'HOLDING' if coin_bal > 0 else 'IDLE'} | V8.5 PRO</b>\n"
+                f"💠 <b>STATUS: {'HOLDING' if coin_bal > 0 else 'IDLE'} | PLUS</b>\n"
                 f"📅 {now.strftime('%d/%m/%Y %H:%M')}\n"
                 f"🧩 <b>PHASE: {self.market_phase}</b>\n"
-                f"📊 <b>Sent: RSI {rsi:.1f} | ATR {atr:.2f}</b>\n\n"
+                f"📊 <b>RSI: {rsi:.1f} (Limit: {self.rsi_max})</b>\n\n"
                 f"📈 <b>MARKET: {self.symbol}</b>\n"
                 f"💵 Price: {price:,.2f} THB\n"
-                f"📊 EMA({self.ema_period}): {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
-                f"🕒 <b>P/L (Net): {pnl:+.2f}%</b> (Avg: {self.avg_price:,.2f})\n\n"
+                f"📊 EMA: {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
+                f"🕒 <b>P/L (Net): {pnl:+.2f}%</b>\n"
+                f"🎯 <b>Next TP: {dist_to_tp:+.2f}%</b>\n\n"
                 f"💰 <b>PORTFOLIO</b>\n"
                 f"💵 Cash: {thb_bal:,.2f} THB\n"
-                f"🪙 Coin: {coin_bal:.4f} ({ (coin_bal * price):,.2f} THB)\n"
                 f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n\n"
                 f"🚀 <b>PERFORMANCE</b>\n"
                 f"💵 Profit: {net_profit:,.2f} THB\n"
@@ -230,11 +217,11 @@ class BitkubUltimateV8_5_PRO:
 
 def run_hc():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.5 PRO ACTIVE")
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.5 PLUS ACTIVE")
         def log_message(self, *a): return
     try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
     except: pass
 
 if __name__ == "__main__":
     threading.Thread(target=run_hc, daemon=True).start()
-    BitkubUltimateV8_5_PRO().run()
+    BitkubUltimateV8_5_PRO_PLUS().run()
