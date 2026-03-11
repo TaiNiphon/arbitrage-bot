@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateV8_6_PRO:
+class BitkubUltimateV8_6_1_PRO:
     def __init__(self):
         # 1. API & Telegram Setup
         self.api_key = os.getenv("BITKUB_KEY")
@@ -20,7 +20,7 @@ class BitkubUltimateV8_6_PRO:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").strip().upper() 
         self.coin = self.symbol.split('_')[0]
 
-        # ดึงค่า Config (แนะนำให้ปรับค่าใน Railway ตามคำแนะนำท้ายโค้ด)
+        # ดึงค่า Config (เน้นรักษาเงินต้นและล็อกกำไรไว)
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5000")).replace(',', ''))
         self.ema_period = int(os.getenv("EMA_PERIOD", 20))
         self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 1.5))    
@@ -40,10 +40,10 @@ class BitkubUltimateV8_6_PRO:
         self.total_units = 0.0
         self.highest_price = 0.0
         self.last_report_time = 0
-        self.report_interval = 600 # รายงานทุก 10 นาที
+        self.report_interval = 600 # รายงานทุก 10 นาทีตามความเหมาะสม
         self.dynamic_sl = 0.0
         self.market_phase = "INITIALIZING"
-        self.last_sell_time = 0 # สำหรับระบบ Cool-down
+        self.last_sell_time = 0 # ระบบ Cool-down ป้องกันซื้อซ้ำยอดดอย
 
         self._sync_setup()
 
@@ -125,7 +125,7 @@ class BitkubUltimateV8_6_PRO:
         except: return None
 
     def run(self):
-        self.notify(f"<b>🚀 V8.6 PRO HYBRID: ONLINE</b>\n{self.symbol} | Better Profit Locking")
+        self.notify(f"<b>🚀 V8.6.1 PRO HYBRID: ONLINE</b>\n{self.symbol} | Full Report & Better Locking")
         while True:
             try:
                 data = self.update_indicators()
@@ -139,7 +139,7 @@ class BitkubUltimateV8_6_PRO:
                 thb, coin_bal = self.get_balance()
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- 🟢 BUY LOGIC (เพิ่มระบบ Cool-down 10 นาที) ---
+                # --- 🟢 BUY LOGIC (ระบบป้องกันการซื้อซ้ำจุดเดิม) ---
                 cooldown_passed = (time.time() - self.last_sell_time) > 600
                 
                 if self.last_action == "sell" or self.current_stage == 1:
@@ -158,14 +158,13 @@ class BitkubUltimateV8_6_PRO:
                             self.current_stage = 2
                             self.notify(f"🟢 <b>[BUY STAGE 2 - FULL]</b>\nPrice: {price}\nTrend Confirmed")
 
-                # --- 🔴 SELL LOGIC ---
+                # --- 🔴 SELL LOGIC (แก้ปัญหา Indentation และล็อกกำไร) ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, high)
-                    # เมื่อกำไรถึงเป้า บีบระยะลงเหลือ 50% ของ ATR ทันที
+                    # ปรับ Trailing ให้ชิดขึ้นเมื่อกำไรถึงเป้า
                     current_multiplier = self.atr_multiplier if pnl < self.tp_stage_1 else (self.atr_multiplier * 0.5)
                     self.dynamic_sl = self.highest_price - (atr * current_multiplier)
 
-                    # Partial Take Profit 50%
                     if self.current_stage == 2 and pnl >= self.tp_stage_1:
                         res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
@@ -188,7 +187,7 @@ class BitkubUltimateV8_6_PRO:
                             self.notify(f"🔴 <b>[EXIT] {reason}</b>\nPNL (Net): {pnl:+.2f}%")
                             self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
                             self.dynamic_sl = 0
-                            self.last_sell_time = time.time() # เริ่มจับเวลา Cool-down
+                            self.last_sell_time = time.time()
                             self._save_state()
 
                 if time.time() - self.last_report_time >= self.report_interval:
@@ -196,7 +195,7 @@ class BitkubUltimateV8_6_PRO:
                     self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"Loop Error: {e}")
-            time.sleep(15) # เช็กถี่ขึ้นทุก 15 วินาที
+            time.sleep(15)
 
     def send_pro_report(self, price, pnl, ema, rsi, atr):
         try:
@@ -206,19 +205,29 @@ class BitkubUltimateV8_6_PRO:
             growth = (net_profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
             divider = "━━━━━━━━━━━━━━━"
+
             stage_map = {0: "IDLE", 1: "STAGE 1", 2: "STAGE 2 (FULL)", 3: "TRAILING"}
             current_status = stage_map.get(self.current_stage, "UNKNOWN")
             trailing_display = f"{self.dynamic_sl:,.2f}" if self.dynamic_sl > 0 else "Waiting..."
-            
+
+            # รายงานแบบละเอียด 100% ตามรูปแบบ V8.5 เดิม
             report = (
-                f"⚪ <b>{current_status} | V8.6 PRO</b>\n"
-                f"📅 {now.strftime('%H:%M:%S')}\n"
+                f"⚪ <b>{current_status} | Hybrid V8.6.1 PRO</b>\n"
+                f"📅 {now.strftime('%d/%m/%Y %H:%M:%S')}\n"
                 f"{divider}\n"
+                f"📊 <b>MARKET: {self.symbol}</b>\n"
                 f"💵 Price: {price:,.2f} THB\n"
-                f"🕒 Net P/L: {pnl:+.2f}%\n"
+                f"📈 EMA({self.ema_period}): {ema:,.2f} ({((price-ema)/ema*100):+.2f}%)\n"
+                f"🕒 Net P/L: {pnl:+.2f}% (Fee Incl.)\n"
                 f"🧩 Phase: {self.market_phase}\n"
                 f"{divider}\n"
-                f"💎 Equity: {total_equity:,.2f} THB\n"
+                f"🏛️ <b>PORTFOLIO</b>\n"
+                f"💰 Cash: {thb_bal:,.2f} THB\n"
+                f"🪙 Coin: {coin_bal:.4f} ({(coin_bal*price):,.2f} THB)\n"
+                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
+                f"{divider}\n"
+                f"📈 <b>PERFORMANCE</b>\n"
+                f"💵 Net Profit: {net_profit:,.2f} THB\n"
                 f"🚀 Growth: {growth:+.2f}%\n"
                 f"🛡️ Trailing @: {trailing_display}\n"
                 f"📉 BreakEven @: {(self.avg_price * 1.0025 if self.avg_price > 0 else 0):,.2f}\n"
@@ -235,11 +244,11 @@ class BitkubUltimateV8_6_PRO:
 
 def run_hc():
     class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.6 PRO ACTIVE")
+        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"V8.6.1 PRO ACTIVE")
         def log_message(self, *a): return
     try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
     except: pass
 
 if __name__ == "__main__":
     threading.Thread(target=run_hc, daemon=True).start()
-    BitkubUltimateV8_6_PRO().run()
+    BitkubUltimateV8_6_1_PRO().run()
