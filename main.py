@@ -40,10 +40,10 @@ class BitkubUltimateV8_6_1_PRO:
         self.total_units = 0.0
         self.highest_price = 0.0
         self.last_report_time = 0
-        self.report_interval = 600 # รายงานทุก 10 นาทีตามความเหมาะสม
+        self.report_interval = 600 # รายงานทุก 10 นาที
         self.dynamic_sl = 0.0
         self.market_phase = "INITIALIZING"
-        self.last_sell_time = 0 # ระบบ Cool-down ป้องกันซื้อซ้ำยอดดอย
+        self.last_sell_time = 0 
 
         self._sync_setup()
 
@@ -63,7 +63,7 @@ class BitkubUltimateV8_6_1_PRO:
             self.highest_price = max(self.avg_price, price)
             self.current_stage = 2 
         else:
-            self.last_action, self.avg_price, self.current_stage = "sell", 0.0, 0
+            self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0.0, 0, 0.0
         self._save_state()
 
     def _request(self, method, path, params=None, payload=None, private=False):
@@ -91,6 +91,7 @@ class BitkubUltimateV8_6_1_PRO:
 
     def place_order(self, side, amt):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+        # ปรับความแม่นยำทศนิยมตามกฎ Bitkub
         clean_amt = math.floor(float(amt) * 100) / 100 if side == "buy" else math.floor(float(amt) * 10000) / 10000
         payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": "market"}
         return self._request("POST", path, payload=payload, private=True)
@@ -111,7 +112,9 @@ class BitkubUltimateV8_6_1_PRO:
     def update_indicators(self):
         try:
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
-            if not hist or 'c' not in hist: return None
+            # เพิ่มการเช็คความยาวข้อมูลป้องกัน Error
+            if not hist or 'c' not in hist or len(hist['c']) < 25: return None
+            
             c, h, l = np.array(hist['c'], dtype=float), np.array(hist['h'], dtype=float), np.array(hist['l'], dtype=float)
             ema = self.calculate_ema(c, self.ema_period)
             ema_prev = self.calculate_ema(c[:-1], self.ema_period)
@@ -125,7 +128,7 @@ class BitkubUltimateV8_6_1_PRO:
         except: return None
 
     def run(self):
-        self.notify(f"<b>🚀 V8.6.1 PRO HYBRID: ONLINE</b>\n{self.symbol} | Full Report & Better Locking")
+        self.notify(f"<b>🚀 V8.6.1 PRO HYBRID: ONLINE</b>\n{self.symbol} | Full Report & Precise Calculation")
         while True:
             try:
                 data = self.update_indicators()
@@ -137,28 +140,37 @@ class BitkubUltimateV8_6_1_PRO:
                 self.market_phase = "SIDEWAYS" if is_sideways else ("UPTREND" if ema > ema_prev else "DOWNTREND")
 
                 thb, coin_bal = self.get_balance()
+                # คำนวณ Net P/L แบบรวมค่าธรรมเนียม
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- 🟢 BUY LOGIC (ระบบป้องกันการซื้อซ้ำจุดเดิม) ---
+                # --- 🟢 BUY LOGIC ---
                 cooldown_passed = (time.time() - self.last_sell_time) > 600
-                
+
                 if self.last_action == "sell" or self.current_stage == 1:
                     if self.current_stage == 0 and price > (ema * 1.001) and self.rsi_min < rsi < self.rsi_max and cooldown_passed:
                         buy_amt = thb * self.buy_alloc_pct
                         res = self.place_order("buy", buy_amt)
                         if res.get('error') == 0:
+                            # บันทึกจำนวนเหรียญที่ซื้อได้จริง
+                            self.total_units = (buy_amt * 0.9975) / price
                             self.avg_price, self.last_action, self.current_stage = price, "buy", 1
                             self.highest_price = high
                             self.notify(f"🟢 <b>[BUY STAGE 1]</b>\nPrice: {price}\nAlloc: {self.buy_alloc_pct*100}%")
 
                     elif self.current_stage == 1 and price > self.avg_price and ema > ema_prev and not is_sideways:
-                        res = self.place_order("buy", thb * 0.96)
+                        buy_amt_s2 = thb * 0.96
+                        res = self.place_order("buy", buy_amt_s2)
                         if res.get('error') == 0:
-                            self.avg_price = (self.avg_price + price) / 2
+                            # คำนวณแบบ Weighted Average (ถัวเฉลี่ยถ่วงน้ำหนัก)
+                            units_new = (buy_amt_s2 * 0.9975) / price
+                            total_cost = (self.avg_price * self.total_units) + (price * units_new)
+                            self.total_units += units_new
+                            self.avg_price = total_cost / self.total_units
+                            
                             self.current_stage = 2
-                            self.notify(f"🟢 <b>[BUY STAGE 2 - FULL]</b>\nPrice: {price}\nTrend Confirmed")
+                            self.notify(f"🟢 <b>[BUY STAGE 2 - FULL]</b>\nPrice: {price}\nTrend Confirmed\nNew Avg: {self.avg_price:,.2f}")
 
-                # --- 🔴 SELL LOGIC (แก้ปัญหา Indentation และล็อกกำไร) ---
+                # --- 🔴 SELL LOGIC ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, high)
                     # ปรับ Trailing ให้ชิดขึ้นเมื่อกำไรถึงเป้า
@@ -185,7 +197,7 @@ class BitkubUltimateV8_6_1_PRO:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
                             self.notify(f"🔴 <b>[EXIT] {reason}</b>\nPNL (Net): {pnl:+.2f}%")
-                            self.last_action, self.avg_price, self.current_stage = "sell", 0, 0
+                            self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0.0
                             self.dynamic_sl = 0
                             self.last_sell_time = time.time()
                             self._save_state()
@@ -210,7 +222,6 @@ class BitkubUltimateV8_6_1_PRO:
             current_status = stage_map.get(self.current_stage, "UNKNOWN")
             trailing_display = f"{self.dynamic_sl:,.2f}" if self.dynamic_sl > 0 else "Waiting..."
 
-            # รายงานแบบละเอียด 100% ตามรูปแบบ V8.5 เดิม
             report = (
                 f"⚪ <b>{current_status} | Hybrid V8.6.1 PRO</b>\n"
                 f"📅 {now.strftime('%d/%m/%Y %H:%M:%S')}\n"
@@ -239,7 +250,7 @@ class BitkubUltimateV8_6_1_PRO:
     def _save_state(self):
         try:
             with open(self.state_file, "w") as f:
-                json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "stage": self.current_stage}, f)
+                json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "stage": self.current_stage, "units": self.total_units}, f)
         except: pass
 
 def run_hc():
