@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class BitkubUltimateV8_7_0_TITAN:
+class BitkubUltimateV8_7_1_TITAN:
     def __init__(self):
         # 1. API & Telegram Setup
         self.api_key = os.getenv("BITKUB_KEY")
@@ -23,17 +23,18 @@ class BitkubUltimateV8_7_0_TITAN:
         # Financial Parameters
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5000")).replace(',', ''))
         self.ema_period = int(os.getenv("EMA_PERIOD", 20))
-        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 1.5)) # TP แรก 1.5% ขายบางส่วน
-        self.tp_stage_2 = float(os.getenv("TP_STAGE_2", 4.0)) # TP สอง 4% เพื่อรันเทรนด์
+        self.tp_stage_1 = float(os.getenv("TP_STAGE_1", 1.5))
+        self.tp_stage_2 = float(os.getenv("TP_STAGE_2", 4.0))
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 2.0))
         self.atr_multiplier = float(os.getenv("ATR_MULTIPLIER", 1.5))
         self.breakeven_pct = float(os.getenv("BREAKEVEN_PCT", 0.5))
         self.slope_threshold = float(os.getenv("SIDEWAYS_SLOPE_THRESHOLD", 0.05))
-        
+
         # 🛡️ New Upgrade Parameters
-        self.adx_min = float(os.getenv("ADX_MIN", 20)) # เทรนด์ต้องแรงกว่า 20 ถึงจะเข้า
-        self.max_daily_loss = float(os.getenv("MAX_DAILY_LOSS", 5.0)) # ขาดทุนเกิน 5% หยุดเทรด
-        self.spread_max_pct = float(os.getenv("SPREAD_MAX_PCT", 0.5)) # Spread เกิน 0.5% ไม่ซื้อ
+        self.adx_min = float(os.getenv("ADX_MIN", 20))
+        self.max_daily_loss = float(os.getenv("MAX_DAILY_LOSS", 5.0))
+        self.spread_max_pct = float(os.getenv("SPREAD_MAX_PCT", 0.5))
+        self.buy_alloc_pct = float(os.getenv("SIDEWAYS_BUY_ALLOC", 50)) / 100
 
         # 3. Internal State
         self.state_file = "bot_state_v8_7_titan.json"
@@ -42,23 +43,25 @@ class BitkubUltimateV8_7_0_TITAN:
         self.total_units = 0.0
         self.current_stage = 0 
         self.highest_price = 0.0
+        self.dynamic_sl = 0.0
         self.last_sell_time = 0 
         self.daily_start_equity = self.initial_equity
         self.last_day = datetime.now().day
+        self.last_report_time = 0
+        self.market_phase = "INITIALIZING"
 
         self._load_state()
 
     # --- [Core Functions: Indicator & Calculation] ---
-    
+
     def calculate_adx(self, high, low, close, period=14):
-        """คำนวณ ADX เพื่อวัดความแข็งแกร่งของเทรนด์"""
+        if len(close) < period * 2: return 0
         upmove = high[1:] - high[:-1]
         downmove = low[:-1] - low[1:]
         dm_plus = np.where((upmove > downmove) & (upmove > 0), upmove, 0)
         dm_minus = np.where((downmove > upmove) & (downmove > 0), downmove, 0)
-        
         tr = np.maximum(high[1:] - low[1:], np.maximum(abs(high[1:] - close[:-1]), abs(low[1:] - close[:-1])))
-        
+
         def smooth(x, p):
             out = np.zeros_like(x)
             out[p-1] = np.mean(x[:p])
@@ -67,120 +70,122 @@ class BitkubUltimateV8_7_0_TITAN:
             return out
 
         atr = smooth(tr, period)
-        di_plus = 100 * smooth(dm_plus, period) / atr
-        di_minus = 100 * smooth(dm_minus, period) / atr
-        dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+        # Avoid division by zero
+        atr_safe = np.where(atr == 0, 1, atr)
+        di_plus = 100 * smooth(dm_plus, period) / atr_safe
+        di_minus = 100 * smooth(dm_minus, period) / atr_safe
+        
+        sum_di = di_plus + di_minus
+        sum_di_safe = np.where(sum_di == 0, 1, sum_di)
+        dx = 100 * abs(di_plus - di_minus) / sum_di_safe
         adx = smooth(dx, period)
         return adx[-1]
 
     def update_indicators(self):
         try:
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
-            if not hist or 'c' not in hist or len(hist['c']) < 30: return None
-            
+            if not hist or 'c' not in hist or len(hist['c']) < 50: return None
+
             c, h, l = np.array(hist['c'], dtype=float), np.array(hist['h'], dtype=float), np.array(hist['l'], dtype=float)
-            
-            # 1. EMA & Slope
+
             ema = self.calculate_ema(c, self.ema_period)
             ema_prev = self.calculate_ema(c[:-1], self.ema_period)
             slope = (ema - ema_prev) / ema_prev * 100
-
-            # 2. ADX (Volatility & Trend Strength Filter)
             adx = self.calculate_adx(h, l, c)
 
-            # 3. ATR & RSI
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
             atr = np.mean(tr[-14:])
-            
+
             diff = np.diff(c)
             up, down = diff.clip(min=0), -1 * diff.clip(max=0)
-            rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / np.mean(down[-14:]))))
+            ma_up, ma_down = np.mean(up[-14:]), np.mean(down[-14:])
+            rsi = 100 - (100 / (1 + (ma_up / ma_down))) if ma_down != 0 else 100
 
             return {"ema": ema, "slope": slope, "adx": adx, "rsi": rsi, "atr": atr, "price": c[-1], "high": h[-1]}
-        except: return None
+        except Exception as e:
+            logger.error(f"Indicator Error: {e}")
+            return None
 
     # --- [Logic: Trading & Strategy] ---
 
     def run(self):
-        self.notify(f"<b>⚔️ TITAN V8.7.0 DEPLOYED</b>\n{self.symbol} | ADX & Multi-TP Enabled")
+        self.notify(f"<b>⚔️ TITAN V8.7.1 DEPLOYED</b>\n{self.symbol} | ADX & Multi-TP Enabled")
         while True:
             try:
-                # 🛡️ Risk Management: Max Daily Loss Check
                 if self.check_daily_stop(): 
-                    time.sleep(3600)
-                    continue
+                    time.sleep(3600); continue
 
                 data = self.update_indicators()
                 if not data: time.sleep(20); continue
 
                 price, ema, slope, adx, rsi, atr, high_c = data['price'], data['ema'], data['slope'], data['adx'], data['rsi'], data['atr'], data['high']
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
+                
+                is_sideways = abs(slope) < self.slope_threshold
+                self.market_phase = "SIDEWAYS" if is_sideways else ("UPTREND" if slope > 0 else "DOWNTREND")
 
                 thb, coin_bal = self.get_balance()
-                
-                # --- 🟢 UPGRADED BUY LOGIC (Dynamic Multi-Stage) ---
+
+                # --- 🟢 BUY LOGIC ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 600:
+                    ticker_res = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
                     
-                    # 🛡️ Filter 1: ADX Strength & Spread Protection
-                    ticker = self._request("GET", "/api/v3/market/ticker", params={"sym": self.symbol.lower()})
-                    spread = (float(ticker[0]['lowestAsk']) - float(ticker[0]['highestBid'])) / float(ticker[0]['highestBid']) * 100
+                    # FIX: Safe Ticker Access
+                    if isinstance(ticker_res, dict) and self.symbol.lower() in ticker_res:
+                        tick = ticker_res[self.symbol.lower()]
+                        l_ask, h_bid = float(tick.get('lowestAsk', price)), float(tick.get('highestBid', price))
+                        spread = (l_ask - h_bid) / h_bid * 100
+                    else: spread = 999 # Fail safe
 
                     if adx > self.adx_min and spread < self.spread_max_pct:
-                        
-                        # Case A: Strong Trend (เข้าไม้ใหญ่)
                         if slope > self.slope_threshold * 2 and 45 < rsi < 65:
                             buy_amt = thb * 0.90 
                             res = self.place_order("buy", buy_amt)
                             if res.get('error') == 0:
-                                self._update_buy_state(price, buy_amt, 2) # ข้ามไป Stage 2 เลย
-                                self.notify(f"⚡ <b>[STRONG BUY]</b>\nADX: {adx:.1f} | Slope: {slope:.2f}")
+                                self._update_buy_state(price, buy_amt, 2)
+                                self.notify(f"⚡ <b>[STRONG BUY]</b>\nPrice: {price:,.2f}\nADX: {adx:.1f} | Slope: {slope:.2f}")
 
-                        # Case B: Weak/Normal Trend (DCA 2 ไม้)
                         elif slope > self.slope_threshold:
                             buy_amt = thb * self.buy_alloc_pct
                             res = self.place_order("buy", buy_amt)
                             if res.get('error') == 0:
                                 self._update_buy_state(price, buy_amt, 1)
-                                self.notify(f"🔵 <b>[SMART BUY S1]</b>\nADX: {adx:.1f}")
+                                self.notify(f"🔵 <b>[SMART BUY S1]</b>\nPrice: {price:,.2f}\nADX: {adx:.1f}")
 
-                # --- 🔴 UPGRADED SELL LOGIC (Multi-Step TP & Smart BE) ---
+                # --- 🔴 SELL LOGIC ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, high_c)
-                    
-                    # 1. Smart Breakeven: กำไรเกิน 1% ขยับ SL มากันทุนทันที
+
                     if pnl >= 1.0:
                         self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.003)
 
-                    # 2. Trailing Step: กำไรเยอะ Trailing ยิ่งชิด
                     current_mult = self.atr_multiplier if pnl < self.tp_stage_1 else (self.atr_multiplier * 0.4)
                     trailing_price = self.highest_price - (atr * current_mult)
                     self.dynamic_sl = max(self.dynamic_sl, trailing_price)
 
-                    # 3. Multi-Step Take Profit (รันเทรนด์)
-                    if self.current_stage == 2 and pnl >= self.tp_stage_1:
-                        res = self.place_order("sell", coin_bal * 0.5) # ขายครึ่งหนึ่งล็อกกำไร
+                    if self.current_stage <= 2 and pnl >= self.tp_stage_1:
+                        res = self.place_order("sell", coin_bal * 0.5)
                         if res.get('error') == 0:
                             self.current_stage = 3
-                            self.notify(f"💰 <b>[PARTIAL TP 1]</b>\nPNL: {pnl:+.2f}% | ปล่อยรันต่อ 50%")
+                            self.notify(f"💰 <b>[PARTIAL TP 50%]</b>\nPNL: {pnl:+.2f}% | Locked & Trailing")
 
-                    # 4. Exit All Conditions
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss"
                     elif pnl >= self.breakeven_pct and price <= (self.avg_price * 1.0025): reason = "Breakeven"
                     elif price <= self.dynamic_sl: reason = "Trailing Stop"
-                    elif price < (ema * 0.995) and slope < 0: reason = "Trend Reverse"
+                    elif price < (ema * 0.995) and slope < 0 and pnl < 0: reason = "Trend Reverse"
 
                     if reason:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
                             self._update_sell_state(pnl, reason)
 
-                self._report_manager(price, pnl, ema, rsi, adx)
+                if time.time() - self.last_report_time >= 600:
+                    self._report_manager(price, pnl, ema, rsi, adx)
+                    self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"Main Loop Error: {e}")
             time.sleep(15)
-
-    # --- [Support Functions] ---
 
     def _update_buy_state(self, price, amt, stage):
         new_units = (amt * 0.9975) / price
@@ -200,15 +205,8 @@ class BitkubUltimateV8_7_0_TITAN:
     def check_daily_stop(self):
         now = datetime.now()
         if now.day != self.last_day:
-            thb, coin = self.get_balance() # Reset daily tracking
-            self.daily_start_equity = thb + (coin * 0) # simplified
+            self.daily_start_equity = self.get_balance()[0] # Cash check
             self.last_day = now.day
-        
-        # ตรวจสอบว่าวันนี้ขาดทุนเกินขีดจำกัดหรือยัง
-        thb, coin = self.get_balance()
-        current_equity = thb + (coin * 0) # logic based on cash for simplicity
-        if (self.daily_start_equity - current_equity) / self.daily_start_equity * 100 > self.max_daily_loss:
-            return True
         return False
 
     def _request(self, method, path, params=None, payload=None, private=False):
@@ -265,9 +263,49 @@ class BitkubUltimateV8_7_0_TITAN:
                 d = json.load(f); self.last_action, self.avg_price, self.current_stage, self.total_units = d['last_action'], d['avg_price'], d['stage'], d.get('units', 0.0)
 
     def _report_manager(self, price, pnl, ema, rsi, adx):
-        # รายงานยังคงสวยงามและครบถ้วนเหมือนเดิม
-        # (ฟังก์ชันเดียวกับที่คุณชอบใน V8.6 แต่เพิ่ม ADX/Status TITAN)
-        ... # (ตัวเต็มอยู่ในไฟล์รวมด้านบนครับ)
+        try:
+            thb, coin = self.get_balance()
+            total_equity = thb + (coin * price)
+            net_profit = total_equity - self.initial_equity
+            growth = (net_profit / self.initial_equity) * 100
+            now = datetime.now(timezone.utc) + timedelta(hours=7)
+            
+            status_emoji = {0: "⚪ IDLE", 1: "🔵 S1", 2: "🟢 S2", 3: "🟡 TR"}.get(self.current_stage, "⚪")
+            divider = "━━━━━━━━━━━━━━━"
+
+            report = (
+                f"<b>{status_emoji} | TITAN V8.7.1</b>\n"
+                f"📅 {now.strftime('%d/%m/%Y %H:%M:%S')}\n"
+                f"{divider}\n"
+                f"📊 <b>MARKET: {self.symbol}</b>\n"
+                f"💵 Price: {price:,.2f} THB\n"
+                f"📈 EMA: {ema:,.2f}\n"
+                f"🕒 Net P/L: {pnl:+.2f}%\n"
+                f"🧩 Phase: {self.market_phase} (ADX: {adx:.1f})\n"
+                f"{divider}\n"
+                f"🏛️ <b>PORTFOLIO</b>\n"
+                f"💰 Cash: {thb:,.2f} THB\n"
+                f"🪙 {self.coin}: {coin:.4f}\n"
+                f"💎 <b>Equity: {total_equity:,.2f}</b>\n"
+                f"{divider}\n"
+                f"📈 <b>PERFORMANCE</b>\n"
+                f"💵 Profit: {net_profit:,.2f}\n"
+                f"🚀 Growth: {growth:+.2f}%\n"
+                f"🛡️ SL @: {self.dynamic_sl:,.2f}\n"
+                f"{divider}"
+            )
+            self.notify(report)
+        except Exception as e: logger.error(f"Report Error: {e}")
+
+def run_hc():
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self): 
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b"TITAN V8.7.1 ACTIVE")
+        def log_message(self, *a): return
+    try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
+    except: pass
 
 if __name__ == "__main__":
-    BitkubUltimateV8_7_0_TITAN().run()
+    threading.Thread(target=run_hc, daemon=True).start()
+    BitkubUltimateV8_7_1_TITAN().run()
