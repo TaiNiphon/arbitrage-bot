@@ -149,9 +149,10 @@ class BitkubUltimateV8_7_3_TITAN:
             ema_diff = ((price - ema) / ema) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
             
-            status_map = {0: "⚪ IDLE", 1: "🔵 S1 (Cautious)", 2: "🟢 S2 (Strong)", 3: "🟡 TR (Trend)"}
+            # Status Emojis
+            status_map = {0: "⚪ IDLE", 1: "🔵 S1 (Caution)", 2: "🟢 S2 (Strong)", 3: "🟡 TR (Trend)"}
             status_emoji = status_map.get(self.current_stage, "⚪")
-            trend_label = f"🟢 {self.big_trend}" if self.big_trend == "BULLISH" else f"🟡 {self.big_trend}"
+            trend_label = f"🟢 BULLISH" if self.big_trend == "BULLISH" else f"🟡 CAUTION"
             divider = "━━━━━━━━━━━━━━━"
 
             report = (
@@ -171,7 +172,7 @@ class BitkubUltimateV8_7_3_TITAN:
                 f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
                 f"{divider}\n"
                 f"📈 <b>PERFORMANCE</b>\n"
-                f"💵 Profit: {net_profit:+.2f} THB\n"
+                f"💵 Profit: {net_profit:,.2f} THB\n"
                 f"🚀 Growth: {growth:+.2f}%\n"
                 f"🛡️ SL @: {self.dynamic_sl:,.2f}\n"
                 f"{divider}"
