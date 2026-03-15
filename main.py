@@ -40,11 +40,12 @@ class BitkubUltimateV8_7_3_TITAN:
         self.highest_price, self.dynamic_sl, self.last_sell_time = 0.0, 0.0, 0 
         self.market_phase, self.big_trend = "INITIALIZING", "UNKNOWN"
         self.last_report_time = 0
+        self.last_summary_date = "" # เช็กวันเพื่อส่งสรุปวันละครั้ง
 
         self._load_state()
-        self._init_db() # เชื่อมต่อ Database ทันทีที่รัน
+        self._init_db()
 
-    # --- [NEW: Database Phase 2] ---
+    # --- [Database & Reporting Intelligence] ---
 
     def _init_db(self):
         db_url = os.getenv("DATABASE_URL")
@@ -66,12 +67,9 @@ class BitkubUltimateV8_7_3_TITAN:
                     big_trend TEXT
                 )
             ''')
-            conn.commit()
-            cur.close()
-            conn.close()
+            conn.commit(); cur.close(); conn.close()
             logger.info("✅ Database Table Ready")
-        except Exception as e:
-            logger.error(f"❌ DB Init Error: {e}")
+        except Exception as e: logger.error(f"❌ DB Init Error: {e}")
 
     def _log_to_db(self, side, price, amount, pnl=0.0, reason=""):
         db_url = os.getenv("DATABASE_URL")
@@ -84,13 +82,36 @@ class BitkubUltimateV8_7_3_TITAN:
                 INSERT INTO trade_history (symbol, side, price, amount, pnl_pct, reason, big_trend)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             ''', (self.symbol, side, price, amount, pnl, reason, self.big_trend))
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            logger.error(f"❌ DB Logging Error: {e}")
+            conn.commit(); cur.close(); conn.close()
+        except Exception as e: logger.error(f"❌ DB Logging Error: {e}")
 
-    # --- [Core Functions: Advanced Indicators] ---
+    def send_daily_summary(self):
+        """ดึงข้อมูลจาก DB มาสรุปกำไรรายวัน"""
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url: return
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            query = "SELECT pnl_pct, reason FROM trade_history WHERE timestamp > NOW() - INTERVAL '24 hours' AND side = 'SELL'"
+            cur.execute(query); trades = cur.fetchall()
+            if not trades: return
+            
+            total_pnl = sum([t[0] for t in trades])
+            win_trade = len([t for t in trades if t[0] > 0])
+            div = "━━━━━━━━━━━━━━━"
+            msg = (
+                f"<b>📊 Daily Summary (24h)</b>\n{div}\n"
+                f"✅ ปิดงานไป: {len(trades)} ไม้\n"
+                f"💰 กำไรรวม: {total_pnl:+.2f}%\n"
+                f"🏆 Win Rate: {(win_trade/len(trades))*100:.1f}%\n{div}\n"
+                f"📝 รายการล่าสุด:\n"
+            )
+            for t in trades[-3:]: msg += f"- {t[1]}: {t[0]:+.2f}%\n"
+            self.notify(msg); cur.close(); conn.close()
+        except Exception as e: logger.error(f"Daily Summary Error: {e}")
+
+    # --- [Core Functions] ---
 
     def get_big_trend(self):
         try:
@@ -104,14 +125,12 @@ class BitkubUltimateV8_7_3_TITAN:
     def update_indicators(self):
         try:
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "15", "from": int(time.time())-172800, "to": int(time.time())})
-            if not hist or 'c' not in hist or len(hist['c']) < 50: return None
+            if not hist or 'c' not in hist: return None
             c, h, l = np.array(hist['c'], dtype=float), np.array(hist['h'], dtype=float), np.array(hist['l'], dtype=float)
-
             ema = self.calculate_ema(c, self.ema_period)
             ema_prev = self.calculate_ema(c[:-1], self.ema_period)
             slope = (ema - ema_prev) / ema_prev * 100
-
-            # ADX Calculation
+            
             upmove = h[1:] - h[:-1]; downmove = l[:-1] - l[1:]
             dm_p = np.where((upmove > downmove) & (upmove > 0), upmove, 0)
             dm_m = np.where((downmove > upmove) & (downmove > 0), downmove, 0)
@@ -120,112 +139,79 @@ class BitkubUltimateV8_7_3_TITAN:
                 out = np.zeros_like(x); out[p-1] = np.mean(x[:p])
                 for i in range(p, len(x)): out[i] = (out[i-1] * (p - 1) + x[i]) / p
                 return out
-            atr_val = smooth(tr, 14); dx = 100 * abs(smooth(dm_p, 14) - smooth(dm_m, 14)) / (smooth(dm_p, 14) + smooth(dm_m, 14) + 1e-9)
-            adx = smooth(dx, 14)[-1]
+            adx = smooth(100 * abs(smooth(dm_p, 14) - smooth(dm_m, 14)) / (smooth(dm_p, 14) + smooth(dm_m, 14) + 1e-9), 14)[-1]
             rsi = 100 - (100 / (1 + (np.mean(np.diff(c).clip(min=0)[-14:]) / (np.mean(-np.diff(c).clip(max=0)[-14:]) + 1e-9))))
-
-            return {"ema": ema, "slope": slope, "adx": adx, "rsi": rsi, "atr": atr_val[-1], "price": c[-1], "high": h[-1]}
+            return {"ema": ema, "slope": slope, "adx": adx, "rsi": rsi, "atr": smooth(tr, 14)[-1], "price": c[-1]}
         except: return None
 
-    # --- [Main Logic: Balanced Execution] ---
-
     def run(self):
-        self.notify(f"<b>⚔️ TITAN V8.7.3 HYBRID</b>\n{self.symbol} | DB Integration Active")
+        self.notify(f"<b>⚔️ TITAN V8.7.3 HYBRID</b>\n{self.symbol} | DB & Daily Summary Ready")
         while True:
             try:
                 data = self.update_indicators()
                 if not data: time.sleep(20); continue
-
                 price, ema, slope, adx, rsi, atr = data['price'], data['ema'], data['slope'], data['adx'], data['rsi'], data['atr']
                 pnl = (((price * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
-
                 self.big_trend = self.get_big_trend()
                 thb, coin_bal = self.get_balance()
 
-                # --- 🟢 BUY LOGIC ---
+                # --- 🔴 BUY/SELL LOGIC ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 600:
                     if adx > self.adx_min and slope > self.slope_threshold:
                         buy_pct = 0.90 if self.big_trend == "BULLISH" else self.buy_alloc_pct
-                        buy_amt = thb * buy_pct
-                        res = self.place_order("buy", buy_amt)
-                        if res.get('error') == 0:
-                            self._update_buy_state(price, buy_amt, (2 if self.big_trend == "BULLISH" else 1))
-                            label = "STRONG BUY" if self.big_trend == "BULLISH" else "CAUTION BUY"
-                            self.notify(f"🚀 <b>[{label}]</b>\nPrice: {price:,.2f}\nSize: {buy_pct*100}%")
+                        res = self.place_order("buy", thb * buy_pct)
+                        if res.get('error') == 0: self._update_buy_state(price, thb * buy_pct, (2 if self.big_trend == "BULLISH" else 1))
 
-                # --- 🔴 SELL LOGIC ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
                     if pnl >= 1.0: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.003)
-                    curr_mult = self.atr_multiplier if pnl < self.tp_stage_1 else (self.atr_multiplier * 0.4)
-                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * curr_mult))
-
+                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * (self.atr_multiplier if pnl < self.tp_stage_1 else 0.6)))
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss"
                     elif pnl >= self.breakeven_pct and price <= (self.avg_price * 1.0025): reason = "Breakeven"
                     elif price <= self.dynamic_sl: reason = "Trailing Stop"
-
                     if reason:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0: self._update_sell_state(pnl, reason)
 
+                # --- 📅 REPORTING & DAILY SUMMARY ---
+                now_dt = datetime.now(timezone.utc) + timedelta(hours=7)
+                current_time_str = now_dt.strftime("%H:%M")
+                current_date_str = now_dt.strftime("%Y-%m-%d")
+
+                if current_time_str == "08:00" and self.last_summary_date != current_date_str:
+                    self.send_daily_summary(); self.last_summary_date = current_date_str
+
                 if time.time() - self.last_report_time >= 600:
-                    self._report_manager(price, pnl, ema, rsi, adx)
-                    self.last_report_time = time.time()
+                    self._report_manager(price, pnl, ema, rsi, adx); self.last_report_time = time.time()
 
             except Exception as e: logger.error(f"Main Error: {e}")
             time.sleep(15)
 
-    # --- [Support & Reporting] ---
-
     def _report_manager(self, price, pnl, ema, rsi, adx):
         try:
-            thb, coin = self.get_balance()
-            total_equity = thb + (coin * price)
-            net_profit = total_equity - self.initial_equity
-            growth = (net_profit / self.initial_equity) * 100
-            ema_diff = ((price - ema) / ema) * 100
+            thb, coin = self.get_balance(); total = thb + (coin * price)
+            profit = total - self.initial_equity; growth = (profit / self.initial_equity) * 100
             now = datetime.now(timezone.utc) + timedelta(hours=7)
-            
-            status_map = {0: "⚪ IDLE", 1: "🔵 S1 (Caution)", 2: "🟢 S2 (Strong)"}
-            trend_label = f"🟢 BULLISH" if self.big_trend == "BULLISH" else f"🟡 CAUTION"
             div = "━━━━━━━━━━━━━━━"
-
             report = (
-                f"<b>{status_map.get(self.current_stage, '⚪')} | TITAN V8.7.3</b>\n"
-                f"📅 {now.strftime('%d/%m/%Y %H:%M:%S')}\n"
-                f"{div}\n"
-                f"📊 <b>MARKET: {self.symbol}</b>\n"
-                f"💵 Price: {price:,.2f} THB\n"
-                f"📈 EMA: {ema:,.2f} ({ema_diff:+.2f}%)\n"
-                f"🕒 Net P/L: {pnl:+.2f}%\n"
-                f"🔭 1H Trend: <b>{trend_label}</b>\n"
-                f"🧩 ADX: {adx:.1f} | RSI: {rsi:.1f}\n"
-                f"{div}\n"
-                f"🏛️ <b>PORTFOLIO</b>\n"
-                f"💰 Cash: {thb:,.2f} THB\n"
-                f"🪙 {self.coin}: {coin:.4f} ({coin*price:,.2f} THB)\n"
-                f"💎 <b>Equity: {total_equity:,.2f} THB</b>\n"
-                f"{div}\n"
-                f"📈 <b>PERFORMANCE</b>\n"
-                f"💵 Profit: {net_profit:,.2f} THB\n"
-                f"🚀 Growth: {growth:+.2f}%\n"
-                f"🛡️ SL @: {self.dynamic_sl:,.2f}\n"
-                f"{div}"
+                f"<b>{'🟢' if self.current_stage==2 else '🔵' if self.current_stage==1 else '⚪'} | TITAN V8.7.3</b>\n"
+                f"📅 {now.strftime('%d/%m/%Y %H:%M:%S')}\n{div}\n"
+                f"📊 <b>MARKET: {self.symbol}</b>\n💵 Price: {price:,.2f} THB\n📈 EMA: {ema:,.2f}\n🕒 Net P/L: {pnl:+.2f}%\n"
+                f"🔭 1H Trend: <b>{'🟢 BULLISH' if self.big_trend=='BULLISH' else '🟡 CAUTION'}</b>\n{div}\n"
+                f"🏛️ <b>PORTFOLIO</b>\n💰 Cash: {thb:,.2f} THB\n🪙 Equity: {total:,.2f} THB\n{div}\n"
+                f"📈 <b>PERFORMANCE</b>\n💵 Profit: {profit:,.2f} THB\n🚀 Growth: {growth:+.2f}%\n🛡️ SL @: {self.dynamic_sl:,.2f}\n{div}"
             )
             self.notify(report)
-        except Exception as e: logger.error(f"Report Error: {e}")
+        except: pass
 
     def _update_buy_state(self, price, amt, stage):
         new_units = (amt * 0.9975) / price
-        total_cost = (self.avg_price * self.total_units) + (price * new_units)
-        self.total_units += new_units; self.avg_price = total_cost / self.total_units
-        self.last_action, self.current_stage, self.highest_price = "buy", stage, price
-        self._save_state()
-        self._log_to_db("BUY", price, amt)
+        self.avg_price = ((self.avg_price * self.total_units) + (price * new_units)) / (self.total_units + new_units)
+        self.total_units += new_units; self.last_action, self.current_stage, self.highest_price = "buy", stage, price
+        self._save_state(); self._log_to_db("BUY", price, amt)
 
     def _update_sell_state(self, pnl, reason):
-        self.notify(f"🔴 <b>[EXIT: {reason}]</b>\nPNL: {pnl:+.2f}%")
         self._log_to_db("SELL", self.avg_price, self.total_units, pnl, reason)
         self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0.0
         self.dynamic_sl, self.highest_price = 0, 0; self.last_sell_time = time.time(); self._save_state()
@@ -236,50 +222,39 @@ class BitkubUltimateV8_7_3_TITAN:
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
         if private:
-            try:
-                ts = requests.get(f"{self.host}/api/v3/servertime", timeout=5).text.strip()
-                sig = hmac.new(self.api_secret.encode('utf-8'), (ts + method + path + query_str + body_str).encode('utf-8'), hashlib.sha256).hexdigest()
-                headers.update({'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig})
-            except: return {"error": 888}
-        try: res = requests.request(method, url, headers=headers, data=body_str, timeout=15); return res.json()
-        except: return {"error": 999}
+            ts = requests.get(f"{self.host}/api/v3/servertime").text.strip()
+            sig = hmac.new(self.api_secret.encode('utf-8'), (ts+method+path+query_str+body_str).encode('utf-8'), hashlib.sha256).hexdigest()
+            headers.update({'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig})
+        return requests.request(method, url, headers=headers, data=body_str).json()
 
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", private=True)
-        if isinstance(res, dict) and res.get('error') == 0: return float(res['result'].get('THB', 0)), float(res['result'].get(self.coin, 0))
+        if res.get('error') == 0: return float(res['result'].get('THB', 0)), float(res['result'].get(self.coin, 0))
         return 0.0, 0.0
 
     def place_order(self, side, amt):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         clean_amt = math.floor(float(amt) * 100) / 100 if side == "buy" else math.floor(float(amt) * 10000) / 10000
-        payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": "market"}
-        return self._request("POST", path, payload=payload, private=True)
+        return self._request("POST", path, payload={"sym": self.symbol.lower(), "amt": clean_amt, "rat": 0, "typ": "market"}, private=True)
 
     def calculate_ema(self, prices, period):
-        if len(prices) < period: return np.mean(prices)
         alpha = 2 / (period + 1); ema = prices[0]
         for p in prices[1:]: ema = (p * alpha) + (ema * (1 - alpha))
         return ema
 
     def notify(self, msg):
-        if not self.tg_token: return
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
+        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": msg, "parse_mode": "HTML"})
         except: pass
 
     def _save_state(self):
-        try:
-            with open(self.state_file, "w") as f: json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "stage": self.current_stage, "units": self.total_units}, f)
-        except: pass
+        with open(self.state_file, "w") as f: json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "stage": self.current_stage, "units": self.total_units}, f)
 
     def _load_state(self):
         if os.path.exists(self.state_file):
             with open(self.state_file, "r") as f: d = json.load(f); self.last_action, self.avg_price, self.current_stage, self.total_units = d['last_action'], d['avg_price'], d['stage'], d.get('units', 0.0)
 
 def run_hc():
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"TITAN ACTIVE")
-        def log_message(self, *a): return
-    try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), H).serve_forever()
+    try: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), type('H',(BaseHTTPRequestHandler,),{'do_GET':lambda s:(s.send_response(200),s.end_headers(),s.wfile.write(b"TITAN ACTIVE")),'log_message':lambda*a:None})).serve_forever()
     except: pass
 
 if __name__ == "__main__":
