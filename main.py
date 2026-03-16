@@ -4,26 +4,25 @@ from datetime import datetime, timedelta, timezone
 
 class TitanMasterV10:
     def __init__(self):
-        # 1. Identity & Credentials
+        print("🛠️ Initializing TITAN MASTER V.10...")
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
-        
-        # 2. Strict Professional Logic (วินัยสถาบัน)
+
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "4726")).replace(',', ''))
-        self.stop_loss_pct = 1.0     # คัทลอสทันทีที่ 1% เพื่อรักษาทุน
-        self.tp_target = 1.5         # เป้ากำไรขั้นต่ำ
-        self.rsi_buy_max = 50        # ห้ามซื้อถ้า RSI เกิน 50 เด็ดขาด (กันดอย)
-        self.ema_dist_limit = 0.3    # ต้องใกล้เส้น EMA เท่านั้นถึงซื้อ
-        
-        # 3. Phase 2: Data Persistence
+        self.stop_loss_pct = 1.0     
+        self.tp_target = 1.5         
+        self.rsi_buy_max = 50        
+        self.ema_dist_limit = 0.3    
+
         self.state_file = "titan_v10_state.json"
         self.log_file = "trade_history.csv"
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
         self._load_state()
+        print(f"✅ Setup Complete. Symbol: {self.symbol} | Mode: Phase 2")
 
     def update_indicators(self):
         try:
@@ -34,11 +33,17 @@ class TitanMasterV10:
             rsi = 100 - (100 / (1 + (np.mean(diff.clip(min=0)[-14:]) / (np.mean(-diff.clip(max=0)[-14:]) + 1e-9))))
             atr = np.mean(np.maximum(np.array(res['h'], dtype=float)[1:] - np.array(res['l'], dtype=float)[1:], abs(np.array(res['h'], dtype=float)[1:] - c[:-1])))
             return {"price": c[-1], "ema": ema, "rsi": rsi, "atr": atr}
-        except: return None
+        except Exception as e:
+            print(f"⚠️ Indicator Error: {e}")
+            return None
 
     def _report(self, price, pnl, thb, coin, rsi, status="MASTER_ACTIVE"):
         coin_val = coin * price; total = thb + coin_val
         growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
+        
+        # แสดงผลใน Railway Logs
+        print(f"📊 [{datetime.now().strftime('%H:%M:%S')}] P:{price} | RSI:{rsi:.1f} | PnL:{pnl:+.2f}% | Equity:{total:.2f}")
+        
         div = "━━━━━━━━━━━━━━━"
         msg = (
             f"<b>🏆 TITAN MASTER V.10 (XRP)</b>\n"
@@ -55,6 +60,7 @@ class TitanMasterV10:
         self.notify(msg)
 
     def run(self):
+        print("🚀 TITAN MASTER V.10 is running...")
         self.notify("<b>🚀 TITAN MASTER V.10 ACTIVE</b>\nระบบเริ่มทำงานด้วยวินัยระดับสถาบัน")
         last_rep = 0
         while True:
@@ -65,10 +71,10 @@ class TitanMasterV10:
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
-                # --- BUY ENTRY (Strict) ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 900:
                     dist_ema = ((p - ema) / ema) * 100
                     if rsi < self.rsi_buy_max and dist_ema < self.ema_dist_limit:
+                        print(f"⚡ BUY SIGNAL DETECTED at {p}")
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price, self.total_units = p, (thb * 0.975) / p
                             self.last_action, self.highest_price = "buy", p
@@ -76,10 +82,9 @@ class TitanMasterV10:
                             self._log_trade("BUY", p, thb, 0, 0, "Initial Entry")
                             self.notify(f"<b>🚀 ENTRY: {p:,.2f}</b>\nRSI: {rsi:.1f} | 🟢 Low Risk")
 
-                # --- SELL EXIT (Strict) ---
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
-                    if pnl >= 0.5: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) # บังทุน
+                    if pnl >= 0.5: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
                     self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 1.0))
                     
                     reason = None
@@ -88,19 +93,24 @@ class TitanMasterV10:
                     elif p <= self.dynamic_sl: reason = "Trailing Stop 🛡️"
 
                     if reason:
+                        print(f"⚡ SELL SIGNAL: {reason} at {p}")
                         if self.place_order("sell", coin):
                             self._log_trade("SELL", p, coin*p, pnl, (coin*p)-(self.total_units*self.avg_price), reason)
                             self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nP/L: {pnl:+.2f}%\nReason: {reason}")
                             self.last_action, self.avg_price = "sell", 0; self.last_sell_time = time.time(); self._save_state()
 
+                # ปรับให้ Print ลง Log ทุกรอบที่เช็ค (ทุก 30 วินาที)
+                print(f"🔎 Monitoring... Price: {p} | RSI: {rsi:.1f} | Action: {self.last_action}")
+
                 if time.time() - last_rep >= 600:
                     self._report(p, pnl, thb, coin, rsi)
                     last_rep = time.time()
-            except: pass
+            except Exception as e:
+                print(f"❌ Main Loop Error: {e}")
             time.sleep(30)
 
-    # --- Persistence & Tools ---
     def _log_trade(self, side, price, val, pnl_pct, pnl_thb, reason):
+        print(f"📝 Logging Trade: {side} {price} {reason}")
         f_exists = os.path.isfile(self.log_file)
         with open(self.log_file, 'a', newline='') as f:
             w = csv.writer(f)
@@ -116,7 +126,8 @@ class TitanMasterV10:
             try:
                 with open(self.state_file, "r") as f:
                     d = json.load(f); self.last_action = d['last_action']; self.avg_price = d['avg_price']; self.total_units = d.get('units', 0.0)
-            except: pass
+                print("📂 State Loaded Successfully")
+            except: print("⚠️ Failed to load state")
 
     def _request(self, method, path, payload=None, private=False):
         url = f"https://api.bitkub.com{path}"
@@ -135,6 +146,7 @@ class TitanMasterV10:
     def place_order(self, side, amt):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         res = self._request("POST", path, payload={"sym": self.symbol.lower(), "amt": amt, "rat": 0, "typ": "market"}, private=True)
+        if res.get('error') != 0: print(f"❌ Order Failed: {res}")
         return res.get('error') == 0
 
     def calculate_ema(self, p, n):
