@@ -4,17 +4,21 @@ from datetime import datetime, timedelta, timezone
 
 class TitanMasterV10:
     def __init__(self):
-        print("🛠️ Initializing TITAN MASTER V.10...")
+        print("🛠️ Initializing TITAN MASTER V.10 (Dynamic Mode)...")
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
 
+        # --- อ่านค่าจาก Variables หน้า Railway ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "4726")).replace(',', ''))
-        self.stop_loss_pct = 1.0     
+        # ดึงค่า STOP_LOSS_PCT (ถ้าไม่ตั้งจะใช้ 1.0)
+        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "1.0"))
+        # ดึงค่า RSI_BUY_MAX (ถ้าไม่ตั้งจะใช้ 50.0)
+        self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "50.0"))
+        
         self.tp_target = 1.5         
-        self.rsi_buy_max = 50        
         self.ema_dist_limit = 0.3    
 
         self.state_file = "titan_v10_state.json"
@@ -22,7 +26,8 @@ class TitanMasterV10:
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
         self._load_state()
-        print(f"✅ Setup Complete. Symbol: {self.symbol} | Mode: Phase 2")
+        print(f"✅ Setup Complete. Symbol: {self.symbol}")
+        print(f"🛡️ Current Config -> SL: {self.stop_loss_pct}% | RSI Buy Max: {self.rsi_buy_max}")
 
     def update_indicators(self):
         try:
@@ -41,15 +46,17 @@ class TitanMasterV10:
         coin_val = coin * price; total = thb + coin_val
         growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
         
-        # แสดงผลใน Railway Logs
-        print(f"📊 [{datetime.now().strftime('%H:%M:%S')}] P:{price} | RSI:{rsi:.1f} | PnL:{pnl:+.2f}% | Equity:{total:.2f}")
+        print(f"📊 [{datetime.now().strftime('%H:%M:%S')}] P:{price} | RSI:{rsi:.1f} | PnL:{pnl:+.2f}%")
         
         div = "━━━━━━━━━━━━━━━"
+        # แจ้งเตือนสถานะความปลอดภัยตามค่า RSI ที่ตั้งใหม่
+        guard_status = "🟢 Safe" if rsi < self.rsi_buy_max else "🔴 Wait"
         msg = (
             f"<b>🏆 TITAN MASTER V.10 (XRP)</b>\n"
             f"🕒 Status: {status}\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
-            f"📊 RSI: {rsi:.1f} | EMA Guard: {'🟢 Safe' if rsi < 50 else '🔴 Wait'}\n{div}\n"
+            f"📊 RSI: {rsi:.1f} | EMA Guard: {guard_status}\n"
+            f"🛡️ Config: RSI &lt; {self.rsi_buy_max} | SL: {self.stop_loss_pct}%\n{div}\n"
             f"🏦 <b>LIVE PORTFOLIO</b>\n"
             f"💵 Cash: {thb:,.2f} THB\n"
             f"💠 XRP: {coin:.4f} ({coin_val:,.2f} THB)\n"
@@ -61,7 +68,7 @@ class TitanMasterV10:
 
     def run(self):
         print("🚀 TITAN MASTER V.10 is running...")
-        self.notify("<b>🚀 TITAN MASTER V.10 ACTIVE</b>\nระบบเริ่มทำงานด้วยวินัยระดับสถาบัน")
+        self.notify(f"<b>🚀 TITAN V.10 RECONFIGURED</b>\nSL: {self.stop_loss_pct}% | RSI Buy Max: {self.rsi_buy_max}")
         last_rep = 0
         while True:
             try:
@@ -74,7 +81,7 @@ class TitanMasterV10:
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 900:
                     dist_ema = ((p - ema) / ema) * 100
                     if rsi < self.rsi_buy_max and dist_ema < self.ema_dist_limit:
-                        print(f"⚡ BUY SIGNAL DETECTED at {p}")
+                        print(f"⚡ BUY SIGNAL DETECTED at {p} (RSI: {rsi:.1f})")
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price, self.total_units = p, (thb * 0.975) / p
                             self.last_action, self.highest_price = "buy", p
@@ -99,8 +106,7 @@ class TitanMasterV10:
                             self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nP/L: {pnl:+.2f}%\nReason: {reason}")
                             self.last_action, self.avg_price = "sell", 0; self.last_sell_time = time.time(); self._save_state()
 
-                # ปรับให้ Print ลง Log ทุกรอบที่เช็ค (ทุก 30 วินาที)
-                print(f"🔎 Monitoring... Price: {p} | RSI: {rsi:.1f} | Action: {self.last_action}")
+                print(f"🔎 Monitoring... P:{p} | RSI:{rsi:.1f} | SL:{self.stop_loss_pct}% | Mode:{self.last_action}")
 
                 if time.time() - last_rep >= 600:
                     self._report(p, pnl, thb, coin, rsi)
@@ -110,7 +116,6 @@ class TitanMasterV10:
             time.sleep(30)
 
     def _log_trade(self, side, price, val, pnl_pct, pnl_thb, reason):
-        print(f"📝 Logging Trade: {side} {price} {reason}")
         f_exists = os.path.isfile(self.log_file)
         with open(self.log_file, 'a', newline='') as f:
             w = csv.writer(f)
