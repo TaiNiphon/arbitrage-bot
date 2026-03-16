@@ -13,11 +13,9 @@ class TitanMasterV10:
 
         # --- อ่านค่าจาก Variables หน้า Railway ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "4726")).replace(',', ''))
-        # ดึงค่า STOP_LOSS_PCT (ถ้าไม่ตั้งจะใช้ 1.0)
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "1.0"))
-        # ดึงค่า RSI_BUY_MAX (ถ้าไม่ตั้งจะใช้ 50.0)
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "50.0"))
-        
+
         self.tp_target = 1.5         
         self.ema_dist_limit = 0.3    
 
@@ -45,23 +43,28 @@ class TitanMasterV10:
     def _report(self, price, pnl, thb, coin, rsi, status="MASTER_ACTIVE"):
         coin_val = coin * price; total = thb + coin_val
         growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
-        
+        # ส่วนต่างเป็นเงินบาท
+        diff_thb = total - self.initial_equity
+
         print(f"📊 [{datetime.now().strftime('%H:%M:%S')}] P:{price} | RSI:{rsi:.1f} | PnL:{pnl:+.2f}%")
-        
+
         div = "━━━━━━━━━━━━━━━"
-        # แจ้งเตือนสถานะความปลอดภัยตามค่า RSI ที่ตั้งใหม่
         guard_status = "🟢 Safe" if rsi < self.rsi_buy_max else "🔴 Wait"
+        
+        # แสดง Growth พร้อมจำนวนเงินบาท (+/-)
+        growth_text = f"{growth:+.2f}% (<b>{diff_thb:,.2f} THB</b>)"
+        
         msg = (
-            f"<b>🏆 TITAN MASTER V.10 (XRP)</b>\n"
+            f"<b>🏆 TITAN MASTER V.10 ({self.symbol})</b>\n"
             f"🕒 Status: {status}\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
             f"📊 RSI: {rsi:.1f} | EMA Guard: {guard_status}\n"
             f"🛡️ Config: RSI &lt; {self.rsi_buy_max} | SL: {self.stop_loss_pct}%\n{div}\n"
             f"🏦 <b>LIVE PORTFOLIO</b>\n"
             f"💵 Cash: {thb:,.2f} THB\n"
-            f"💠 XRP: {coin:.4f} ({coin_val:,.2f} THB)\n"
+            f"💠 {self.symbol.split('_')[0]}: {coin:.4f} ({coin_val:,.2f} THB)\n"
             f"💎 Equity: <b>{total:,.2f} THB</b>\n"
-            f"🚀 Growth: {growth:+.2f}%\n{div}\n"
+            f"🚀 Growth: {growth_text}\n{div}\n"
             f"🛡️ SL: {self.dynamic_sl:,.2f} | TP: {self.avg_price*1.015:,.2f}"
         )
         self.notify(msg)
@@ -75,9 +78,11 @@ class TitanMasterV10:
                 d = self.update_indicators()
                 if not d: time.sleep(20); continue
                 p, ema, rsi, atr = d['price'], d['ema'], d['rsi'], d['atr']
+                # คำนวณ P/L แบบหักค่าธรรมเนียม
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
+                # LOGIC การเข้าซื้อ (BUY)
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 900:
                     dist_ema = ((p - ema) / ema) * 100
                     if rsi < self.rsi_buy_max and dist_ema < self.ema_dist_limit:
@@ -85,25 +90,34 @@ class TitanMasterV10:
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price, self.total_units = p, (thb * 0.975) / p
                             self.last_action, self.highest_price = "buy", p
+                            # ตั้ง SL ครั้งแรก
                             self.dynamic_sl = p * (1 - (self.stop_loss_pct/100)); self._save_state()
                             self._log_trade("BUY", p, thb, 0, 0, "Initial Entry")
                             self.notify(f"<b>🚀 ENTRY: {p:,.2f}</b>\nRSI: {rsi:.1f} | 🟢 Low Risk")
 
+                # LOGIC การขาย (SELL)
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
-                    if pnl >= 1.0: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
-                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 2.0))
                     
+                    # ปรับปรุง: Lock กำไร (Break Even) เมื่อกำไรถึง 1.0%
+                    if pnl >= 1.0: 
+                        self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
+                    
+                    # ปรับปรุง: Trailing Stop ใช้ ATR * 2.0 (กว้างขึ้น)
+                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 2.0))
+
                     reason = None
                     if pnl >= self.tp_target: reason = "Take Profit 💰"
                     elif pnl <= -self.stop_loss_pct: reason = "Stop Loss 🔴"
                     elif p <= self.dynamic_sl: reason = "Trailing Stop 🛡️"
 
                     if reason:
+                        # คำนวณกำไร/ขาดทุนเป็นบาทของไม้นี้
+                        profit_thb = (coin * p * 0.9975) - (self.total_units * self.avg_price * 1.0025)
                         print(f"⚡ SELL SIGNAL: {reason} at {p}")
                         if self.place_order("sell", coin):
-                            self._log_trade("SELL", p, coin*p, pnl, (coin*p)-(self.total_units*self.avg_price), reason)
-                            self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nP/L: {pnl:+.2f}%\nReason: {reason}")
+                            self._log_trade("SELL", p, coin*p, pnl, profit_thb, reason)
+                            self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nP/L: {pnl:+.2f}% (<b>{profit_thb:+.2f} THB</b>)\nReason: {reason}")
                             self.last_action, self.avg_price = "sell", 0; self.last_sell_time = time.time(); self._save_state()
 
                 print(f"🔎 Monitoring... P:{p} | RSI:{rsi:.1f} | SL:{self.stop_loss_pct}% | Mode:{self.last_action}")
