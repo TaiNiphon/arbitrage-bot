@@ -42,30 +42,8 @@ class BitkubUltimateV8_7_4_TITAN:
         self.last_report_time = 0
 
         self._load_state()
-        self._init_db()
-
-    def _init_db(self):
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url: return
-        try:
-            import psycopg2
-            conn = psycopg2.connect(db_url); cur = conn.cursor()
-            cur.execute('''CREATE TABLE IF NOT EXISTS trade_history (id SERIAL PRIMARY KEY, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, symbol TEXT, side TEXT, price FLOAT, amount FLOAT, pnl_pct FLOAT, reason TEXT, big_trend TEXT)''')
-            conn.commit(); cur.close(); conn.close()
-        except: pass
-
-    def _log_to_db(self, side, price, amount, pnl=0.0, reason=""):
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url: return
-        try:
-            import psycopg2
-            conn = psycopg2.connect(db_url); cur = conn.cursor()
-            cur.execute('''INSERT INTO trade_history (symbol, side, price, amount, pnl_pct, reason, big_trend) VALUES (%s, %s, %s, %s, %s, %s, %s)''', (self.symbol, side, price, amount, pnl, reason, self.big_trend))
-            conn.commit(); cur.close(); conn.close()
-        except: pass
 
     # --- [Core Logic Functions] ---
-
     def get_big_trend(self):
         try:
             hist = self._request("GET", "/tradingview/history", params={"symbol": self.symbol, "resolution": "60", "from": int(time.time())-432000, "to": int(time.time())})
@@ -83,6 +61,8 @@ class BitkubUltimateV8_7_4_TITAN:
             ema = self.calculate_ema(c, self.ema_period)
             ema_prev = self.calculate_ema(c[:-1], self.ema_period)
             slope = (ema - ema_prev) / ema_prev * 100
+            
+            # ADX Calculation
             upmove = h[1:] - h[:-1]; downmove = l[:-1] - l[1:]
             dm_p = np.where((upmove > downmove) & (upmove > 0), upmove, 0)
             dm_m = np.where((downmove > upmove) & (downmove > 0), downmove, 0)
@@ -92,28 +72,23 @@ class BitkubUltimateV8_7_4_TITAN:
                 for i in range(p, len(x)): out[i] = (out[i-1] * (p - 1) + x[i]) / p
                 return out
             adx = smooth(100 * abs(smooth(dm_p, 14) - smooth(dm_m, 14)) / (smooth(dm_p, 14) + smooth(dm_m, 14) + 1e-9), 14)[-1]
+            
+            # RSI Calculation
             diff = np.diff(c)
             rsi = 100 - (100 / (1 + (np.mean(diff.clip(min=0)[-14:]) / (np.mean(-diff.clip(max=0)[-14:]) + 1e-9))))
             return {"ema": ema, "slope": slope, "adx": adx, "rsi": rsi, "atr": smooth(tr, 14)[-1], "price": c[-1]}
         except: return None
 
     # --- [Professional Reporting] ---
-
-    def _get_ui_div(self):
-        return "━━━━━━━━━━━━━━━"
-
-    def _report_manager(self, price, pnl, ema, rsi, adx, slope, thb, coin, status="Online"):
+    def _report_manager(self, price, pnl, ema, rsi, adx, slope, thb, coin, status="Monitoring"):
         try:
             total = thb + (coin * price)
-            profit = total - self.initial_equity
-            growth = (profit / self.initial_equity) * 100
+            growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
             be_price = self.avg_price * 1.005 if self.avg_price > 0 else 0
             now = (datetime.now(timezone.utc) + timedelta(hours=7)).strftime('%H:%M:%S')
-            div = self._get_ui_div()
-            
+            div = "━━━━━━━━━━━━━━━"
             icon = "⚪"
-            if self.last_action == "buy":
-                icon = "🟢" if pnl >= 0 else "🔴"
+            if self.last_action == "buy": icon = "🟢" if pnl >= 0 else "🔴"
 
             report = (
                 f"<b>{icon} | TITAN V.8.7.4 ULTRA</b>\n"
@@ -127,16 +102,16 @@ class BitkubUltimateV8_7_4_TITAN:
                 f"📉 BreakEven: <code>{be_price:,.2f}</code>\n"
                 f"🛡️ Trailing: <code>{self.dynamic_sl:,.2f}</code>\n"
                 f"🔭 Trend: <b>{'🟢 BULL' if self.big_trend=='BULLISH' else '🟡 SIDE'}</b>\n{div}\n"
-                f"🏛️ <b>PORTFOLIO</b>\n"
+                f"🏦 <b>PORTFOLIO</b>\n"
                 f"💵 Cash: {thb:,.2f} THB\n"
                 f"💠 Equity: <b>{total:,.2f}</b>\n"
                 f"🚀 Growth: {growth:+.2f}%\n{div}"
             )
             self.notify(report)
-        except: pass
+        except Exception as e: logger.error(f"Report Error: {e}")
 
     def run(self):
-        self.notify(f"<b>⚔️ TITAN V8.7.4 READY</b>\n{self.symbol} System Start!")
+        self.notify(f"<b>⚔️ TITAN V.8.7.4 READY</b>\n{self.symbol} System Start!")
         while True:
             try:
                 data = self.update_indicators()
@@ -146,21 +121,22 @@ class BitkubUltimateV8_7_4_TITAN:
                 self.big_trend = self.get_big_trend()
                 thb, coin_bal = self.get_balance()
 
-                # --- BUY ---
+                # --- BUY LOGIC ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
                     if adx > self.adx_min and slope > self.slope_threshold:
                         buy_pct = 0.98 if self.big_trend == "BULLISH" else self.buy_alloc_pct
                         res = self.place_order("buy", thb * buy_pct)
                         if res.get('error') == 0:
-                            self._update_buy_state(price, thb * buy_pct, (2 if self.big_trend == "BULLISH" else 1))
-                            msg = f"<b>🚀 BUY ORDER EXECUTED!</b>\n{self._get_ui_div()}\n💰 Price: {price:,.2f}\n📉 BE @: {price*1.005:,.2f}\n🔭 Trend: {self.big_trend}"
+                            self._update_buy_state(price, thb * buy_pct)
+                            msg = f"<b>🚀 BUY EXECUTED!</b>\n━━━━━━━━━━━━━━━\n💰 Price: {price:,.2f}\n📉 BE @: {price*1.005:,.2f}\n🔭 Trend: {self.big_trend}"
                             self.notify(msg)
 
-                # --- SELL ---
+                # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin_bal > 0:
                     self.highest_price = max(self.highest_price, price)
+                    # Trailing Logic
                     if pnl >= 1.0: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.003)
-                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * (self.atr_multiplier if pnl < self.tp_stage_1 else 0.6)))
+                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * self.atr_multiplier))
                     
                     reason = None
                     if pnl <= -self.stop_loss_pct: reason = "Stop Loss 🔴"
@@ -170,28 +146,26 @@ class BitkubUltimateV8_7_4_TITAN:
                     if reason:
                         res = self.place_order("sell", coin_bal)
                         if res.get('error') == 0:
-                            msg = f"<b>💰 SELL ORDER EXECUTED!</b>\n{self._get_ui_div()}\n💵 Price: {price:,.2f}\n📊 Net P/L: {pnl:+.2f}%\n📝 Reason: {reason}"
+                            msg = f"<b>💰 SELL EXECUTED!</b>\n━━━━━━━━━━━━━━━\n💵 Price: {price:,.2f}\n📊 Net P/L: {pnl:+.2f}%\n📝 Reason: {reason}"
                             self.notify(msg)
-                            self._update_sell_state(pnl, reason)
+                            self._update_sell_state()
 
-                # --- REPORT ---
+                # --- PERIODIC REPORT (Every 10 Mins) ---
                 if time.time() - self.last_report_time >= 600:
                     self._report_manager(price, pnl, ema, rsi, adx, slope, thb, coin_bal)
                     self.last_report_time = time.time()
 
-            except Exception as e: logger.error(f"Error: {e}")
+            except Exception as e: logger.error(f"Main Loop Error: {e}")
             time.sleep(15)
 
-    def _update_buy_state(self, price, amt, stage):
+    def _update_buy_state(self, price, amt):
         new_units = (amt * 0.9975) / price
         self.avg_price = ((self.avg_price * self.total_units) + (price * new_units)) / (self.total_units + new_units)
-        self.total_units += new_units; self.last_action, self.current_stage, self.highest_price = "buy", stage, price
-        self.dynamic_sl = price * (1 - (self.stop_loss_pct/100))
-        self._save_state(); self._log_to_db("BUY", price, amt)
+        self.total_units += new_units; self.last_action, self.highest_price = "buy", price
+        self.dynamic_sl = price * (1 - (self.stop_loss_pct/100)); self._save_state()
 
-    def _update_sell_state(self, pnl, reason):
-        self._log_to_db("SELL", self.avg_price, self.total_units, pnl, reason)
-        self.last_action, self.avg_price, self.current_stage, self.total_units = "sell", 0, 0, 0.0
+    def _update_sell_state(self):
+        self.last_action, self.avg_price, self.total_units = "sell", 0, 0.0
         self.dynamic_sl, self.highest_price = 0, 0; self.last_sell_time = time.time(); self._save_state()
 
     def _request(self, method, path, params=None, payload=None, private=False):
@@ -200,7 +174,7 @@ class BitkubUltimateV8_7_4_TITAN:
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
         body_str = json.dumps(payload, separators=(',', ':')) if payload else ""
         if private:
-            ts = requests.get(f"{self.host}/api/v3/servertime").text.strip()
+            ts = str(int(time.time() * 1000))
             sig = hmac.new(self.api_secret.encode('utf-8'), (ts+method+path+query_str+body_str).encode('utf-8'), hashlib.sha256).hexdigest()
             headers.update({'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig})
         return requests.request(method, url, headers=headers, data=body_str).json()
@@ -225,14 +199,13 @@ class BitkubUltimateV8_7_4_TITAN:
         except: pass
 
     def _save_state(self):
-        with open(self.state_file, "w") as f: json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "stage": self.current_stage, "units": self.total_units}, f)
+        with open(self.state_file, "w") as f: json.dump({"last_action": self.last_action, "avg_price": self.avg_price, "units": self.total_units}, f)
 
     def _load_state(self):
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, "r") as f: 
-                    d = json.load(f)
-                    self.last_action, self.avg_price, self.current_stage, self.total_units = d['last_action'], d['avg_price'], d['stage'], d.get('units', 0.0)
+                    d = json.load(f); self.last_action, self.avg_price, self.total_units = d['last_action'], d['avg_price'], d.get('units', 0.0)
             except: pass
 
 def run_hc():
@@ -241,4 +214,5 @@ def run_hc():
 
 if __name__ == "__main__":
     threading.Thread(target=run_hc, daemon=True).start()
-    BitkubUltimateV8_4_TITAN().run()
+    # Fixed Class Name Here:
+    BitkubUltimateV8_7_4_TITAN().run()
