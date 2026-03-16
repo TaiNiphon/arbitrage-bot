@@ -91,8 +91,8 @@ class TitanMasterV10:
 
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
-                    if pnl >= 0.5: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
-                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 1.0))
+                    if pnl >= 1.0: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
+                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 2.0))
                     
                     reason = None
                     if pnl >= self.tp_target: reason = "Take Profit 💰"
