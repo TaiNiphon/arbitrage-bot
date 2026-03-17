@@ -16,7 +16,7 @@ class TitanMasterV10:
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) # ตามที่พี่แจ้งล่าสุด
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "35.0"))   # ตามที่พี่แจ้งล่าสุด
 
-        self.tp_target = 1.5         
+        self.tp_target = 10.0         
         self.ema_dist_limit = 0.5    # ปรับให้ยืดหยุ่นขึ้นเล็กน้อย
 
         self.state_file = "titan_v10_state.json"
