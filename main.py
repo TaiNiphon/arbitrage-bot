@@ -153,10 +153,10 @@ class TitanMasterV10:
 
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
-                    if pnl >= 2.5: 
+                    if pnl >= 1.5: 
                         self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
                     
-                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 3.5))
+                    self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 3.0))
                     self._save_state_db() # อัปเดตจุด Trailing Stop เข้า DB ตลอดเวลา
 
                     reason = None
