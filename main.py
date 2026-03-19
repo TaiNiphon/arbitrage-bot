@@ -4,27 +4,27 @@ from datetime import datetime, timedelta, timezone
 
 class TitanMasterV10:
     def __init__(self):
-        print("🛠️ Initializing TITAN MASTER V.10.2 (Postgres Enabled)...")
+        print("🛠️ Initializing TITAN MASTER V.10.3 (Postgres Fix Enabled)...")
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
-        
+
         # --- Database Connection (Railway Postgres) ---
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- อ่านค่าจาก Variables หน้า Railway ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "10000")).replace(',', ''))
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) 
-        self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "30.0"))   
+        self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "25.0"))   
 
         self.tp_target = 10.0         
         self.ema_dist_limit = 0.5    
 
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
-        
+
         self._init_db() # สร้างตารางถ้ายังไม่มี
         self._load_state_db() # โหลดข้อมูลจาก Postgres
         print(f"✅ Setup Complete. Symbol: {self.symbol}")
@@ -34,7 +34,6 @@ class TitanMasterV10:
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            # ตารางเก็บสถานะล่าสุด
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bot_state (
                     id SERIAL PRIMARY KEY,
@@ -46,7 +45,6 @@ class TitanMasterV10:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # ตารางเก็บประวัติการเทรด (Database Log)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS trade_history (
                     id SERIAL PRIMARY KEY,
@@ -64,15 +62,21 @@ class TitanMasterV10:
         except Exception as e: print(f"❌ DB Init Error: {e}")
 
     def _save_state_db(self):
-        """ บันทึกสถานะลง Database """
+        """ บันทึกสถานะลง Database (แก้ไขปัญหา np.float64) """
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
-            cur.execute("DELETE FROM bot_state") # ลบของเก่าเก็บของใหม่
+            cur.execute("DELETE FROM bot_state")
             cur.execute("""
                 INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl)
                 VALUES (%s, %s, %s, %s, %s)
-            """, (self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl))
+            """, (
+                str(self.last_action), 
+                float(self.avg_price), 
+                float(self.total_units), 
+                float(self.highest_price), 
+                float(self.dynamic_sl)
+            ))
             conn.commit()
             cur.close()
             conn.close()
@@ -114,7 +118,7 @@ class TitanMasterV10:
         div = "━━━━━━━━━━━━━━━"
         guard_status = "🟢 Safe" if rsi < self.rsi_buy_max else "🔴 Wait"
         msg = (
-            f"<b>🏆 TITAN MASTER V.10.2 ({self.symbol})</b>\n"
+            f"<b>🏆 TITAN MASTER V.10.3 ({self.symbol})</b>\n"
             f"🕒 Status: {status}\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
             f"📊 RSI: {rsi:.1f} | EMA Guard: {guard_status}\n"
@@ -148,16 +152,16 @@ class TitanMasterV10:
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
                             self.last_action = "buy"; self.highest_price = p
                             self.dynamic_sl = p * (1 - (self.stop_loss_pct/100))
-                            self._save_state_db() # บันทึกเข้า DB ทันทีที่ซื้อ
+                            self._save_state_db() 
                             self.notify(f"<b>🚀 ENTRY: {p:,.2f}</b>\nRSI: {rsi:.1f}\nTarget: {self.tp_target}%")
 
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
                     if pnl >= 2.5: 
                         self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0025) 
-                    
+
                     self.dynamic_sl = max(self.dynamic_sl, self.highest_price - (atr * 3.5))
-                    self._save_state_db() # อัปเดตจุด Trailing Stop เข้า DB ตลอดเวลา
+                    self._save_state_db() 
 
                     reason = None
                     if pnl >= self.tp_target: reason = "Take Profit 💰"
@@ -179,7 +183,7 @@ class TitanMasterV10:
             time.sleep(30)
 
     def _log_trade_db(self, side, price, pnl_pct, pnl_thb, reason):
-        """ บันทึกประวัติการเทรดลง Postgres """
+        """ บันทึกประวัติการเทรด (แก้ไขปัญหา np.float64) """
         try:
             conn = psycopg2.connect(self.db_url)
             cur = conn.cursor()
@@ -187,7 +191,7 @@ class TitanMasterV10:
             cur.execute("""
                 INSERT INTO trade_history (time, side, price, pnl_pct, pnl_thb, reason)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (now, side, price, pnl_pct, pnl_thb, reason))
+            """, (now, str(side), float(price), float(pnl_pct), float(pnl_thb), str(reason)))
             conn.commit()
             cur.close()
             conn.close()
