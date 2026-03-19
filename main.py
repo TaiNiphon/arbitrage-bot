@@ -4,14 +4,17 @@ from datetime import datetime, timedelta, timezone
 
 class TitanMasterV10:
     def __init__(self):
-        print("🛠️ Initializing TITAN MASTER V.10.4 (Profit Guard Enabled)...")
+        print("🛠️ Initializing TITAN MASTER V.10.4 (Full Profit Guard)...")
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
 
+        # --- Database Connection ---
         self.db_url = os.getenv("DATABASE_URL")
+
+        # --- Variables จาก Railway ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "10000")).replace(',', ''))
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) 
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "25.0"))   
@@ -22,8 +25,8 @@ class TitanMasterV10:
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
 
-        self._init_db()
-        self._load_state_db()
+        self._init_db() 
+        self._load_state_db() 
         print(f"✅ Setup Complete. Symbol: {self.symbol}")
 
     def _init_db(self):
@@ -95,24 +98,28 @@ class TitanMasterV10:
         coin_val = coin * price; total = thb + coin_val
         growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
         diff_thb = total - self.initial_equity
-        # แสดง BE Price ที่รวมค่าธรรมเนียม 0.5% จริงๆ
-        be_price = self.avg_price * 1.0055 if self.avg_price > 0 else 0
+        # BE Price คำนวณเผื่อค่าธรรมเนียม 0.65% เพื่อความปลอดภัยสูงสุด
+        be_price = self.avg_price * 1.0065 if self.avg_price > 0 else 0
         sl_dist = ((price - self.dynamic_sl) / self.dynamic_sl * 100) if self.dynamic_sl > 0 else 0
+
         div = "━━━━━━━━━━━━━━━"
         guard_status = "🟢 Safe" if rsi < self.rsi_buy_max else "🔴 Wait"
         msg = (
             f"<b>🏆 TITAN MASTER V.10.4 ({self.symbol})</b>\n"
             f"🕒 Status: {status}\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
-            f"📊 RSI: {rsi:.1f} | EMA Guard: {guard_status}\n{div}\n"
+            f"📊 RSI: {rsi:.1f} | EMA Guard: {guard_status}\n"
+            f"🛡️ Config: RSI &lt; {self.rsi_buy_max} | SL: {self.stop_loss_pct}%\n{div}\n"
             f"🏦 <b>LIVE PORTFOLIO</b>\n"
             f"💵 Cash: {thb:,.2f} THB\n"
+            f"💠 {self.symbol.split('_')[0]}: {coin:.4f} ({coin_val:,.2f} THB)\n"
             f"💎 Equity: <b>{total:,.2f} THB</b>\n"
             f"🚀 Growth: {growth:+.2f}% (<b>{diff_thb:,.2f} THB</b>)\n{div}\n"
         )
         if self.last_action == "buy" and coin > 0:
-            msg += f"🎯 BE Price: {be_price:,.2f}\n🛡️ SL: {self.dynamic_sl:,.2f} (<b>{sl_dist:+.2f}%</b>)"
-        else: msg += f"💤 Status: <b>Waiting for Entry...</b>"
+            msg += f"🎯 BE Price: {be_price:,.2f}\n🛡️ SL: {self.dynamic_sl:,.2f} (<b>{sl_dist:+.2f}%</b>)\n💰 TP Goal: {self.avg_price*(1 + self.tp_target/100):,.2f}"
+        else:
+            msg += f"💤 Status: <b>Waiting for Entry...</b>"
         self.notify(msg)
 
     def run(self):
@@ -122,6 +129,7 @@ class TitanMasterV10:
                 d = self.update_indicators()
                 if not d: time.sleep(20); continue
                 p, ema, rsi, atr = d['price'], d['ema'], d['rsi'], d['atr']
+                # P/L คำนวณแบบหักค่าคอมฯ ไป-กลับ จริงๆ
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
@@ -132,20 +140,20 @@ class TitanMasterV10:
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
                             self.last_action = "buy"; self.highest_price = p
                             self.dynamic_sl = p * (1 - (self.stop_loss_pct/100))
-                            self._save_state_db(); self.notify(f"<b>🚀 ENTRY: {p:,.2f}</b>")
+                            self._save_state_db() 
+                            self.notify(f"<b>🚀 ENTRY: {p:,.2f}</b>\nRSI: {rsi:.1f}")
 
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
                     
-                    # --- แก้ไขจุดรันเทรนด์ให้แน่นขึ้น ---
-                    # 1. ปรับ ATR Multiplier เหลือ 2.0 (ตามราคาชิดขึ้น)
+                    # 1. กลยุทธ์ล็อคกำไรแน่นขึ้นด้วย ATR 2.0
                     trail_price = self.highest_price - (atr * 2.0)
                     
-                    # 2. ถ้ากำไรเกิน 1.5% ให้ดึง SL มาบังหน้าทุนที่ 0.65% (พ้นค่าธรรมเนียม)
+                    # 2. Profit Guard: ถ้ากำไร 1.5% ดึง SL บังหน้าทุนทันที
                     if pnl >= 1.5:
                         lock_profit_price = self.avg_price * 1.0065
                         self.dynamic_sl = max(self.dynamic_sl, lock_profit_price)
-                    
+
                     self.dynamic_sl = max(self.dynamic_sl, trail_price)
                     self._save_state_db() 
 
@@ -159,10 +167,12 @@ class TitanMasterV10:
                         if self.place_order("sell", coin):
                             self._log_trade_db("SELL", p, pnl, profit_thb, reason)
                             self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nP/L: {pnl:+.2f}% (<b>{profit_thb:+.2f} THB</b>)\nReason: {reason}")
-                            self.last_action = "sell"; self.avg_price = 0; self.last_sell_time = time.time(); self._save_state_db()
+                            self.last_action = "sell"; self.avg_price = 0; self.last_sell_time = time.time()
+                            self._save_state_db()
 
                 if time.time() - last_rep >= 600:
-                    self._report(p, pnl, thb, coin, rsi); last_rep = time.time()
+                    self._report(p, pnl, thb, coin, rsi)
+                    last_rep = time.time()
             except Exception as e: print(f"❌ Error: {e}")
             time.sleep(30)
 
