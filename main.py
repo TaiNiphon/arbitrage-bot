@@ -2,9 +2,9 @@ import os, requests, time, hmac, hashlib, json, csv, math, psycopg2
 import numpy as np
 from datetime import datetime, timedelta, timezone
 
-class TitanMasterV10:
+class TitanMasterV11:
     def __init__(self):
-        print("🛠️ Initializing TITAN MASTER V.10.5 (Recovery Edition)...")
+        print("🛠️ Initializing TITAN MASTER V.11 (Analytical Edition)...")
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -13,26 +13,45 @@ class TitanMasterV10:
 
         self.db_url = os.getenv("DATABASE_URL")
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "10000")).replace(',', ''))
-        
-        # --- ปรับตัวแปรหลักเพื่อลดความเสี่ยง ---
-        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "1.5")) # ลด SL ให้แคบลง
+
+        # --- ตัวแปรหลัก (คงเดิมตาม V.10.5) ---
+        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) 
         self.rsi_buy_level = float(os.getenv("RSI_BUY_MAX", "25.0"))
         self.tp_target = 10.0         
         self.ema_dist_limit = 0.5    
 
+        # --- ตัวแปรสำหรับเก็บสถิติ (V.11 เพิ่มเติม) ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
-        self.rsi_prev = 50.0 # สำหรับเช็ก RSI Hook
+        self.rsi_prev = 50.0 
+        
+        self.entry_rsi_val = 0.0      # เก็บค่า RSI ตอนเข้า
+        self.entry_time = None        # เก็บเวลาที่เข้าซื้อ
+        self.max_pnl_val = 0.0        # เก็บ P/L สูงสุดที่เคยทำได้ในไม้นั้น
+        self.entry_trend = "Unknown"  # เก็บ Trend ตอนเข้า
 
         self._init_db()
         self._load_state_db()
-        print(f"✅ Setup Complete. Mode: RSI Hook & Tight Trailing")
+        print(f"✅ V.11 Setup Complete. Tracking: RSI, Max P/L, Hold Time & Trend")
 
     def _init_db(self):
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS bot_state (id SERIAL PRIMARY KEY, last_action TEXT, avg_price FLOAT, total_units FLOAT, highest_price FLOAT, dynamic_sl FLOAT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-            cur.execute("CREATE TABLE IF NOT EXISTS trade_history (id SERIAL PRIMARY KEY, time TIMESTAMP, side TEXT, price FLOAT, pnl_pct FLOAT, pnl_thb FLOAT, reason TEXT)")
+            # ตาราง State ปรับเพิ่มเพื่อรองรับการดึงข้อมูลกลับมาหลัง Restart
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    id SERIAL PRIMARY KEY, last_action TEXT, avg_price FLOAT, total_units FLOAT, 
+                    highest_price FLOAT, dynamic_sl FLOAT, entry_rsi FLOAT, entry_time TIMESTAMP, 
+                    max_pnl FLOAT, entry_trend TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )""")
+            # ตาราง History ปรับเพิ่ม 5 คอลัมน์เทพตามแผน
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id SERIAL PRIMARY KEY, time TIMESTAMP, side TEXT, price FLOAT, 
+                    pnl_pct FLOAT, pnl_thb FLOAT, reason TEXT, 
+                    entry_rsi FLOAT, exit_rsi FLOAT, max_pnl_during_trade FLOAT, 
+                    hold_time_min FLOAT, market_trend TEXT
+                )""")
             conn.commit(); cur.close(); conn.close()
         except Exception as e: print(f"❌ DB Init Error: {e}")
 
@@ -40,17 +59,22 @@ class TitanMasterV10:
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
             cur.execute("DELETE FROM bot_state")
-            cur.execute("INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl) VALUES (%s, %s, %s, %s, %s)", 
-                        (str(self.last_action), float(self.avg_price), float(self.total_units), float(self.highest_price), float(self.dynamic_sl)))
+            cur.execute("""
+                INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl, entry_rsi, entry_time, max_pnl, entry_trend) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""", 
+                (str(self.last_action), float(self.avg_price), float(self.total_units), float(self.highest_price), 
+                 float(self.dynamic_sl), float(self.entry_rsi_val), self.entry_time, float(self.max_pnl_val), str(self.entry_trend)))
             conn.commit(); cur.close(); conn.close()
         except Exception as e: print(f"❌ DB Save Error: {e}")
 
     def _load_state_db(self):
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("SELECT last_action, avg_price, total_units, highest_price, dynamic_sl FROM bot_state LIMIT 1")
+            cur.execute("SELECT last_action, avg_price, total_units, highest_price, dynamic_sl, entry_rsi, entry_time, max_pnl, entry_trend FROM bot_state LIMIT 1")
             row = cur.fetchone()
-            if row: self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl = row
+            if row: 
+                self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl, \
+                self.entry_rsi_val, self.entry_time, self.max_pnl_val, self.entry_trend = row
             cur.close(); conn.close()
         except Exception as e: print(f"❌ DB Load Error: {e}")
 
@@ -73,9 +97,8 @@ class TitanMasterV10:
         sl_dist = ((price - self.dynamic_sl) / self.dynamic_sl * 100) if self.dynamic_sl > 0 else 0
 
         div = "━━━━━━━━━━━━━━━"
-        # รายงานหน้าตาแบบเดิมที่พี่ชอบ
         msg = (
-            f"<b>🏆 TITAN MASTER V.10.5 ({self.symbol})</b>\n"
+            f"<b>🏆 TITAN MASTER V.11 ({self.symbol})</b>\n"
             f"🕒 Status: {status}\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
             f"📊 RSI: {rsi:.1f} | Prev: {self.rsi_prev:.1f}\n"
@@ -87,7 +110,8 @@ class TitanMasterV10:
             f"🚀 Growth: {growth:+.2f}% (<b>{diff_thb:,.2f} THB</b>)\n{div}\n"
         )
         if self.last_action == "buy" and coin > 0:
-            msg += f"🎯 BE Price: {be_price:,.2f}\n🛡️ SL: {self.dynamic_sl:,.2f} (<b>{sl_dist:+.2f}%</b>)\n💰 TP Goal: {self.avg_price*1.1:,.2f}"
+            msg += f"🎯 BE Price: {be_price:,.2f}\n🛡️ SL: {self.dynamic_sl:,.2f} (<b>{sl_dist:+.2f}%</b>)\n💰 TP Goal: {self.avg_price*1.1:,.2f}\n"
+            msg += f"📈 Max P/L: {self.max_pnl_val:+.2f}%"
         else: msg += f"💤 Status: <b>Waiting for RSI Hook...</b>"
         self.notify(msg)
 
@@ -101,24 +125,31 @@ class TitanMasterV10:
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
-                # --- 1. Logic การเข้าซื้อ: RSI Hook (ต้องหักหัวขึ้น) ---
+                # --- 1. Logic การเข้าซื้อ (RSI Hook) ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 900:
                     dist_ema = ((p - ema) / ema) * 100
-                    # เงื่อนไข: RSI เคยต่ำกว่าเป้า และตอนนี้เริ่มงัดขึ้น + อยู่ใต้ EMA
                     if self.rsi_prev < self.rsi_buy_level and rsi > self.rsi_prev and dist_ema < self.ema_dist_limit:
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
                             self.last_action = "buy"; self.highest_price = p
                             self.dynamic_sl = p * (1 - (self.stop_loss_pct/100))
-                            self._save_state_db(); self.notify(f"<b>🚀 ENTRY (RSI Hook): {p:,.2f}</b>")
+                            
+                            # V.11: บันทึกข้อมูลสภาพแวดล้อมตอนซื้อ
+                            self.entry_rsi_val = rsi
+                            self.entry_time = datetime.now(timezone(timedelta(hours=7)))
+                            self.max_pnl_val = 0.0
+                            self.entry_trend = "UpTrend" if p > ema else "DownTrend"
+                            
+                            self._save_state_db(); self.notify(f"<b>🚀 ENTRY (V.11): {p:,.2f}</b>\nRSI: {rsi:.1f} | Trend: {self.entry_trend}")
                     self.rsi_prev = rsi
 
-                # --- 2. Logic การขาย: ล็อคกำไรแน่น ---
+                # --- 2. Logic การขาย ---
                 elif self.last_action == "buy" and coin > 0:
+                    self.max_pnl_val = max(self.max_pnl_val, pnl) # เก็บกำไรสูงสุดที่เคยทำได้
                     self.highest_price = max(self.highest_price, p)
-                    trail_price = self.highest_price - (atr * 2.0) # ตามชิดขึ้น
-                    
-                    if pnl >= 1.2: # ถ้ากำไร 1.2% ดึง SL มาดักหน้าทุนทันที
+                    trail_price = self.highest_price - (atr * 2.0)
+
+                    if pnl >= 1.2: 
                         self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
 
                     self.dynamic_sl = max(self.dynamic_sl, trail_price)
@@ -132,23 +163,42 @@ class TitanMasterV10:
                     if reason:
                         profit_thb = (coin * p * 0.9975) - (self.total_units * self.avg_price * 1.0025)
                         if self.place_order("sell", coin):
-                            self._log_trade_db("SELL", p, pnl, profit_thb, reason)
-                            self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nReason: {reason}\nProfit: {profit_thb:+.2f} THB")
-                            self.last_action = "sell"; self.avg_price = 0; self.last_sell_time = time.time(); self._save_state_db()
+                            # V.11: บันทึกข้อมูลครบถ้วนลง Database
+                            self._log_trade_db_v11("SELL", p, pnl, profit_thb, reason, rsi)
+                            self.notify(f"<b>💰 EXIT (V.11): {p:,.2f}</b>\nReason: {reason}\nProfit: {profit_thb:+.2f} THB\nHold: {self._get_hold_time()} min")
+                            
+                            # Reset State
+                            self.last_action = "sell"; self.avg_price = 0; self.last_sell_time = time.time()
+                            self.entry_rsi_val = 0.0; self.max_pnl_val = 0.0
+                            self._save_state_db()
 
                 if time.time() - last_rep >= 600:
                     self._report(p, pnl, thb, coin, rsi); last_rep = time.time()
             except Exception as e: print(f"❌ Error: {e}")
             time.sleep(30)
 
-    def _log_trade_db(self, side, price, pnl_pct, pnl_thb, reason):
+    def _get_hold_time(self):
+        if self.entry_time:
+            now = datetime.now(timezone(timedelta(hours=7)))
+            diff = now - self.entry_time
+            return round(diff.total_seconds() / 60, 2)
+        return 0.0
+
+    def _log_trade_db_v11(self, side, price, pnl_pct, pnl_thb, reason, current_rsi):
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("INSERT INTO trade_history (time, side, price, pnl_pct, pnl_thb, reason) VALUES (%s, %s, %s, %s, %s, %s)", 
-                        (datetime.now(timezone(timedelta(hours=7))), str(side), float(price), float(pnl_pct), float(pnl_thb), str(reason)))
+            hold_min = self._get_hold_time()
+            cur.execute("""
+                INSERT INTO trade_history (
+                    time, side, price, pnl_pct, pnl_thb, reason, 
+                    entry_rsi, exit_rsi, max_pnl_during_trade, hold_time_min, market_trend
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""", 
+                (datetime.now(timezone(timedelta(hours=7))), str(side), float(price), float(pnl_pct), float(pnl_thb), str(reason),
+                 float(self.entry_rsi_val), float(current_rsi), float(self.max_pnl_val), float(hold_min), str(self.entry_trend)))
             conn.commit(); cur.close(); conn.close()
-        except Exception as e: print(f"❌ DB Log Error: {e}")
+        except Exception as e: print(f"❌ DB V.11 Log Error: {e}")
 
+    # --- ฟังก์ชันเสริมอื่นๆ (คงเดิม) ---
     def get_balance(self):
         res = self._request("POST", "/api/v3/market/wallet", private=True)
         if res.get('error') == 0: return float(res['result'].get('THB', 0)), float(res['result'].get('XRP', 0))
@@ -178,4 +228,4 @@ class TitanMasterV10:
         except: pass
 
 if __name__ == "__main__":
-    TitanMasterV10().run()
+    TitanMasterV11().run()
