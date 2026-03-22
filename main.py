@@ -94,12 +94,13 @@ class TitanMasterV11:
         now_str = datetime.now(timezone(timedelta(hours=7))).strftime('%Y-%m-%d %H:%M:%S')
         div = "━━━━━━━━━━━━━━━"
 
+        # --- ปรับทศนิยม RSI และ RSI Prev เป็น 2 ตำแหน่งที่นี่ ---
         msg = (
             f"<b>🏆 TITAN MASTER V.11.2 ({self.symbol})</b>\n"
             f"🕒 Status: {status}\n"
             f"⏰ Time: <code>{now_str}</code>\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
-            f"📊 RSI: {rsi:.1f} | Prev: {self.rsi_prev:.1f}\n"
+            f"📊 RSI: {rsi:.2f} | Prev: {self.rsi_prev:.2f}\n"
             f"🛡️ Config: RSI &lt; {self.rsi_buy_level} | SL: {self.stop_loss_pct}%\n{div}\n"
             f"🏦 <b>LIVE PORTFOLIO</b>\n"
             f"💵 Cash: {thb:,.2f} THB\n"
@@ -145,7 +146,7 @@ class TitanMasterV11:
                             self.max_pnl_val = 0.0
                             self.entry_trend = "UpTrend" if p > ema else "DownTrend"
                             self._save_state_db()
-                            self.notify(f"<b>🚀 ENTRY (TURBO): {p:,.2f}</b>\n📊 RSI: {rsi:.1f} | EMA Dist: {dist_ema:.2f}%")
+                            self.notify(f"<b>🚀 ENTRY (TURBO): {p:,.2f}</b>\n📊 RSI: {rsi:.2f} | EMA Dist: {dist_ema:.2f}%")
 
                 # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0:
@@ -178,7 +179,7 @@ class TitanMasterV11:
                     self._report(p, pnl, thb, coin, rsi)
                     last_rep = time.time()
 
-                # อัปเดตค่า RSI เดิมไว้ใช้ในรอบถัดไป (วางไว้ท้ายสุดเพื่อให้ Report แสดงค่า Prev จริง)
+                # บันทึกค่า RSI เดิมไว้ (Update หลังส่ง Report เพื่อให้จำค่ารอบที่แล้ว)
                 self.rsi_prev = rsi 
 
             except Exception as e: print(f"❌ Run Error: {e}")
