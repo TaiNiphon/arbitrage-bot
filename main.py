@@ -247,5 +247,5 @@ class TitanMasterV11:
         try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
-if __name__ == "__main__":
-    TitanMasterV11().run()
+    if __name__ == "__main__":
+        TitanMasterV11().run()
