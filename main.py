@@ -23,7 +23,8 @@ class TitanMasterV11:
         # --- Tracking Variables ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
-        self.rsi_prev = 50.0 
+        self.rsi_prev = 50.0       # สำหรับเช็ค Hook (5 วินาที)
+        self.rsi_rep_prev = 50.0   # สำหรับโชว์ใน Report (10 นาที)
         self.entry_rsi_val = 0.0      
         self.entry_time = None        
         self.max_pnl_val = 0.0        
@@ -94,13 +95,12 @@ class TitanMasterV11:
         now_str = datetime.now(timezone(timedelta(hours=7))).strftime('%Y-%m-%d %H:%M:%S')
         div = "━━━━━━━━━━━━━━━"
 
-        # --- ปรับทศนิยม RSI และ RSI Prev เป็น 2 ตำแหน่งที่นี่ ---
         msg = (
             f"<b>🏆 TITAN MASTER V.11.2 ({self.symbol})</b>\n"
             f"🕒 Status: {status}\n"
             f"⏰ Time: <code>{now_str}</code>\n{div}\n"
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
-            f"📊 RSI: {rsi:.2f} | Prev: {self.rsi_prev:.2f}\n"
+            f"📊 RSI: {rsi:.2f} | Prev(10m): {self.rsi_rep_prev:.2f}\n"
             f"🛡️ Config: RSI &lt; {self.rsi_buy_level} | SL: {self.stop_loss_pct}%\n{div}\n"
             f"🏦 <b>LIVE PORTFOLIO</b>\n"
             f"💵 Cash: {thb:,.2f} THB\n"
@@ -136,6 +136,7 @@ class TitanMasterV11:
                 # --- BUY LOGIC ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
                     dist_ema = ((p - ema) / ema) * 100
+                    # ใช้ rsi_prev (5 วินาที) เพื่อเช็คจังหวะ Hook งัดขึ้น
                     if self.rsi_prev < self.rsi_buy_level and rsi > self.rsi_prev and dist_ema < self.ema_dist_limit:
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
@@ -174,12 +175,14 @@ class TitanMasterV11:
                             self.entry_rsi_val = 0.0; self.max_pnl_val = 0.0
                             self._save_state_db()
 
-                # --- Report Cycle ---
+                # --- Report Cycle (ทุก 10 นาที) ---
                 if time.time() - last_rep >= 600:
                     self._report(p, pnl, thb, coin, rsi)
                     last_rep = time.time()
+                    # อัปเดตเฉพาะค่าสำหรับรายงาน เพื่อให้รอบหน้าเห็นผลต่าง 10 นาที
+                    self.rsi_rep_prev = rsi 
 
-                # บันทึกค่า RSI เดิมไว้ (Update หลังส่ง Report เพื่อให้จำค่ารอบที่แล้ว)
+                # อัปเดตค่า RSI เดิมสำหรับเช็คจังหวะซื้อ (5 วินาที)
                 self.rsi_prev = rsi 
 
             except Exception as e: print(f"❌ Run Error: {e}")
