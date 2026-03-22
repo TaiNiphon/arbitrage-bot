@@ -145,7 +145,7 @@ class TitanMasterV11:
                 elif self.last_action == "buy" and coin > 0:
                     self.max_pnl_val = max(self.max_pnl_val, pnl)
                     self.highest_price = max(self.highest_price, p)
-                    trail_price = self.highest_price - (atr * 2.0)
+                    trail_price = self.highest_price - (atr * 3.0)
 
                     if pnl >= 1.2: 
                         self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
