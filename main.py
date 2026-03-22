@@ -15,10 +15,10 @@ class TitanMasterV11:
 
         # --- Turbo Strategy Settings (Dynamic from Railway) ---
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) 
-        self.rsi_buy_level = float(os.getenv("RSI_BUY_MAX", "28.0")) # ปรับเป็น 28
+        self.rsi_buy_level = float(os.getenv("RSI_BUY_MAX", "28.0")) 
         self.tp_target = 10.0         
-        self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "1.2")) # เพิ่มตัวแปรระยะห่าง EMA
-        self.check_interval = int(os.getenv("CHECK_INTERVAL", "5")) # ปรับเป็น 5 วินาที
+        self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "1.2")) 
+        self.check_interval = int(os.getenv("CHECK_INTERVAL", "5")) 
 
         # --- Tracking Variables ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
@@ -77,7 +77,6 @@ class TitanMasterV11:
 
     def update_indicators(self):
         try:
-            # ดึงข้อมูล 15 นาที เพื่อคำนวณ RSI/EMA
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
             c = np.array(res['c'], dtype=float)
             ema = self.calculate_ema(c, 20)
@@ -130,15 +129,12 @@ class TitanMasterV11:
                 if not d: time.sleep(10); continue
                 p, ema, rsi, atr = d['price'], d['ema'], d['rsi'], d['atr']
 
-                # คำนวณ P/L หักค่าธรรมเนียมจริง
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
-                # --- BUY LOGIC (Fast Response) ---
-                if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300: # ลด Cool down เหลือ 5 นาที
+                # --- BUY LOGIC ---
+                if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
                     dist_ema = ((p - ema) / ema) * 100
-                    
-                    # เงื่อนไข RSI Hook + ระยะห่าง EMA ที่กว้างขึ้น
                     if self.rsi_prev < self.rsi_buy_level and rsi > self.rsi_prev and dist_ema < self.ema_dist_limit:
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
@@ -149,12 +145,9 @@ class TitanMasterV11:
                             self.max_pnl_val = 0.0
                             self.entry_trend = "UpTrend" if p > ema else "DownTrend"
                             self._save_state_db()
-                            self.notify(
-                                f"<b>🚀 ENTRY (TURBO): {p:,.2f}</b>\n"
-                                f"📊 RSI: {rsi:.1f} | EMA Dist: {dist_ema:.2f}%"
-                            )
-                    
-                # --- SELL LOGIC (Trailing & Protection) ---
+                            self.notify(f"<b>🚀 ENTRY (TURBO): {p:,.2f}</b>\n📊 RSI: {rsi:.1f} | EMA Dist: {dist_ema:.2f}%")
+
+                # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0:
                     self.max_pnl_val = max(self.max_pnl_val, pnl)
                     self.highest_price = max(self.highest_price, p)
@@ -175,24 +168,21 @@ class TitanMasterV11:
                         profit_thb = (coin * p * 0.9975) - (self.total_units * self.avg_price * 1.0025)
                         if self.place_order("sell", coin):
                             self._log_trade_db_v11("SELL", p, pnl, profit_thb, reason, rsi)
-                            self.notify(
-                                f"<b>💰 EXIT (TURBO): {p:,.2f}</b>\n"
-                                f"Reason: {reason}\n"
-                                f"Profit: <b>{profit_thb:+.2f} THB</b>\n"
-                                f"Max P/L: {self.max_pnl_val:+.2f}%"
-                            )
+                            self.notify(f"<b>💰 EXIT (TURBO): {p:,.2f}</b>\nReason: {reason}\nProfit: <b>{profit_thb:+.2f} THB</b>\nMax P/L: {self.max_pnl_val:+.2f}%")
                             self.last_action = "sell"; self.avg_price = 0; self.last_sell_time = time.time()
                             self.entry_rsi_val = 0.0; self.max_pnl_val = 0.0
                             self._save_state_db()
 
-                self.rsi_prev = rsi # อัปเดตค่า RSI เดิมเสมอ
-
-                # --- Report Cycle (10 Mins) ---
+                # --- Report Cycle ---
                 if time.time() - last_rep >= 600:
-                    self._report(p, pnl, thb, coin, rsi); last_rep = time.time()
+                    self._report(p, pnl, thb, coin, rsi)
+                    last_rep = time.time()
+
+                # อัปเดตค่า RSI เดิมไว้ใช้ในรอบถัดไป (วางไว้ท้ายสุดเพื่อให้ Report แสดงค่า Prev จริง)
+                self.rsi_prev = rsi 
 
             except Exception as e: print(f"❌ Run Error: {e}")
-            time.sleep(self.check_interval) # ใช้ค่าจาก Railway (5 วินาที)
+            time.sleep(self.check_interval)
 
     def _get_hold_time(self):
         if self.entry_time:
@@ -247,5 +237,5 @@ class TitanMasterV11:
         try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
-    if __name__ == "__main__":
-        TitanMasterV11().run()
+if __name__ == "__main__":
+    TitanMasterV11().run()
