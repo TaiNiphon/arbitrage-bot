@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanMasterV11:
     def __init__(self):
-        print("🛡️ Booting TITAN MASTER V.11.2 (Turbo Edition)...")
+        print("🛡️ Booting TITAN MASTER V.11.2 (Final Insights Edition)...")
         # --- Environment Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
@@ -24,7 +24,7 @@ class TitanMasterV11:
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
         self.rsi_prev = 50.0       # สำหรับเช็ค Hook (5 วินาที)
-        self.rsi_rep_prev = 50.0   # สำหรับโชว์ใน Report (10 นาที)
+        self.rsi_rep_prev = 50.0   # สำหรับโชว์ใน Report (เทียบ 10 นาทีที่แล้ว)
         self.entry_rsi_val = 0.0      
         self.entry_time = None        
         self.max_pnl_val = 0.0        
@@ -32,7 +32,7 @@ class TitanMasterV11:
 
         self._init_db()
         self._load_state_db()
-        self.notify(f"<b>🚀 TITAN MASTER V.11.2 TURBO Active</b>\nInterval: {self.check_interval}s | RSI Buy: {self.rsi_buy_level}")
+        self.notify(f"<b>🚀 TITAN MASTER V.11.2 Active</b>\nInterval: {self.check_interval}s | RSI Buy: {self.rsi_buy_level}")
 
     def _init_db(self):
         try:
@@ -91,15 +91,19 @@ class TitanMasterV11:
         coin_val = coin * price; total = thb + coin_val
         growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
         diff_thb = total - self.initial_equity
-        
         dist_ema = ((price - ema) / ema) * 100 if ema > 0 else 0
-        now_str = datetime.now(timezone(timedelta(hours=7))).strftime('%Y-%m-%d %H:%M:%S')
+        
+        now_str = datetime.now(timezone(timedelta(hours=7))).strftime('%Y-%m-%d  %H:%M:%S')
         div = "━━━━━━━━━━━━━━━"
 
-        # ระบบสัญลักษณ์แสดงสถานะเงื่อนไข (Decision Insights)
+        # --- Decision Logic (🟢/🔴) ---
         rsi_icon = "🟢" if rsi < self.rsi_buy_level else "🔴"
         ema_icon = "🟢" if abs(dist_ema) < self.ema_dist_limit else "🔴"
-        hook_icon = "🟢" if rsi > self.rsi_prev else "🔴"
+        
+        # Check RSI Hook (เทียบกับ 5 วินาทีที่แล้ว) พร้อมโชว์ตัวเลขตามที่พี่ขอ
+        is_hooked = rsi > self.rsi_prev
+        hook_icon = "🟢" if is_hooked else "🔴"
+        hook_detail = f"{hook_icon} ({rsi:.2f} > {self.rsi_prev:.2f})"
 
         msg = (
             f"<b>🏆 TITAN MASTER V.11.2 ({self.symbol})</b>\n"
@@ -108,20 +112,17 @@ class TitanMasterV11:
             f"💰 Price: <b>{price:,.2f}</b> | P/L: <b>{pnl:+.2f}%</b>\n"
             f"📊 RSI: {rsi:.2f} | Prev(10m): {self.rsi_rep_prev:.2f} {rsi_icon}\n"
             f"📉 EMA Dist: <b>{dist_ema:+.2f}%</b> (L: {self.ema_dist_limit}%) {ema_icon}\n"
-            f"🪝 RSI Hook: {hook_icon} (RSI > Prev)\n{div}\n"
+            f"🪝 RSI Hook: {hook_detail}\n{div}\n"
             f"🏦 <b>LIVE PORTFOLIO</b>\n"
-            f"💵 Cash: {thb:,.2f} THB\n"
-            f"💠 {self.symbol.split('_')[0]}: {coin:.4f} ({coin_val:,.2f} THB)\n"
-            f"💎 Equity: <b>{total:,.2f} THB</b>\n"
-            f"🚀 Growth: {growth:+.2f}% (<b>{diff_thb:,.2f}</b>)\n{div}\n"
+            f"Cash: {thb:,.2f} THB\n"
+            f"{self.symbol.split('_')[0]}: {coin:.4f} ({coin_val:,.2f} THB)\n"
+            f"Equity: <b>{total:,.2f} THB</b>\n"
+            f"Growth: {growth:+.2f}% (<b>{diff_thb:,.2f}</b>)\n{div}\n"
         )
 
         if self.last_action == "buy" and coin > 0:
             sl_dist = ((price - self.dynamic_sl) / self.dynamic_sl * 100) if self.dynamic_sl > 0 else 0
-            msg += (
-                f"🛡️ SL: {self.dynamic_sl:,.2f} (<b>{sl_dist:+.2f}%</b>)\n"
-                f"📈 Max P/L: <b>{self.max_pnl_val:+.2f}%</b>"
-            )
+            msg += f"🛡️ SL: {self.dynamic_sl:,.2f} (<b>{sl_dist:+.2f}%</b>)\n📈 Max P/L: <b>{self.max_pnl_val:+.2f}%</b>"
         else:
             msg += f"💤 Status: <b>Searching for Entry...</b>"
 
@@ -138,10 +139,9 @@ class TitanMasterV11:
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
-                # --- BUY LOGIC (เช็คทุก 5 วินาที) ---
+                # --- BUY LOGIC ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
                     dist_ema = ((p - ema) / ema) * 100
-                    # เงื่อนไข: RSI ต่ำกว่าจุดซื้อ AND RSI เริ่มงัดหัวขึ้น(Hook) AND ระยะห่างจากเส้น EMA อยู่ในเกณฑ์
                     if rsi < self.rsi_buy_level and rsi > self.rsi_prev and abs(dist_ema) < self.ema_dist_limit:
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
@@ -152,7 +152,7 @@ class TitanMasterV11:
                             self.max_pnl_val = 0.0
                             self.entry_trend = "UpTrend" if p > ema else "DownTrend"
                             self._save_state_db()
-                            self.notify(f"<b>🚀 ENTRY (TURBO): {p:,.2f}</b>\n📊 RSI: {rsi:.2f} | EMA Dist: {dist_ema:.2f}%")
+                            self.notify(f"<b>🚀 ENTRY (TURBO): {p:,.2f}</b>\n📊 RSI: {rsi:.2f} | Hook: {rsi:.2f}>{self.rsi_prev:.2f}")
 
                 # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0:
@@ -160,7 +160,6 @@ class TitanMasterV11:
                     self.highest_price = max(self.highest_price, p)
                     trail_price = self.highest_price - (atr * 3.0)
 
-                    # Profit Lock: ถ้ากำไร > 1.2% ให้ล็อคจุดทุนไว้ก่อน
                     if pnl >= 1.2: 
                         self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
 
@@ -185,7 +184,6 @@ class TitanMasterV11:
                 if time.time() - last_rep >= 600:
                     self._report(p, ema, rsi, pnl, thb, coin)
                     last_rep = time.time()
-                    # บันทึกค่า RSI ลงรายงาน เพื่อไว้เทียบกับ 10 นาทีถัดไป
                     self.rsi_rep_prev = rsi 
 
                 # อัปเดตค่า RSI เดิมสำหรับเช็คจังหวะ Hook (อัปเดตทุก 5 วินาที)
@@ -194,7 +192,7 @@ class TitanMasterV11:
             except Exception as e: print(f"❌ Run Error: {e}")
             time.sleep(self.check_interval)
 
-    # --- Database & Utility (ระบบหลังบ้าน) ---
+    # --- Database & Utility functions ---
     def _get_hold_time(self):
         if self.entry_time:
             now = datetime.now(timezone(timedelta(hours=7)))
