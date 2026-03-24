@@ -11,7 +11,7 @@ class TitanProMaxV12:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
-        
+
         # --- Professional Settings ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2000")).replace(',', ''))
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.0")) # ความเสี่ยง 2% ต่อไม้
@@ -116,12 +116,12 @@ class TitanProMaxV12:
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
                     active_rsi_limit = self.rsi_buy_base if p > ema50 else (self.rsi_buy_base - 5.0)
                     dist_ema = ((p - ema20) / ema20) * 100
-                    
+
                     if rsi < active_rsi_limit and rsi > self.rsi_prev and abs(dist_ema) < self.ema_dist_limit:
                         total_equity = thb + (coin * p)
                         risk_amt = (total_equity * (self.risk_per_trade / 100)) / (self.stop_loss_pct / 100)
                         buy_amt = min(thb * 0.98, risk_amt)
-                        
+
                         if buy_amt >= 10 and self.place_order("buy", buy_amt):
                             self.avg_price = p; self.total_units = buy_amt / p
                             self.last_action = "buy"; self.highest_price = p
@@ -138,7 +138,7 @@ class TitanProMaxV12:
                     trail_price = self.highest_price - (atr * 2.5)
                     if pnl >= 1.2: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
                     self.dynamic_sl = max(self.dynamic_sl, trail_price)
-                    
+
                     reason = None
                     if pnl >= 10.0: reason = "Take Profit 💰"
                     elif pnl <= -self.stop_loss_pct: reason = "Stop Loss 🔴"
