@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 
 class TitanProMaxV12:
     def __init__(self):
-        print("🛡️ Booting TITAN PRO MAX V.12.1 (Official Final)...")
-        # --- Config & Variables (ดึงจากระบบ Cloud/Railway) ---
+        print("🛡️ Booting TITAN PRO MAX V.12.1.2 (Definitive Edition)...")
+        # --- Config & Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -22,22 +22,23 @@ class TitanProMaxV12:
         self.report_interval = int(os.getenv("REPORT_INTERVAL", "600"))
         self.fee_pct = float(os.getenv("FEE_PCT", "0.25")) / 100
 
-        # --- Tracking System (Enhanced Memory) ---
+        # --- Tracking System (Clean State) ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
         self.rsi_prev = None; self.rsi_memory = None 
         self.entry_rsi_val = 0.0; self.entry_time = None
         self.max_pnl_val = 0.0; self.entry_trend = "Unknown"
 
-        self._init_db(); self._load_state_db()
+        self._init_db()
+        self._load_state_db()
 
-        # ดึงค่า RSI ตลาดทันที เพื่อให้รายงานฉบับแรกมีค่า Prev ที่ถูกต้อง
-        init_data = self.calculate_indicators()
-        if init_data:
-            self.rsi_prev = init_data['rsi']
-            self.rsi_memory = init_data['rsi']
+        # ดึงค่า Indicator ทันทีที่รัน เพื่อป้องกันค่า RSI หลอกในรายงานแรก
+        d = self.calculate_indicators()
+        if d:
+            self.rsi_prev = d['rsi']
+            self.rsi_memory = d['rsi']
 
-        self.notify(f"<b>💎 TITAN PRO MAX V.12.1 Active</b>\nMode: Full-Professional | Risk: {self.risk_per_trade}%")
+        self.notify(f"<b>💎 TITAN PRO MAX V.12.1.2 Active</b>\nMode: Full-Professional | Risk: {self.risk_per_trade}%")
 
     def _init_db(self):
         try:
@@ -87,7 +88,6 @@ class TitanProMaxV12:
         market_trend = "BULLISH 📈" if price > ema50 else "BEARISH 📉"
         trend_icon = "💎" if price > ema50 else "⚠️"
         
-        # ปรับ Logic ไอคอน RSI ให้สัมพันธ์กับค่า Memory
         hook_icon = "🟢" if rsi > (self.rsi_memory or 0) else "🔴"
         prev_rsi_val = self.rsi_memory if self.rsi_memory is not None else rsi
 
@@ -127,7 +127,6 @@ class TitanProMaxV12:
                 if not d: time.sleep(10); continue
                 p, ema20, ema50, rsi, atr = d['price'], d['ema20'], d['ema50'], d['rsi'], d['atr']
 
-                # คำนวณ PNL แบบหักค่าธรรมเนียม
                 buy_fee = 1 + self.fee_pct; sell_fee = 1 - self.fee_pct
                 pnl = (((p * sell_fee) - (self.avg_price * buy_fee)) / (self.avg_price * buy_fee) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
@@ -163,8 +162,9 @@ class TitanProMaxV12:
                     self.max_pnl_val = max(self.max_pnl_val, pnl)
                     self.highest_price = max(self.highest_price, p)
                     trail_price = self.highest_price - (atr * 2.5)
+                    
                     if pnl >= 1.2: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
-                    self.dynamic_sl = max(self.dynamic_val, trail_price) if hasattr(self, 'dynamic_val') else max(self.dynamic_sl, trail_price) # Safety check
+                    self.dynamic_sl = max(self.dynamic_sl, trail_price)
 
                     reason = None
                     if pnl >= 10.0: reason = "Take Profit 💰"
@@ -178,7 +178,6 @@ class TitanProMaxV12:
                             self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nReason: {reason}\nProfit: <b>{profit_thb:+.2f} THB</b>")
                             self.last_action = "sell"; self.last_sell_time = time.time(); self._save_state_db()
 
-                # รายงานผลตามรอบ
                 if time.time() - last_rep >= self.report_interval:
                     self._report(p, ema20, ema50, rsi, pnl, thb, coin)
                     last_rep = time.time()
@@ -186,7 +185,6 @@ class TitanProMaxV12:
             except Exception as e: print(f"❌ Run Error: {e}")
             time.sleep(self.check_interval)
 
-    # --- API & Helper Functions (Bitkub V.3) ---
     def _log_trade(self, p, pnl, thb, reason, rsi):
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
