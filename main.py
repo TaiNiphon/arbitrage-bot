@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 class TitanProMaxV12:
     def __init__(self):
         print("🛡️ Booting TITAN PRO MAX V.12.1 (Full-Scale Edition)...")
-        # --- ดึงค่าจาก Variables (ครบทุกตัวตามรูป 2689.jpg) ---
+        # --- Config & Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -12,7 +12,7 @@ class TitanProMaxV12:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- Settings จาก Dashboard ---
+        # --- Settings ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2000")).replace(',', ''))
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.0")) 
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "3.0"))
@@ -22,14 +22,21 @@ class TitanProMaxV12:
         self.report_interval = int(os.getenv("REPORT_INTERVAL", "600"))
         self.fee_pct = float(os.getenv("FEE_PCT", "0.25")) / 100
 
-        # --- Tracking System (Deep Memory) ---
+        # --- Tracking System (Enhanced Memory) ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
-        self.rsi_prev = 50.0; self.rsi_memory = 50.0 
+        self.rsi_prev = None; self.rsi_memory = None  # เริ่มต้นเป็น None เพื่อดึงค่าจริง
         self.entry_rsi_val = 0.0; self.entry_time = None
         self.max_pnl_val = 0.0; self.entry_trend = "Unknown"
 
         self._init_db(); self._load_state_db()
+        
+        # ดึงค่า RSI จริงทันทีเพื่อป้องกันค่า 50.00 หลอกในรายงานแรก
+        init_data = self.calculate_indicators()
+        if init_data:
+            self.rsi_prev = init_data['rsi']
+            self.rsi_memory = init_data['rsi']
+
         self.notify(f"<b>💎 TITAN PRO MAX V.12.1 Active</b>\nMode: Full-Professional | Risk: {self.risk_per_trade}%")
 
     def _init_db(self):
@@ -79,8 +86,11 @@ class TitanProMaxV12:
         dist_ema = ((price - ema20) / ema20) * 100
         market_trend = "BULLISH 📈" if price > ema50 else "BEARISH 📉"
         trend_icon = "💎" if price > ema50 else "⚠️"
-        hook_icon = "🟢" if rsi > self.rsi_memory else "🔴"
         
+        # แสดงไอคอนตามทิศทาง RSI
+        hook_icon = "🟢" if rsi > (self.rsi_memory or 0) else "🔴"
+        prev_rsi_val = self.rsi_memory if self.rsi_memory is not None else rsi
+
         now_dt = datetime.now(timezone(timedelta(hours=7)))
         date_str = now_dt.strftime('%d/%m/%Y')
         time_str = now_dt.strftime('%H:%M:%S')
@@ -94,7 +104,7 @@ class TitanProMaxV12:
             f"<b>📊 MARKET INTELLIGENCE</b>\n"
             f"• Price    : <b>{price:,.2f}</b> THB\n"
             f"• Trend    : <b>{market_trend}</b>\n"
-            f"• RSI (14) : <code>{rsi:.2f}</code> {hook_icon} (Prev:{self.rsi_memory:.2f})\n"
+            f"• RSI (14) : <code>{rsi:.2f}</code> {hook_icon} (Prev:{prev_rsi_val:.2f})\n"
             f"• EMA Dist : <code>{dist_ema:+.2f}%</code>\n{div}\n"
             f"<b>🏦 PORTFOLIO ANALYSIS</b>\n"
             f"• <b>EQUITY</b>  : <b>{total_equity:,.2f} THB</b>\n"
@@ -116,16 +126,16 @@ class TitanProMaxV12:
                 d = self.calculate_indicators()
                 if not d: time.sleep(10); continue
                 p, ema20, ema50, rsi, atr = d['price'], d['ema20'], d['ema50'], d['rsi'], d['atr']
-                
-                # คำนวณ PNL แบบหักค่าธรรมเนียมตามตัวแปร FEE_PCT จริงๆ
-                buy_fee = 1 + self.fee_pct
-                sell_fee = 1 - self.fee_pct
+
+                # คำนวณ PNL แบบหักค่าธรรมเนียมจริง
+                buy_fee = 1 + self.fee_pct; sell_fee = 1 - self.fee_pct
                 pnl = (((p * sell_fee) - (self.avg_price * buy_fee)) / (self.avg_price * buy_fee) * 100) if self.avg_price > 0 else 0
-                
                 thb, coin = self.get_balance()
 
-                # Logic จำค่า RSI (อัปเดตเฉพาะเมื่อค่าเปลี่ยน เพื่อป้องกันค่าซ้ำ)
-                if abs(rsi - self.rsi_prev) > 0.01:
+                # --- Smart RSI Memory Update ---
+                if self.rsi_prev is None: # ไม้แรก
+                    self.rsi_prev = rsi; self.rsi_memory = rsi
+                elif rsi != self.rsi_prev: # มีการขยับ
                     self.rsi_memory = self.rsi_prev
                     self.rsi_prev = rsi
 
@@ -134,7 +144,7 @@ class TitanProMaxV12:
                     active_rsi_limit = self.rsi_buy_base if p > ema50 else (self.rsi_buy_base - 5.0)
                     dist_ema = ((p - ema20) / ema20) * 100
 
-                    if rsi < active_rsi_limit and rsi > self.rsi_memory and abs(dist_ema) < self.ema_dist_limit:
+                    if rsi < active_rsi_limit and rsi > (self.rsi_memory or 0) and abs(dist_ema) < self.ema_dist_limit:
                         total_equity = thb + (coin * p)
                         risk_amt = (total_equity * (self.risk_per_trade / 100)) / (self.stop_loss_pct / 100)
                         buy_amt = min(thb * 0.98, risk_amt)
@@ -153,7 +163,6 @@ class TitanProMaxV12:
                     self.max_pnl_val = max(self.max_pnl_val, pnl)
                     self.highest_price = max(self.highest_price, p)
                     trail_price = self.highest_price - (atr * 2.5)
-                    # Break-even System
                     if pnl >= 1.2: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
                     self.dynamic_sl = max(self.dynamic_sl, trail_price)
 
@@ -169,7 +178,7 @@ class TitanProMaxV12:
                             self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nReason: {reason}\nProfit: <b>{profit_thb:+.2f} THB</b>")
                             self.last_action = "sell"; self.last_sell_time = time.time(); self._save_state_db()
 
-                # รายงานผลตามรอบ REPORT_INTERVAL
+                # รายงานตามรอบ
                 if time.time() - last_rep >= self.report_interval:
                     self._report(p, ema20, ema50, rsi, pnl, thb, coin)
                     last_rep = time.time()
