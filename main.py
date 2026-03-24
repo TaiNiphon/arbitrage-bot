@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanMasterV11:
     def __init__(self):
-        print("🛡️ Booting TITAN MASTER V.11.2 (Final Insights Edition)...")
+        print("🛡️ Booting TITAN MASTER V.11.2 (Fixed Hook Edition)...")
         # --- Environment Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
@@ -14,17 +14,17 @@ class TitanMasterV11:
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "10000")).replace(',', ''))
 
         # --- Turbo Strategy Settings ---
-        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "2.0")) 
-        self.rsi_buy_level = float(os.getenv("RSI_BUY_MAX", "28.0")) 
+        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "3.0")) # ปรับตามใจถึง
+        self.rsi_buy_level = float(os.getenv("RSI_BUY_MAX", "32.0")) # ปรับตามใจถึง
         self.tp_target = 10.0         
-        self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "1.2")) 
+        self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "1.8")) # ปรับตามใจถึง
         self.check_interval = int(os.getenv("CHECK_INTERVAL", "5")) 
 
         # --- Tracking Variables ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
-        self.rsi_prev = 50.0       # สำหรับเช็ค Hook (5 วินาที)
-        self.rsi_rep_prev = 50.0   # สำหรับโชว์ใน Report (เทียบ 10 นาทีที่แล้ว)
+        self.rsi_prev = 50.0       # สำหรับเช็ค Hook (5 วินาทีที่แล้ว)
+        self.rsi_rep_prev = 50.0   # สำหรับโชว์ใน Report (10 นาทีที่แล้ว)
         self.entry_rsi_val = 0.0      
         self.entry_time = None        
         self.max_pnl_val = 0.0        
@@ -92,15 +92,15 @@ class TitanMasterV11:
         growth = ((total - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
         diff_thb = total - self.initial_equity
         dist_ema = ((price - ema) / ema) * 100 if ema > 0 else 0
-        
+
         now_str = datetime.now(timezone(timedelta(hours=7))).strftime('%Y-%m-%d  %H:%M:%S')
         div = "━━━━━━━━━━━━━━━"
 
-        # --- Decision Logic (🟢/🔴) ---
+        # --- Decision Logic Icons ---
         rsi_icon = "🟢" if rsi < self.rsi_buy_level else "🔴"
         ema_icon = "🟢" if abs(dist_ema) < self.ema_dist_limit else "🔴"
         
-        # Check RSI Hook (เทียบกับ 5 วินาทีที่แล้ว) พร้อมโชว์ตัวเลขตามที่พี่ขอ
+        # --- Fixed RSI Hook Logic for Report ---
         is_hooked = rsi > self.rsi_prev
         hook_icon = "🟢" if is_hooked else "🔴"
         hook_detail = f"{hook_icon} ({rsi:.2f} > {self.rsi_prev:.2f})"
@@ -142,6 +142,7 @@ class TitanMasterV11:
                 # --- BUY LOGIC ---
                 if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
                     dist_ema = ((p - ema) / ema) * 100
+                    # เช็คเงื่อนไข RSI Hook เทียบกับค่า rsi_prev (5 วินาทีที่แล้ว)
                     if rsi < self.rsi_buy_level and rsi > self.rsi_prev and abs(dist_ema) < self.ema_dist_limit:
                         if self.place_order("buy", thb * 0.98):
                             self.avg_price = p; self.total_units = (thb * 0.975) / p
@@ -180,19 +181,19 @@ class TitanMasterV11:
                             self.entry_rsi_val = 0.0; self.max_pnl_val = 0.0
                             self._save_state_db()
 
-                # --- Report Cycle (ทุก 10 นาที) ---
+                # --- Report Cycle (10 นาที) ---
                 if time.time() - last_rep >= 600:
                     self._report(p, ema, rsi, pnl, thb, coin)
+                    self.rsi_rep_prev = rsi # เก็บค่า RSI ปัจจุบันไว้เป็น Prev สำหรับรายงานรอบหน้า
                     last_rep = time.time()
-                    self.rsi_rep_prev = rsi 
 
-                # อัปเดตค่า RSI เดิมสำหรับเช็คจังหวะ Hook (อัปเดตทุก 5 วินาที)
+                # --- CRITICAL: อัปเดต RSI เดิม "หลังจาก" เช็ค Buy Logic ---
+                # เพื่อให้รอบถัดไป (อีก 5 วินาที) มีค่า RSI ของรอบนี้ไว้เปรียบเทียบ
                 self.rsi_prev = rsi 
 
             except Exception as e: print(f"❌ Run Error: {e}")
             time.sleep(self.check_interval)
 
-    # --- Database & Utility functions ---
     def _get_hold_time(self):
         if self.entry_time:
             now = datetime.now(timezone(timedelta(hours=7)))
