@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanProMaxV12:
     def __init__(self):
-        print("🛡️ Booting TITAN PRO MAX V.12.1.2 (Definitive Edition)...")
+        print("🛡️ Booting TITAN PRO MAX V.12.3 (Final Polish)...")
         # --- Config & Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
@@ -12,33 +12,25 @@ class TitanProMaxV12:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- Professional Settings ---
+        # --- Professional Settings (Auto-Synced with Railway) ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2000")).replace(',', ''))
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.0")) 
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "3.0"))
-        self.rsi_buy_base = float(os.getenv("RSI_BUY_MAX", "32.0"))
-        self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "1.8"))
-        self.check_interval = int(os.getenv("CHECK_INTERVAL", "5"))
+        self.rsi_buy_base = float(os.getenv("RSI_BUY_MAX", "38.0"))
+        self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "5.0")) 
+        self.check_interval = int(os.getenv("CHECK_INTERVAL", "3"))
         self.report_interval = int(os.getenv("REPORT_INTERVAL", "600"))
-        self.fee_pct = float(os.getenv("FEE_PCT", "0.25")) / 100
+        self.fee_pct = 0.25 / 100
 
-        # --- Tracking System (Clean State) ---
+        # --- Tracking System ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.last_sell_time = 0
-        self.rsi_prev = None; self.rsi_memory = None 
+        self.rsi_history = [] # ใช้ List เก็บค่า RSI ย้อนหลังแทน Memory ตัวเดียว
         self.entry_rsi_val = 0.0; self.entry_time = None
         self.max_pnl_val = 0.0; self.entry_trend = "Unknown"
 
-        self._init_db()
-        self._load_state_db()
-
-        # ดึงค่า Indicator ทันทีที่รัน เพื่อป้องกันค่า RSI หลอกในรายงานแรก
-        d = self.calculate_indicators()
-        if d:
-            self.rsi_prev = d['rsi']
-            self.rsi_memory = d['rsi']
-
-        self.notify(f"<b>💎 TITAN PRO MAX V.12.1.2 Active</b>\nMode: Full-Professional | Risk: {self.risk_per_trade}%")
+        self._init_db(); self._load_state_db()
+        self.notify(f"<b>💎 TITAN V.12.3 ACTIVE</b>\nMode: Precision Entry\nRSI Target: {self.rsi_buy_base}")
 
     def _init_db(self):
         try:
@@ -81,44 +73,6 @@ class TitanProMaxV12:
         for x in p[1:]: e = (x * a) + (e * (1 - a))
         return e
 
-    def _report(self, price, ema20, ema50, rsi, pnl, thb, coin, status="MONITORING"):
-        coin_val = coin * price; total_equity = thb + coin_val
-        growth_pct = ((total_equity - self.initial_equity) / self.initial_equity) * 100 if self.initial_equity > 0 else 0
-        dist_ema = ((price - ema20) / ema20) * 100
-        market_trend = "BULLISH 📈" if price > ema50 else "BEARISH 📉"
-        trend_icon = "💎" if price > ema50 else "⚠️"
-        
-        hook_icon = "🟢" if rsi > (self.rsi_memory or 0) else "🔴"
-        prev_rsi_val = self.rsi_memory if self.rsi_memory is not None else rsi
-
-        now_dt = datetime.now(timezone(timedelta(hours=7)))
-        date_str = now_dt.strftime('%d/%m/%Y')
-        time_str = now_dt.strftime('%H:%M:%S')
-        div = "━" * 18
-
-        msg = (
-            f"<b>{trend_icon} TITAN PRO MAX V.12 | {self.symbol}</b>\n"
-            f"<code>Status : {status}</code>\n"
-            f"<code>Date   : {date_str}</code>\n"
-            f"<code>Time   : {time_str}</code>\n{div}\n"
-            f"<b>📊 MARKET INTELLIGENCE</b>\n"
-            f"• Price    : <b>{price:,.2f}</b> THB\n"
-            f"• Trend    : <b>{market_trend}</b>\n"
-            f"• RSI (14) : <code>{rsi:.2f}</code> {hook_icon} (Prev:{prev_rsi_val:.2f})\n"
-            f"• EMA Dist : <code>{dist_ema:+.2f}%</code>\n{div}\n"
-            f"<b>🏦 PORTFOLIO ANALYSIS</b>\n"
-            f"• <b>EQUITY</b>  : <b>{total_equity:,.2f} THB</b>\n"
-            f"• <b>GROWTH</b>  : <b>{growth_pct:+.2f}%</b>\n"
-            f"• Cash    : {thb:,.2f} | Assets: {coin:.4f}\n{div}\n"
-        )
-        if self.last_action == "buy" and coin > 0:
-            sl_dist = ((price - self.dynamic_sl) / self.dynamic_sl * 100) if self.dynamic_sl > 0 else 0
-            msg += f"<b>🛡️ RISK MGMT</b>\n• P/L Net : <b>{pnl:+.2f}%</b>\n• StopLoss: {self.dynamic_sl:,.2f} (<code>{sl_dist:+.2f}%</code>)"
-        else:
-            risk_thb = total_equity * (self.risk_per_trade/100)
-            msg += f"<b>🛡️ STRATEGY</b>\n• Risk/Trade: {self.risk_per_trade}% (<code>~{risk_thb:,.2f}</code>)\n• Status: <i>Searching Entry...</i>"
-        self.notify(msg)
-
     def run(self):
         last_rep = 0
         while True:
@@ -127,71 +81,80 @@ class TitanProMaxV12:
                 if not d: time.sleep(10); continue
                 p, ema20, ema50, rsi, atr = d['price'], d['ema20'], d['ema50'], d['rsi'], d['atr']
 
+                # เก็บประวัติ RSI เพื่อเช็คการงัดหัว (Hook)
+                self.rsi_history.append(rsi)
+                if len(self.rsi_history) > 2: self.rsi_history.pop(0)
+                
+                prev_rsi = self.rsi_history[0] if len(self.rsi_history) > 1 else rsi
                 buy_fee = 1 + self.fee_pct; sell_fee = 1 - self.fee_pct
                 pnl = (((p * sell_fee) - (self.avg_price * buy_fee)) / (self.avg_price * buy_fee) * 100) if self.avg_price > 0 else 0
                 thb, coin = self.get_balance()
 
-                # --- Smart RSI Memory Update ---
-                if self.rsi_prev is None:
-                    self.rsi_prev = rsi; self.rsi_memory = rsi
-                elif abs(rsi - self.rsi_prev) > 0.001:
-                    self.rsi_memory = self.rsi_prev
-                    self.rsi_prev = rsi
-
-                # --- BUY LOGIC ---
-                if self.last_action == "sell" and (time.time() - self.last_sell_time) > 300:
-                    active_rsi_limit = self.rsi_buy_base if p > ema50 else (self.rsi_buy_base - 5.0)
+                # --- BUY LOGIC (Precision Edition) ---
+                if self.last_action == "sell":
                     dist_ema = ((p - ema20) / ema20) * 100
-
-                    if rsi < active_rsi_limit and rsi > (self.rsi_memory or 0) and abs(dist_ema) < self.ema_dist_limit:
+                    
+                    # เช็คเงื่อนไข: RSI ต่ำ + RSI เริ่มนิ่งหรือเงย (>=) + ระยะ EMA ไม่ห่างจนน่ากลัว
+                    if rsi <= self.rsi_buy_base and rsi >= prev_rsi and abs(dist_ema) <= self.ema_dist_limit:
                         total_equity = thb + (coin * p)
                         risk_amt = (total_equity * (self.risk_per_trade / 100)) / (self.stop_loss_pct / 100)
-                        buy_amt = min(thb * 0.98, risk_amt)
+                        buy_amt = min(thb * 0.98, risk_amt) # หักเผื่อไว้ 2% กันเงินไม่พอค่าธรรมเนียม
 
                         if buy_amt >= 10 and self.place_order("buy", buy_amt):
                             self.avg_price = p; self.total_units = buy_amt / p
                             self.last_action = "buy"; self.highest_price = p
                             self.dynamic_sl = p * (1 - (self.stop_loss_pct/100))
                             self.entry_rsi_val = rsi; self.entry_time = datetime.now(timezone(timedelta(hours=7)))
-                            self.entry_trend = "Bullish" if p > ema50 else "Bearish"
+                            self.entry_trend = "BULLISH" if p > ema50 else "BEARISH"
                             self.max_pnl_val = 0.0; self._save_state_db()
-                            self.notify(f"<b>🚀 ENTRY ({self.entry_trend}): {p:,.2f}</b>\nSize: {buy_amt:,.2f} THB | RSI: {rsi:.2f}")
+                            self.notify(f"<b>🚀 ENTRY: {p:,.2f}</b>\nRSI: {rsi:.2f} | Trend: {self.entry_trend}")
 
-                # --- SELL LOGIC ---
+                # --- SELL LOGIC (Trailing Edition) ---
                 elif self.last_action == "buy" and coin > 0:
                     self.max_pnl_val = max(self.max_pnl_val, pnl)
                     self.highest_price = max(self.highest_price, p)
-                    trail_price = self.highest_price - (atr * 2.5)
                     
-                    if pnl >= 1.2: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.0065)
-                    self.dynamic_sl = max(self.dynamic_sl, trail_price)
+                    # ขยับ Stop Loss ตามราคา (Trailing Stop)
+                    trail_dist = atr * 2.2 # ปรับให้ไวขึ้นเพื่อล็อคกำไร
+                    if p - trail_dist > self.dynamic_sl: self.dynamic_sl = p - trail_dist
+                    
+                    # ถ้ากำไรพ้น 1% ให้ยกจุด SL มากันทุนทันที (+0.5% กันค่าธรรมเนียม)
+                    if pnl >= 1.0: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.005)
 
                     reason = None
-                    if pnl >= 10.0: reason = "Take Profit 💰"
-                    elif pnl <= -self.stop_loss_pct: reason = "Stop Loss 🔴"
-                    elif p <= self.dynamic_sl: reason = "Trailing Stop 🛡️"
+                    if pnl >= 12.0: reason = "Take Profit 💰"
+                    elif p <= self.dynamic_sl: reason = "Trailing Stop/SL 🛡️"
 
                     if reason:
                         if self.place_order("sell", coin):
                             profit_thb = (coin * p * sell_fee) - (self.total_units * self.avg_price * buy_fee)
                             self._log_trade(p, pnl, profit_thb, reason, rsi)
-                            self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nReason: {reason}\nProfit: <b>{profit_thb:+.2f} THB</b>")
-                            self.last_action = "sell"; self.last_sell_time = time.time(); self._save_state_db()
+                            self.notify(f"<b>💰 EXIT: {p:,.2f}</b>\nProfit: <b>{profit_thb:+.2f} THB</b>\nReason: {reason}")
+                            self.last_action = "sell"; self._save_state_db()
 
                 if time.time() - last_rep >= self.report_interval:
-                    self._report(p, ema20, ema50, rsi, pnl, thb, coin)
+                    self._report(p, ema20, ema50, rsi, pnl, thb, coin, prev_rsi)
                     last_rep = time.time()
 
-            except Exception as e: print(f"❌ Run Error: {e}")
+            except Exception as e: print(f"❌ Error: {e}")
             time.sleep(self.check_interval)
 
-    def _log_trade(self, p, pnl, thb, reason, rsi):
-        try:
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            hold_min = (datetime.now(timezone(timedelta(hours=7))) - self.entry_time).total_seconds()/60 if self.entry_time else 0
-            cur.execute("INSERT INTO trade_history (time, side, price, pnl_pct, pnl_thb, reason, entry_rsi, exit_rsi, max_pnl_during_trade, hold_time_min, market_trend) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (datetime.now(timezone(timedelta(hours=7))), "SELL", p, pnl, thb, reason, self.entry_rsi_val, rsi, self.max_pnl_val, hold_min, self.entry_trend))
-            conn.commit(); cur.close(); conn.close()
-        except: pass
+    def _report(self, price, ema20, ema50, rsi, pnl, thb, coin, prev_rsi):
+        total_equity = thb + (coin * price)
+        growth = ((total_equity - self.initial_equity) / self.initial_equity) * 100
+        dist_ema = ((price - ema20) / ema20) * 100
+        trend = "BULLISH 📈" if price > ema50 else "BEARISH 📉"
+        hook = "🟢" if rsi >= prev_rsi else "🔴"
+
+        msg = (
+            f"<b>⚙️ TITAN V.12.3 | {self.symbol}</b>\n"
+            f"<code>Price : {price:,.2f} ({trend})</code>\n"
+            f"<code>RSI   : {rsi:.2f} {hook} (Prev:{prev_rsi:.2f})</code>\n"
+            f"<code>Dist  : {dist_ema:+.2f}%</code>\n"
+            f"<b>🏦 PORT</b>\n"
+            f"<code>Equity: {total_equity:,.2f} ({growth:+.2f}%)</code>"
+        )
+        self.notify(msg)
 
     def get_balance(self):
         try:
@@ -215,6 +178,14 @@ class TitanProMaxV12:
             sig = hmac.new(self.api_secret.encode(), (ts+method+path+(json.dumps(payload) if payload else "")).encode(), hashlib.sha256).hexdigest()
             headers.update({'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig})
         return requests.request(method, url, headers=headers, data=json.dumps(payload) if payload else "").json()
+
+    def _log_trade(self, p, pnl, thb, reason, rsi):
+        try:
+            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+            hold_min = (datetime.now(timezone(timedelta(hours=7))) - self.entry_time).total_seconds()/60 if self.entry_time else 0
+            cur.execute("INSERT INTO trade_history (time, side, price, pnl_pct, pnl_thb, reason, entry_rsi, exit_rsi, max_pnl_during_trade, hold_time_min, market_trend) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (datetime.now(timezone(timedelta(hours=7))), "SELL", p, pnl, thb, reason, self.entry_rsi_val, rsi, self.max_pnl_val, hold_min, self.entry_trend))
+            conn.commit(); cur.close(); conn.close()
+        except: pass
 
     def notify(self, m):
         try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
