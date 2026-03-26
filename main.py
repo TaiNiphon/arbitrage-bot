@@ -52,11 +52,9 @@ class TitanOmniV13:
             
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
             
-            # ถ้ามีเหรียญค้างในกระเป๋า (Asset > 0)
-            if coin > 0.1: # กำหนดขั้นต่ำไว้ป้องกันเศษเหรียญ
+            if coin > 0.1: # มีเหรียญค้าง
                 self.last_action = "buy"
                 self.total_units = coin
-                # ถ้าราคาปัจจุบันต่ำกว่าทุนเดิม ให้ใช้ราคาทุนที่พี่เคยเข้า (46.18) หรือใช้ราคาปัจจุบันถ้าหาไม่ได้
                 self.avg_price = 46.18 if current_price > 0 else 0 
                 self.highest_price = max(current_price, self.avg_price)
                 self.dynamic_sl = self.avg_price * (1 - (self.stop_loss_pct/100))
@@ -65,7 +63,7 @@ class TitanOmniV13:
                 cur.execute("INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl) VALUES (%s, %s, %s, %s, %s)", 
                             (self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl))
                 print(f"✅ Sync Found Assets: {coin} XRP. Status updated to BUY.")
-            else:
+            else: # ถือเงินสด
                 self.last_action = "sell"; self.avg_price = 0; self.total_units = 0
                 cur.execute("DELETE FROM bot_state")
                 cur.execute("INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl) VALUES (%s, %s, %s, %s, %s)", 
@@ -110,16 +108,33 @@ class TitanOmniV13:
     def _report(self, price, rsi, ema20, ema50, pnl, thb, coin):
         total = thb + (coin * price); growth = ((total - self.initial_equity) / self.initial_equity) * 100
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"<b>🛡️ TITAN OMNI V.13 | {self.symbol}</b>\n"
-               f"Date : {now.strftime('%d/%m/%Y')} | Time : {now.strftime('%H:%M:%S')}\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"Price: <b>{price:,.2f}</b> | RSI: {rsi:.2f} {'🟢' if rsi > (self.rsi_memory or 0) else '🔴'}\n"
-               f"Trend: {'BULLISH 📈' if price > ema50 else 'BEARISH 📉'} | Dist: {((price-ema20)/ema20*100):+.2f}%\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"Equity: <b>{total:,.2f}</b> ({growth:+.2f}%)\n"
-               f"Cash: {thb:,.2f} | Assets: {coin:.4f}\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"Status: {'Holding (PNL: '+str(round(pnl,2))+'%)' if self.last_action=='buy' else 'Searching Entry...'}")
+        
+        # --- รายงานแบบสมบูรณ์เหมือน V.12 แต่แม่นยำแบบ V.13 ---
+        msg = (
+            f"<b>🛡️ TITAN OMNI V.13 | {self.symbol}</b>\n"
+            f"Date   : {now.strftime('%d/%m/%Y')}\n"
+            f"Time   : {now.strftime('%H:%M:%S')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>📊 MARKET INTELLIGENCE</b>\n"
+            f"• Price : <b>{price:,.2f} THB</b>\n"
+            f"• Trend : {'BULLISH 📈' if price > ema50 else 'BEARISH 📉'}\n"
+            f"• RSI   : {rsi:.2f} {'🟢' if rsi > (self.rsi_memory or 0) else '🔴'} (Prev:{self.rsi_memory or 0:.2f})\n"
+            f"• Dist  : {((price-ema20)/ema20*100):+.2f}%\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>💰 PORTFOLIO ANALYSIS</b>\n"
+            f"• EQUITY : <b>{total:,.2f} THB</b>\n"
+            f"• GROWTH : {growth:+.2f}%\n"
+            f"• Cash   : {thb:,.2f} | Assets: {coin:.4f}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>🎯 STRATEGY</b>\n"
+            f"• Risk/Trade: {self.risk_per_trade}% (~{(total * (self.risk_per_trade/100)):,.2f})\n"
+        )
+
+        if self.last_action == "buy":
+            msg += f"• Status: <b>Holding Profit: {pnl:+.2f}%</b>"
+        else:
+            msg += f"• Status: <i>Searching Entry... (Target RSI:{self.rsi_buy_target})</i>"
+
         self.notify(msg)
 
     def run(self):
@@ -137,6 +152,7 @@ class TitanOmniV13:
                 dist = ((p - ema20) / ema20) * 100
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
+                # --- BUY LOGIC ---
                 if self.last_action == "sell" and rsi <= self.rsi_buy_target and rsi > (self.rsi_memory or 0) and abs(dist) <= self.ema_dist_limit:
                     risk_amt = ( (thb + (coin*p)) * (self.risk_per_trade/100) ) / (self.stop_loss_pct/100)
                     buy_amt = min(thb * 0.98, risk_amt)
@@ -146,6 +162,7 @@ class TitanOmniV13:
                         self._save_state(); self._log_trade("BUY", p, buy_amt, rsi, dist)
                         self.notify(f"🚀 <b>ENTRY BUY: {p:,.2f}</b>\nRSI: {rsi:.2f} | Risk: {self.risk_per_trade}%")
 
+                # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
                     trail_dist = atr * 2.3
