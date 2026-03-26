@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanOmniV13:
     def __init__(self):
-        # --- Config & Variables ---
+        # --- Config & Variables (ระบบพื้นฐาน) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,22 +11,29 @@ class TitanOmniV13:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- Strategy Settings ---
+        # --- Strategy Settings (ดึงจาก Railway ถ้าไม่มีให้ใช้ค่ามาตรฐาน) ---
+        # 1. ทุนเริ่มต้น (Default: 2000)
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2000")).replace(',', ''))
+        # 2. ความเสี่ยงต่อไม้ (Default: 2.0)
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.0"))
+        # 3. จุดตัดขาดทุน % (Default: 4.0)
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "4.0"))
+        # 4. เป้าหมาย RSI สำหรับซื้อ (Default: 35.0)
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "35.0"))
+        # 5. ระยะห่าง EMA (Default: 3.0)
         self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "3.0"))
-        self.check_interval = int(os.getenv("CHECK_INTERVAL", "5"))
+        # 6. ความถี่ในการเช็คสัญญาณ (Default: 3 วินาทีตามที่พี่ต้องการ)
+        self.check_interval = int(os.getenv("CHECK_INTERVAL", "3"))
+        # 7. ความถี่ในการส่งรายงาน (Default: 600 วินาที / 10 นาที)
         self.report_interval = int(os.getenv("REPORT_INTERVAL", "600"))
 
-        # --- Tracking System ---
+        # --- Tracking System (ระบบจำสถานะ) ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.rsi_prev = None; self.rsi_memory = None 
 
         self._init_db()
         self._sync_with_wallet() # บังคับจำไม้ค้างและเงินสดจาก Bitkub โดยตรง
-        self.notify("<b>💎 TITAN OMNI V.13 | DEFINITIVE</b>\n<i>Status: Database & Wallet Synchronized</i>")
+        self.notify("<b>💎 TITAN OMNI V.13 | RAILWAY LIVE</b>\n<i>Status: Variables Synced & Wallet Connected</i>")
 
     def _init_db(self):
         try:
@@ -48,9 +55,9 @@ class TitanOmniV13:
             thb, coin = self.get_balance()
             d = self.get_indicators()
             p = d['price'] if d else 46.18 # ใช้ราคาทุนเดิมถ้าดึงราคาปัจจุบันไม่ได้
-            
+
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("DELETE FROM bot_state") # เคลียร์สถานะเก่าที่อาจค้างคา
+            cur.execute("DELETE FROM bot_state") # เคลียร์สถานะเก่า
 
             if coin > 0.1: # สถานะถือเหรียญ
                 self.last_action = "buy"; self.total_units = coin; self.avg_price = 46.18 
@@ -62,7 +69,7 @@ class TitanOmniV13:
                 self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
                 cur.execute("INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl) VALUES (%s, %s, %s, %s, %s)", 
                             ("sell", 0, 0, 0, 0))
-            
+
             conn.commit(); cur.close(); conn.close()
         except Exception as e: print(f"Sync Error: {e}")
 
@@ -93,7 +100,7 @@ class TitanOmniV13:
     def _report(self, price, rsi, ema20, ema50, pnl, thb, coin):
         total = thb + (coin * price); growth = ((total - self.initial_equity) / self.initial_equity) * 100
         now = datetime.now(timezone(timedelta(hours=7)))
-        
+
         msg = (
             f"🛡️ <b>TITAN OMNI V.13 | {self.symbol}</b>\n"
             f"Status : MONITORING\n"
@@ -124,7 +131,7 @@ class TitanOmniV13:
                 d = self.get_indicators()
                 if not d: time.sleep(10); continue
                 p, rsi, ema20, ema50, atr = d['price'], d['rsi'], d['ema20'], d['ema50'], d['atr']
-                
+
                 if self.rsi_prev is None: self.rsi_prev = rsi; self.rsi_memory = rsi
                 elif abs(rsi - self.rsi_prev) > 0.01: self.rsi_memory = self.rsi_prev; self.rsi_prev = rsi
 
