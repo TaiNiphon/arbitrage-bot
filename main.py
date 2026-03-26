@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanOmniV13:
     def __init__(self):
-        # --- Config & Variables จาก Railway ---
+        # --- Config & Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -19,15 +19,14 @@ class TitanOmniV13:
         self.ema_dist_limit = float(os.getenv("EMA_DIST_LIMIT", "3.0"))
         self.check_interval = int(os.getenv("CHECK_INTERVAL", "5"))
         self.report_interval = int(os.getenv("REPORT_INTERVAL", "600"))
-        self.fee_pct = 0.25 / 100
 
         # --- Tracking System ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.rsi_prev = None; self.rsi_memory = None 
 
         self._init_db()
-        self._sync_with_wallet() # บังคับให้บอทจำไม้ที่ค้างอยู่จาก Bitkub โดยตรง
-        self.notify("<b>💎 TITAN OMNI V.13 | AUTO-SYNC</b>\n<i>Status: Database & Wallet Synchronized</i>")
+        self._sync_with_wallet() # บังคับจำไม้ค้างและเงินสดจาก Bitkub โดยตรง
+        self.notify("<b>💎 TITAN OMNI V.13 | DEFINITIVE</b>\n<i>Status: Database & Wallet Synchronized</i>")
 
     def _init_db(self):
         try:
@@ -44,31 +43,25 @@ class TitanOmniV13:
         except Exception as e: print(f"DB Init Error: {e}")
 
     def _sync_with_wallet(self):
-        """ ฟังก์ชันพิเศษ: ตรวจสอบ Wallet และบังคับให้ Database จำสถานะจริง """
+        """ ตรวจสอบสถานะเหรียญ/เงินสดจริง และอัปเดต Database ทันที """
         try:
             thb, coin = self.get_balance()
             d = self.get_indicators()
-            current_price = d['price'] if d else 0
+            p = d['price'] if d else 46.18 # ใช้ราคาทุนเดิมถ้าดึงราคาปัจจุบันไม่ได้
             
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            
-            if coin > 0.1: # มีเหรียญค้าง
-                self.last_action = "buy"
-                self.total_units = coin
-                self.avg_price = 46.18 if current_price > 0 else 0 
-                self.highest_price = max(current_price, self.avg_price)
+            cur.execute("DELETE FROM bot_state") # เคลียร์สถานะเก่าที่อาจค้างคา
+
+            if coin > 0.1: # สถานะถือเหรียญ
+                self.last_action = "buy"; self.total_units = coin; self.avg_price = 46.18 
+                self.highest_price = max(p, self.avg_price)
                 self.dynamic_sl = self.avg_price * (1 - (self.stop_loss_pct/100))
-                
-                cur.execute("DELETE FROM bot_state")
                 cur.execute("INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl) VALUES (%s, %s, %s, %s, %s)", 
                             (self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl))
-                print(f"✅ Sync Found Assets: {coin} XRP. Status updated to BUY.")
-            else: # ถือเงินสด
-                self.last_action = "sell"; self.avg_price = 0; self.total_units = 0
-                cur.execute("DELETE FROM bot_state")
+            else: # สถานะถือเงินสด
+                self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
                 cur.execute("INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl) VALUES (%s, %s, %s, %s, %s)", 
                             ("sell", 0, 0, 0, 0))
-                print("✅ Sync Found No Assets. Status updated to SELL.")
             
             conn.commit(); cur.close(); conn.close()
         except Exception as e: print(f"Sync Error: {e}")
@@ -78,14 +71,6 @@ class TitanOmniV13:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
             cur.execute("UPDATE bot_state SET last_action=%s, avg_price=%s, total_units=%s, highest_price=%s, dynamic_sl=%s, updated_at=CURRENT_TIMESTAMP", 
                         (self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl))
-            conn.commit(); cur.close(); conn.close()
-        except: pass
-
-    def _log_trade(self, side, price, amount, rsi, ema_dist, pnl_pct=0, pnl_thb=0):
-        try:
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("INSERT INTO trade_history (side, price, amount, rsi_at_trade, ema_dist, pnl_percent, pnl_thb) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (side, price, amount, rsi, ema_dist, pnl_pct, pnl_thb))
             conn.commit(); cur.close(); conn.close()
         except: pass
 
@@ -109,32 +94,27 @@ class TitanOmniV13:
         total = thb + (coin * price); growth = ((total - self.initial_equity) / self.initial_equity) * 100
         now = datetime.now(timezone(timedelta(hours=7)))
         
-        # --- รายงานแบบสมบูรณ์เหมือน V.12 แต่แม่นยำแบบ V.13 ---
         msg = (
-            f"<b>🛡️ TITAN OMNI V.13 | {self.symbol}</b>\n"
+            f"🛡️ <b>TITAN OMNI V.13 | {self.symbol}</b>\n"
+            f"Status : MONITORING\n"
             f"Date   : {now.strftime('%d/%m/%Y')}\n"
             f"Time   : {now.strftime('%H:%M:%S')}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>📊 MARKET INTELLIGENCE</b>\n"
+            f"📊 <b>MARKET INTELLIGENCE</b>\n"
             f"• Price : <b>{price:,.2f} THB</b>\n"
             f"• Trend : {'BULLISH 📈' if price > ema50 else 'BEARISH 📉'}\n"
             f"• RSI   : {rsi:.2f} {'🟢' if rsi > (self.rsi_memory or 0) else '🔴'} (Prev:{self.rsi_memory or 0:.2f})\n"
             f"• Dist  : {((price-ema20)/ema20*100):+.2f}%\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>💰 PORTFOLIO ANALYSIS</b>\n"
+            f"💰 <b>PORTFOLIO ANALYSIS</b>\n"
             f"• EQUITY : <b>{total:,.2f} THB</b>\n"
             f"• GROWTH : {growth:+.2f}%\n"
             f"• Cash   : {thb:,.2f} | Assets: {coin:.4f}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>🎯 STRATEGY</b>\n"
+            f"🎯 <b>STRATEGY</b>\n"
             f"• Risk/Trade: {self.risk_per_trade}% (~{(total * (self.risk_per_trade/100)):,.2f})\n"
         )
-
-        if self.last_action == "buy":
-            msg += f"• Status: <b>Holding Profit: {pnl:+.2f}%</b>"
-        else:
-            msg += f"• Status: <i>Searching Entry... (Target RSI:{self.rsi_buy_target})</i>"
-
+        msg += f"• Status: <b>Holding Profit: {pnl:+.2f}%</b>" if self.last_action == "buy" else f"• Status: <i>Searching Entry... (Target RSI:{self.rsi_buy_target})</i>"
         self.notify(msg)
 
     def run(self):
@@ -152,38 +132,28 @@ class TitanOmniV13:
                 dist = ((p - ema20) / ema20) * 100
                 pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
 
-                # --- BUY LOGIC ---
                 if self.last_action == "sell" and rsi <= self.rsi_buy_target and rsi > (self.rsi_memory or 0) and abs(dist) <= self.ema_dist_limit:
                     risk_amt = ( (thb + (coin*p)) * (self.risk_per_trade/100) ) / (self.stop_loss_pct/100)
                     buy_amt = min(thb * 0.98, risk_amt)
                     if buy_amt >= 10 and self.place_order("buy", buy_amt):
                         self.last_action = "buy"; self.avg_price = p; self.total_units = buy_amt / p
                         self.highest_price = p; self.dynamic_sl = p * (1 - (self.stop_loss_pct/100))
-                        self._save_state(); self._log_trade("BUY", p, buy_amt, rsi, dist)
-                        self.notify(f"🚀 <b>ENTRY BUY: {p:,.2f}</b>\nRSI: {rsi:.2f} | Risk: {self.risk_per_trade}%")
+                        self._save_state(); self.notify(f"🚀 <b>ENTRY BUY: {p:,.2f}</b>\nRSI: {rsi:.2f}")
 
-                # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0:
                     self.highest_price = max(self.highest_price, p)
                     trail_dist = atr * 2.3
                     if p - trail_dist > self.dynamic_sl: self.dynamic_sl = p - trail_dist
                     if pnl >= 1.5: self.dynamic_sl = max(self.dynamic_sl, self.avg_price * 1.005)
 
-                    reason = None
-                    if pnl >= 15.0: reason = "🎯 Target 15%"
-                    elif p <= self.dynamic_sl: reason = "🛡️ Trailing Stop/SL"
-
-                    if reason:
+                    if pnl >= 15.0 or p <= self.dynamic_sl:
                         if self.place_order("sell", coin):
-                            pnl_thb = (coin * p * 0.9975) - (self.total_units * self.avg_price * 1.0025)
-                            self._log_trade("SELL", p, coin*p, rsi, dist, pnl, pnl_thb)
-                            self.notify(f"💰 <b>EXIT SELL: {p:,.2f}</b>\nProfit: {pnl_thb:+.2f} THB\nReason: {reason}")
+                            self.notify(f"💰 <b>EXIT SELL: {p:,.2f}</b>\nProfit: {pnl:+.2f}%")
                             self.last_action = "sell"; self.avg_price = 0; self._save_state()
 
                 if time.time() - last_rep >= self.report_interval:
                     self._report(p, rsi, ema20, ema50, pnl, thb, coin)
                     last_rep = time.time()
-
             except Exception as e: print(f"Error: {e}")
             time.sleep(self.check_interval)
 
