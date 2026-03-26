@@ -26,7 +26,8 @@ class TitanOmniV13:
         self.check_interval = int(os.getenv("CHECK_INTERVAL", "3"))
         # 7. ความถี่ในการส่งรายงาน (Default: 600 วินาที / 10 นาที)
         self.report_interval = int(os.getenv("REPORT_INTERVAL", "600"))
-
+        # 8. ค่าธรรมเนียม Bitkub 
+        self.fee_pct = float(os.getenv("FEE_PCT", "0.25"))/100
         # --- Tracking System (ระบบจำสถานะ) ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
         self.highest_price = 0.0; self.dynamic_sl = 0.0; self.rsi_prev = None; self.rsi_memory = None 
