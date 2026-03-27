@@ -1,6 +1,5 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
 
 class TitanOmniV14_Pro:
     def __init__(self):
@@ -61,7 +60,6 @@ class TitanOmniV14_Pro:
             res = cur.fetchone()
             self.daily_pnl = float(res[0]) if res[0] else 0.0
             cur.close(); conn.close()
-
             if (self.daily_pnl / self.initial_equity) * 100 <= -self.daily_drawdown_limit:
                 if self.is_bot_active:
                     self.is_bot_active = False
@@ -101,16 +99,17 @@ class TitanOmniV14_Pro:
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution={res_min}&from={int(time.time())-172800}&to={int(time.time())}", timeout=10).json()
             c = np.array(res['c'], dtype=float)
-            ema20 = self._ema(c, 20); ema200 = self._ema(c, 200)
+            ema200 = self._ema(c, 200)
             diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
             rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
             h = np.array(res['h'], dtype=float); l = np.array(res['l'], dtype=float)
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
             atr = np.mean(tr[-14:])
-            return {"price": c[-1], "ema20": ema20, "ema200": ema200, "rsi": rsi, "atr": atr}
+            return {"price": c[-1], "ema200": ema200, "rsi": rsi, "atr": atr}
         except: return None
 
     def _ema(self, p, n):
+        if len(p) < n: return p[-1]
         a = 2/(n+1); e = p[0]
         for x in p[1:]: e = (x * a) + (e * (1 - a))
         return e
@@ -118,8 +117,7 @@ class TitanOmniV14_Pro:
     def get_order_book(self):
         try:
             res = requests.get(f"https://api.bitkub.com/api/market/books?sym={self.symbol.lower()}&lmt=5").json()
-            if res['error'] == 0:
-                return res['result']['bids'][0], res['result']['asks'][0]
+            if res['error'] == 0: return res['result']['bids'][0], res['result']['asks'][0]
             return None, None
         except: return None, None
 
@@ -127,28 +125,24 @@ class TitanOmniV14_Pro:
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         best_bid, best_ask = self.get_order_book()
         if not best_bid or not best_ask: return False, 0
-        
         exec_price = best_ask[0] if side == "buy" else best_bid[0]
         ts = str(int(time.time() * 1000))
         payload = {"sym": self.symbol.lower(), "amt": amt, "rat": exec_price, "typ": "limit"}
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
-        
         try:
             r = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, data=json.dumps(payload), timeout=10)
-            res = r.json()
-            if res.get('error') == 0: return True, exec_price
-            return False, 0
+            return r.json().get('error') == 0, exec_price
         except: return False, 0
 
     def run(self):
-        last_rep = 0; last_heartbeat = time.time()
+        last_rep = 0
         while True:
             try:
                 self._update_daily_pnl()
                 d15, d60 = self.get_indicators("15"), self.get_indicators("60")
-                if not d15 or not d60: time.sleep(10); continue
+                if not d15 or not d60: time.sleep(5); continue
 
-                p, rsi, ema20, ema200_1h = d15['price'], d15['rsi'], d15['ema20'], d60['ema200']
+                p, rsi, ema200_1h = d15['price'], d15['rsi'], d60['ema200']
                 trend_str = "BULLISH 📈" if p > ema200_1h else "BEARISH 📉"
                 
                 if self.rsi_prev is None: self.rsi_prev = rsi; self.rsi_memory = rsi
@@ -159,7 +153,7 @@ class TitanOmniV14_Pro:
                 equity = thb + (coin * p)
                 growth = ((equity - self.initial_equity) / self.initial_equity) * 100
 
-                # --- BUY ---
+                # --- BUY LOGIC ---
                 if self.is_bot_active and self.last_action == "sell" and rsi <= self.rsi_buy_target and rsi > (self.rsi_memory or 0):
                     if p > ema200_1h:
                         buy_amt_thb = min(thb * 0.98, (equity * (self.risk_per_trade/100)) / (self.stop_loss_pct/100))
@@ -170,19 +164,14 @@ class TitanOmniV14_Pro:
                                 self.entry_rsi = rsi; self.entry_time = datetime.now()
                                 self.highest_price = exec_p; self.max_pnl_during_trade = 0.0
                                 self.dynamic_sl = exec_p * (1 - (self.stop_loss_pct/100))
-                                self._save_state(trend_str)
-                                self.notify(f"🚀 <b>ENTRY BUY: {exec_p:,.2f}</b>")
+                                self._save_state(trend_str); self.notify(f"🚀 <b>ENTRY BUY: {exec_p:,.2f}</b>")
 
-                # --- SELL ---
+                # --- SELL LOGIC ---
                 elif self.last_action == "buy" and coin > 0.1:
                     self.highest_price = max(self.highest_price, p)
                     self.max_pnl_during_trade = max(self.max_pnl_during_trade, pnl)
                     if p - (d15['atr'] * 2.5) > self.dynamic_sl: self.dynamic_sl = p - (d15['atr'] * 2.5)
-                    
-                    reason = ""
-                    if pnl >= 10.0: reason = "Take Profit 🎯"
-                    elif p <= self.dynamic_sl: reason = "Trailing Stop 🛡️"
-
+                    reason = "Take Profit 🎯" if pnl >= 10.0 else "Trailing Stop 🛡️" if p <= self.dynamic_sl else ""
                     if reason:
                         success, exec_p = self.place_smart_order("sell", coin, p)
                         if success:
@@ -192,13 +181,10 @@ class TitanOmniV14_Pro:
                             self.notify(f"💰 <b>EXIT SELL: {exec_p:,.2f}</b>\nProfit: {pnl:+.2f}%")
                             self.last_action = "sell"; self.avg_price = 0; self._save_state(trend_str)
 
-                # --- REPORT ---
+                # --- FULL REPORT (FIXED) ---
                 if time.time() - last_rep >= int(os.getenv("REPORT_INTERVAL", "600")):
                     self._send_full_report(p, trend_str, rsi, equity, growth, thb, coin, pnl)
                     last_rep = time.time()
-
-                if time.time() - last_heartbeat >= 21600:
-                    self.notify(f"💓 <b>Heartbeat</b>\nStatus: {'ACTIVE ✅' if self.is_bot_active else 'PAUSED 🛑'}\nDaily PnL: {self.daily_pnl:,.2f} THB"); last_heartbeat = time.time()
 
             except Exception as e: print(f"Loop Error: {e}")
             time.sleep(int(os.getenv("CHECK_INTERVAL", "1")))
@@ -231,13 +217,15 @@ class TitanOmniV14_Pro:
                f"📊 <b>MARKET INTELLIGENCE</b>\n"
                f"• Price : {p:,.2f} THB\n"
                f"• Trend 1H : {trend_icon}\n"
-               f"• RSI : {rsi:.2f}\n"
+               f"• RSI : {rsi:.2f} (Prev:{self.rsi_memory or 0:.2f})\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"💰 <b>PORTFOLIO ANALYSIS</b>\n"
                f"• EQUITY : {equity:,.2f} THB\n"
                f"• GROWTH : {growth:+.2f}%\n"
+               f"• Cash : {thb:,.2f} | Assets: {coin:.4f}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"🎯 <b>STRATEGY</b>\n"
+               f"• Risk/Trade: {self.risk_per_trade}%\n"
                f"• SL : {self.dynamic_sl:,.2f} ({pnl:+.2f}%)\n"
                f"• Max PnL : {self.max_pnl_during_trade:+.2f}%")
         self.notify(msg)
