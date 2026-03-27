@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanOmniV13_6:
+class TitanOmniV13_7:
     def __init__(self):
-        # --- Config & Variables (เหมือนเดิม 100%) ---
+        # --- Config & Variables ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,12 +11,18 @@ class TitanOmniV13_6:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- Strategy Settings (เหมือนเดิม 100%) ---
+        # --- Strategy Settings ---
         self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2000")).replace(',', ''))
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.0"))
         self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "3.0"))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "30.0"))
         self.fee_pct = 0.0025 
+
+        # --- Safety Stars (ระบบดาว) ---
+        self.daily_drawdown_limit = 5.0 # ดาวจะดับเมื่อลบเกิน 5%
+        self.daily_pnl = 0.0
+        self.last_pnl_reset = datetime.now(timezone(timedelta(hours=7))).date()
+        self.is_bot_active = True # สถานะดาวทำงาน
 
         # --- Tracking ---
         self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
@@ -24,7 +30,7 @@ class TitanOmniV13_6:
 
         self._init_db()
         self._sync_with_wallet() 
-        self.notify("<b>🛡️ TITAN OMNI V.13.6 | RESTORED</b>\n<i>Status: กลับมาใช้รายงานแบบเดิมและแก้ Error การขายแล้ว</i>")
+        self.notify("<b>🛡️ TITAN OMNI V.13.7 | DRAWDOWN ACTIVE</b>\n<i>Status: ระบบดาวป้องกันพอร์ตทำงานสมบูรณ์แล้ว</i>")
 
     def _init_db(self):
         try:
@@ -38,6 +44,19 @@ class TitanOmniV13_6:
                 pnl_thb FLOAT, traded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
             conn.commit(); cur.close(); conn.close()
         except Exception as e: self.notify(f"⚠️ <b>DB Error:</b> {e}")
+
+    def _update_daily_pnl(self):
+        try:
+            now_ict = datetime.now(timezone(timedelta(hours=7)))
+            today = now_ict.date()
+            if today > self.last_pnl_reset:
+                self.daily_pnl = 0.0; self.last_pnl_reset = today; self.is_bot_active = True
+            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+            cur.execute("SELECT SUM(pnl_thb) FROM trade_history WHERE traded_at::date = %s", (today,))
+            res = cur.fetchone()
+            self.daily_pnl = float(res[0]) if res[0] else 0.0
+            cur.close(); conn.close()
+        except: pass
 
     def _sync_with_wallet(self):
         try:
@@ -71,9 +90,10 @@ class TitanOmniV13_6:
         return e
 
     def run(self):
-        last_rep = 0
+        last_rep = 0; last_heartbeat = time.time()
         while True:
             try:
+                self._update_daily_pnl()
                 d15, d60 = self.get_indicators("15"), self.get_indicators("60")
                 if not d15 or not d60: time.sleep(10); continue
 
@@ -87,7 +107,14 @@ class TitanOmniV13_6:
                 equity = thb + (coin * p)
                 growth = ((equity - self.initial_equity) / self.initial_equity) * 100
 
-                if self.last_action == "sell" and rsi <= self.rsi_buy_target and rsi > (self.rsi_memory or 0):
+                # --- Drawdown Check ---
+                dd_pct = (self.daily_pnl / self.initial_equity) * 100
+                if dd_pct <= -self.daily_drawdown_limit and self.is_bot_active:
+                    self.is_bot_active = False
+                    self.notify(f"🚨 <b>DAILY DRAWDOWN ALERT:</b> พอร์ตหยุดเทรดฝั่งซื้ออัตโนมัติ (Loss: {dd_pct:.2f}%)")
+
+                # --- BUY (Check is_bot_active) ---
+                if self.is_bot_active and self.last_action == "sell" and rsi <= self.rsi_buy_target and rsi > (self.rsi_memory or 0):
                     if p > ema200_1h:
                         buy_amt = min(thb * 0.98, (equity * (self.risk_per_trade/100)) / (self.stop_loss_pct/100))
                         if buy_amt >= 10 and self.place_order("buy", buy_amt):
@@ -95,6 +122,7 @@ class TitanOmniV13_6:
                             self.highest_price = p; self.dynamic_sl = p * (1 - (self.stop_loss_pct/100)); self._save_state()
                             self.notify(f"🚀 <b>ENTRY BUY: {p:,.2f}</b>")
 
+                # --- SELL ---
                 elif self.last_action == "buy" and coin > 0.1:
                     self.highest_price = max(self.highest_price, p)
                     if p - (d15['atr'] * 2.5) > self.dynamic_sl: self.dynamic_sl = p - (d15['atr'] * 2.5); self._save_state()
@@ -107,27 +135,23 @@ class TitanOmniV13_6:
                             self.notify(f"💰 <b>EXIT SELL: {p:,.2f}</b>\nProfit: {pnl:+.2f}% ({pnl_thb:,.2f} THB)")
                             self.last_action = "sell"; self.avg_price = 0; self.total_units = 0; self._save_state()
 
+                # --- Heartbeat Monitor (V.13.7) ---
+                if time.time() - last_heartbeat >= 21600:
+                    status_txt = "ACTIVE ✅" if self.is_bot_active else "PAUSED 🛑 (Drawdown)"
+                    hb_msg = (f"💓 <b>TITAN Heartbeat</b>\nStatus: {status_txt}\nDaily PnL: {self.daily_pnl:,.2f} THB\nEquity: {equity:,.2f} THB")
+                    self.notify(hb_msg); last_heartbeat = time.time()
+
+                # --- REPORTING ---
                 if time.time() - last_rep >= int(os.getenv("REPORT_INTERVAL", "600")):
-                    trend_txt = "BULLISH 📈" if p > ema200_1h else "BEARISH 📉"
-                    status_txt = "HOLDING" if self.last_action == "buy" else "MONITORING"
-                    msg = (f"🛡️ <b>TITAN V.13.6 | {self.symbol}</b>\n"
-                           f"Status : {status_txt}\n"
-                           f"Date : {datetime.now().strftime('%d/%m/%Y')}\n"
-                           f"Time : {datetime.now().strftime('%H:%M:%S')}\n"
+                    msg = (f"🛡️ <b>TITAN V.13.7 | {self.symbol}</b>\n"
+                           f"Status : {'HOLDING' if self.last_action == 'buy' else 'MONITORING'}\n"
                            f"━━━━━━━━━━━━━━━━━━\n"
                            f"📊 <b>MARKET INTELLIGENCE</b>\n"
-                           f"• Price : {p:,.2f} THB\n"
-                           f"• Trend 1H : {trend_txt}\n"
-                           f"• RSI : {rsi:.2f} (Prev:{self.rsi_memory:.2f})\n"
-                           f"• Dist : {dist:+.2f}%\n"
-                           f"━━━━━━━━━━━━━━━━━━\n"
+                           f"• Price : {p:,.2f} THB\n• RSI : {rsi:.2f}\n"
                            f"💰 <b>PORTFOLIO ANALYSIS</b>\n"
-                           f"• EQUITY : {equity:,.2f} THB\n"
-                           f"• GROWTH : {growth:+.2f}%\n"
-                           f"• Cash : {thb:,.2f} | Assets: {coin:.4f}\n"
+                           f"• EQUITY : {equity:,.2f} THB\n• GROWTH : {growth:+.2f}%\n"
                            f"━━━━━━━━━━━━━━━━━━\n"
                            f"🎯 <b>STRATEGY</b>\n"
-                           f"• Risk/Trade: {self.risk_per_trade}%\n"
                            f"• SL : {self.dynamic_sl:,.2f} ({pnl:+.2f}%)\n")
                     self.notify(msg); last_rep = time.time()
 
@@ -169,8 +193,7 @@ class TitanOmniV13_6:
             r = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, data=json.dumps(payload), timeout=10)
             res = r.json()
             if res.get('error') != 0:
-                err_msg = res.get('description', f"Error Code: {res.get('error')}")
-                self.notify(f"❌ <b>Order Failed</b>\nReason: {err_msg}")
+                self.notify(f"❌ <b>Order Failed</b>\nReason: {res.get('description', 'Unknown Error')}")
                 return False
             return True
         except Exception as e: self.notify(f"🚨 <b>Order Error:</b> {str(e)}"); return False
@@ -180,4 +203,4 @@ class TitanOmniV13_6:
         except: pass
 
 if __name__ == "__main__":
-    TitanOmniV13_6().run()
+    TitanOmniV13_7().run()
