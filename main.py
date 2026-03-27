@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanOmniV14_Pro:
+class TitanOmniV15_Pro:
     def __init__(self):
-        # --- Config (ดึงจาก Railway Variables) ---
+        # --- Config (ดึงจาก Environment Variables) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,228 +11,131 @@ class TitanOmniV14_Pro:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- Strategy Settings ---
-        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2000")).replace(',', ''))
-        self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.0"))
-        self.stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", "3.0"))
+        # --- Strategy & Risk ---
+        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2578")).replace(',', ''))
+        self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "1.0"))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "30.0"))
-        self.fee_pct = 0.0025 
-
-        # --- Safety System ---
         self.daily_drawdown_limit = 5.0
-        self.daily_pnl = 0.0
-        self.last_pnl_reset = datetime.now(timezone(timedelta(hours=7))).date()
-        self.is_bot_active = True 
+        self.prev_rsi = 0.0
 
-        # --- Tracking State ---
-        self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
-        self.highest_price = 0.0; self.dynamic_sl = 0.0; self.rsi_prev = None; self.rsi_memory = None 
-        self.entry_rsi = None; self.entry_time = None; self.max_pnl_during_trade = 0.0
+        # --- Slot Memory ---
+        self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
+                      2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
+        
+        self._init_db_v15()
+        self._sync_slots_from_db()
+        self.notify("<b>🔥 TITAN V.15.0 DUAL-SLOT | DEPLOYED</b>\n<i>System: Dual-Engine Active</i>")
 
-        self._init_db()
-        self._sync_with_wallet() 
-        self.notify("<b>🛡️ TITAN OMNI V.14.0 PRO | DEPLOYED</b>\n<i>Status: Full System Active</i>")
+    def _init_db_v15(self):
+        conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v15 (
+            slot_id INTEGER PRIMARY KEY, last_action TEXT, avg_price FLOAT, 
+            total_units FLOAT, dynamic_sl FLOAT, max_pnl FLOAT, updated_at TIMESTAMP)""")
+        conn.commit(); cur.close(); conn.close()
 
-    def _init_db(self):
+    def _sync_slots_from_db(self):
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("""CREATE TABLE IF NOT EXISTS bot_state (
-                id SERIAL PRIMARY KEY, last_action TEXT, avg_price FLOAT, 
-                total_units FLOAT, highest_price FLOAT, dynamic_sl FLOAT, 
-                entry_rsi FLOAT, entry_time TIMESTAMP, max_pnl FLOAT, entry_trend TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
-                id SERIAL PRIMARY KEY, side TEXT, price FLOAT, units FLOAT, 
-                pnl_pct FLOAT, pnl_thb FLOAT, reason TEXT, entry_rsi FLOAT, 
-                exit_rsi FLOAT, max_pnl_during_trade FLOAT, hold_time_min FLOAT, 
-                market_trend TEXT, traded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-            conn.commit(); cur.close(); conn.close()
-        except Exception as e: self.notify(f"⚠️ <b>DB Init Error:</b> {e}")
-
-    def _update_daily_pnl(self):
-        try:
-            now_ict = datetime.now(timezone(timedelta(hours=7)))
-            today = now_ict.date()
-            if today > self.last_pnl_reset:
-                self.daily_pnl = 0.0; self.last_pnl_reset = today; self.is_bot_active = True
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("SELECT SUM(pnl_thb) FROM trade_history WHERE traded_at::date = %s", (today,))
-            res = cur.fetchone()
-            self.daily_pnl = float(res[0]) if res[0] else 0.0
-            cur.close(); conn.close()
-            if (self.daily_pnl / self.initial_equity) * 100 <= -self.daily_drawdown_limit:
-                if self.is_bot_active:
-                    self.is_bot_active = False
-                    self.notify(f"🛑 <b>SYSTEM PAUSED:</b> Drawdown เกิน {self.daily_drawdown_limit}%")
-        except: pass
-
-    def _sync_with_wallet(self):
-        try:
-            thb, coin = self.get_balance()
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("SELECT last_action, avg_price, total_units, dynamic_sl, entry_rsi, entry_time FROM bot_state ORDER BY id DESC LIMIT 1")
-            row = cur.fetchone()
-            if coin > 0.1: 
-                self.last_action = "buy"; self.total_units = coin
-                if row:
-                    self.avg_price = row[1]; self.dynamic_sl = row[3]
-                    self.entry_rsi = row[4]; self.entry_time = row[5]
-            else:
-                self.last_action = "sell"; self.avg_price = 0.0; self.total_units = 0.0
+            cur.execute("SELECT slot_id, avg_price, total_units, dynamic_sl, max_pnl FROM bot_state_v15")
+            for row in cur.fetchall():
+                if row[2] > 0:
+                    self.slots[row[0]] = {"active": True, "price": row[1], "units": row[2], "sl": row[3], "max_pnl": row[4]}
             cur.close(); conn.close()
         except: pass
 
     def get_balance(self):
-        try:
-            ts = str(int(time.time() * 1000))
-            sig = hmac.new(self.api_secret.encode(), (ts+"POST"+"/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
-            res = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
-                                headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
-            if res.get('error') == 0:
-                thb = float(res['result'].get('THB', 0))
-                coin = float(res['result'].get(self.symbol.split('_')[0], 0))
-                return thb, coin
-            return 0.0, 0.0
-        except: return 0.0, 0.0
-
-    def get_indicators(self, res_min):
-        try:
-            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution={res_min}&from={int(time.time())-172800}&to={int(time.time())}", timeout=10).json()
-            c = np.array(res['c'], dtype=float)
-            ema200 = self._ema(c, 200)
-            diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
-            rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
-            h = np.array(res['h'], dtype=float); l = np.array(res['l'], dtype=float)
-            tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
-            atr = np.mean(tr[-14:])
-            return {"price": c[-1], "ema200": ema200, "rsi": rsi, "atr": atr}
-        except: return None
-
-    def _ema(self, p, n):
-        if len(p) < n: return p[-1]
-        a = 2/(n+1); e = p[0]
-        for x in p[1:]: e = (x * a) + (e * (1 - a))
-        return e
-
-    def get_order_book(self):
-        try:
-            res = requests.get(f"https://api.bitkub.com/api/market/books?sym={self.symbol.lower()}&lmt=5").json()
-            if res['error'] == 0: return res['result']['bids'][0], res['result']['asks'][0]
-            return None, None
-        except: return None, None
-
-    def place_smart_order(self, side, amt, target_price):
-        path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
-        best_bid, best_ask = self.get_order_book()
-        if not best_bid or not best_ask: return False, 0
-        exec_price = best_ask[0] if side == "buy" else best_bid[0]
         ts = str(int(time.time() * 1000))
-        payload = {"sym": self.symbol.lower(), "amt": amt, "rat": exec_price, "typ": "limit"}
+        sig = hmac.new(self.api_secret.encode(), (ts+"POST"+"/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
+        res = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
+                            headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
+        if res.get('error') == 0:
+            return float(res['result'].get('THB', 0)), float(res['result'].get(self.symbol.split('_')[0], 0))
+        return 0.0, 0.0
+
+    def get_indicators(self):
+        res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
+        c = np.array(res['c'], dtype=float)
+        diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
+        rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
+        tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
+        return {"price": c[-1], "rsi": rsi, "atr": np.mean(tr[-14:])}
+
+    def place_smart_order(self, side, amt, price):
+        path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+        ts = str(int(time.time() * 1000))
+        payload = {"sym": self.symbol.lower(), "amt": amt, "rat": price, "typ": "limit"}
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
-        try:
-            r = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, data=json.dumps(payload), timeout=10)
-            return r.json().get('error') == 0, exec_price
-        except: return False, 0
+        r = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, data=json.dumps(payload), timeout=10)
+        return r.json().get('error') == 0
 
     def run(self):
         last_rep = 0
         while True:
             try:
-                self._update_daily_pnl()
-                d15, d60 = self.get_indicators("15"), self.get_indicators("60")
-                if not d15 or not d60: time.sleep(5); continue
-
-                p, rsi, ema200_1h = d15['price'], d15['rsi'], d60['ema200']
-                trend_str = "BULLISH 📈" if p > ema200_1h else "BEARISH 📉"
-                
-                if self.rsi_prev is None: self.rsi_prev = rsi; self.rsi_memory = rsi
-                elif abs(rsi - self.rsi_prev) > 0.1: self.rsi_memory = self.rsi_prev; self.rsi_prev = rsi
-
+                d = self.get_indicators()
+                p, rsi, atr = d['price'], d['rsi'], d['atr']
                 thb, coin = self.get_balance()
-                pnl = (((p * 0.9975) - (self.avg_price * 1.0025)) / (self.avg_price * 1.0025) * 100) if self.avg_price > 0 else 0
                 equity = thb + (coin * p)
                 growth = ((equity - self.initial_equity) / self.initial_equity) * 100
 
                 # --- BUY LOGIC ---
-                if self.is_bot_active and self.last_action == "sell" and rsi <= self.rsi_buy_target and rsi > (self.rsi_memory or 0):
-                    if p > ema200_1h:
-                        buy_amt_thb = min(thb * 0.98, (equity * (self.risk_per_trade/100)) / (self.stop_loss_pct/100))
-                        if buy_amt_thb >= 10:
-                            success, exec_p = self.place_smart_order("buy", buy_amt_thb, p)
-                            if success:
-                                self.last_action = "buy"; self.avg_price = exec_p; self.total_units = buy_amt_thb / exec_p
-                                self.entry_rsi = rsi; self.entry_time = datetime.now()
-                                self.highest_price = exec_p; self.max_pnl_during_trade = 0.0
-                                self.dynamic_sl = exec_p * (1 - (self.stop_loss_pct/100))
-                                self._save_state(trend_str); self.notify(f"🚀 <b>ENTRY BUY: {exec_p:,.2f}</b>")
+                active_slots = [i for i in self.slots if self.slots[i]["active"]]
+                if len(active_slots) < 2 and rsi <= self.rsi_buy_target and growth > -self.daily_drawdown_limit:
+                    s_id = 1 if 1 not in active_slots else 2
+                    buy_amt = thb if len(active_slots) == 1 else thb / 2
+                    if buy_amt >= 10:
+                        if self.place_smart_order("buy", buy_amt, p):
+                            self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr * 2.5), "max_pnl": 0.0}
+                            self._save_state(s_id); self.notify(f"🚀 <b>ENTRY SLOT {s_id} @ {p:,.2f}</b>")
 
                 # --- SELL LOGIC ---
-                elif self.last_action == "buy" and coin > 0.1:
-                    self.highest_price = max(self.highest_price, p)
-                    self.max_pnl_during_trade = max(self.max_pnl_during_trade, pnl)
-                    if p - (d15['atr'] * 2.5) > self.dynamic_sl: self.dynamic_sl = p - (d15['atr'] * 2.5)
-                    reason = "Take Profit 🎯" if pnl >= 10.0 else "Trailing Stop 🛡️" if p <= self.dynamic_sl else ""
-                    if reason:
-                        success, exec_p = self.place_smart_order("sell", coin, p)
-                        if success:
-                            pnl_thb = (coin * (exec_p * 0.9975)) - (coin * (self.avg_price * 1.0025))
-                            hold_time = (datetime.now() - self.entry_time).total_seconds() / 60 if self.entry_time else 0
-                            self._save_trade_history("sell", exec_p, coin, pnl, pnl_thb, reason, rsi, hold_time, trend_str)
-                            self.notify(f"💰 <b>EXIT SELL: {exec_p:,.2f}</b>\nProfit: {pnl:+.2f}%")
-                            self.last_action = "sell"; self.avg_price = 0; self._save_state(trend_str)
+                for s_id, s in self.slots.items():
+                    if s["active"]:
+                        curr_pnl = ((p - s['price']) / s['price']) * 100
+                        if curr_pnl > s['max_pnl']: s['max_pnl'] = curr_pnl
+                        # Trailing Stop Update
+                        if p - (atr * 2.5) > s['sl']: s['sl'] = p - (atr * 2.5)
+                        
+                        if p <= s['sl'] or curr_pnl >= 10.0:
+                            if self.place_smart_order("sell", s['units'], p):
+                                self.notify(f"📤 <b>CLOSE SLOT {s_id} @ {p:,.2f}</b>\nPnL: {curr_pnl:+.2f}%")
+                                self.slots[s_id] = {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}
+                                self._save_state(s_id)
 
-                # --- FULL REPORT (FIXED) ---
-                if time.time() - last_rep >= int(os.getenv("REPORT_INTERVAL", "600")):
-                    self._send_full_report(p, trend_str, rsi, equity, growth, thb, coin, pnl)
-                    last_rep = time.time()
+                # --- REPORTING ---
+                if time.time() - last_rep >= 600:
+                    self._report(p, rsi, equity, growth, thb, coin)
+                    last_rep = time.time(); self.prev_rsi = rsi
+            except Exception as e: print(f"Error: {e}")
+            time.sleep(1)
 
-            except Exception as e: print(f"Loop Error: {e}")
-            time.sleep(int(os.getenv("CHECK_INTERVAL", "1")))
+    def _save_state(self, s_id):
+        conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+        s = self.slots[s_id]
+        cur.execute("""INSERT INTO bot_state_v15 (slot_id, last_action, avg_price, total_units, dynamic_sl, max_pnl, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (slot_id) 
+                       DO UPDATE SET avg_price=EXCLUDED.avg_price, total_units=EXCLUDED.total_units, 
+                       dynamic_sl=EXCLUDED.dynamic_sl, max_pnl=EXCLUDED.max_pnl, updated_at=EXCLUDED.updated_at""",
+                    (s_id, "buy" if s['active'] else "sell", s['price'], s['units'], s['sl'], s['max_pnl'], datetime.now()))
+        conn.commit(); cur.close(); conn.close()
 
-    def _save_state(self, trend):
-        try:
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("""INSERT INTO bot_state (last_action, avg_price, total_units, highest_price, dynamic_sl, entry_rsi, entry_time, max_pnl, entry_trend) 
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""", 
-                        (self.last_action, self.avg_price, self.total_units, self.highest_price, self.dynamic_sl, self.entry_rsi, self.entry_time, self.max_pnl_during_trade, trend))
-            conn.commit(); cur.close(); conn.close()
-        except: pass
-
-    def _save_trade_history(self, side, price, units, pnl_pct, pnl_thb, reason, exit_rsi, hold_time, trend):
-        try:
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("""INSERT INTO trade_history (side, price, units, pnl_pct, pnl_thb, reason, entry_rsi, exit_rsi, max_pnl_during_trade, hold_time_min, market_trend) 
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""", 
-                        (side, price, units, pnl_pct, pnl_thb, reason, self.entry_rsi, exit_rsi, self.max_pnl_during_trade, hold_time, trend))
-            conn.commit(); cur.close(); conn.close()
-        except: pass
-
-    def _send_full_report(self, p, trend_icon, rsi, equity, growth, thb, coin, pnl):
-        now_ict = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.14.0 PRO | {self.symbol}</b>\n"
-               f"Status : {'HOLDING' if self.last_action == 'buy' else 'MONITORING'}\n"
-               f"Date : {now_ict.strftime('%d/%m/%Y')}\n"
-               f"Time : {now_ict.strftime('%H:%M:%S')}\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"📊 <b>MARKET INTELLIGENCE</b>\n"
-               f"• Price : {p:,.2f} THB\n"
-               f"• Trend 1H : {trend_icon}\n"
-               f"• RSI : {rsi:.2f} (Prev:{self.rsi_memory or 0:.2f})\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"💰 <b>PORTFOLIO ANALYSIS</b>\n"
-               f"• EQUITY : {equity:,.2f} THB\n"
-               f"• GROWTH : {growth:+.2f}%\n"
-               f"• Cash : {thb:,.2f} | Assets: {coin:.4f}\n"
-               f"━━━━━━━━━━━━━━━━━━\n"
-               f"🎯 <b>STRATEGY</b>\n"
-               f"• Risk/Trade: {self.risk_per_trade}%\n"
-               f"• SL : {self.dynamic_sl:,.2f} ({pnl:+.2f}%)\n"
-               f"• Max PnL : {self.max_pnl_during_trade:+.2f}%")
+    def _report(self, p, rsi, equity, growth, thb, coin):
+        now = datetime.now(timezone(timedelta(hours=7)))
+        status = "HOLDING" if any(s['active'] for s in self.slots.values()) else "MONITORING"
+        msg = (f"🛡️ <b>TITAN V.15.0 PRO | {self.symbol}</b>\nStatus : {status}\nDate : {now.strftime('%d/%m/%Y')}\nTime : {now.strftime('%H:%M:%S')}\n"
+               f"━━━━━━━━━━━━━━━━━━\n📊 <b>MARKET INTELLIGENCE</b>\n• Price : {p:,.2f} THB\n• Trend 1H : BEARISH 📉\n• RSI : {rsi:.2f} (Prev:{self.prev_rsi:.2f})\n"
+               f"━━━━━━━━━━━━━━━━━━\n💰 <b>PORTFOLIO ANALYSIS</b>\n• EQUITY : {equity:,.2f} THB\n• GROWTH : {growth:+.2f}%\n• Cash : {thb:,.2f} | Assets: {coin:.4f}\n"
+               f"━━━━━━━━━━━━━━━━━━\n🎯 <b>STRATEGY DUAL-SLOT</b>\n")
+        for i, s in self.slots.items():
+            if s['active']:
+                pnl = ((p - s['price']) / s['price']) * 100
+                msg += f"<b>[SLOT {i}]</b> - Risk: {self.risk_per_trade}%\n• SL : {s['sl']:,.2f} ({pnl:+.2f}%)\n• Max PnL : {s['max_pnl']:+.2f}%\n"
+            else:
+                msg += f"<b>[SLOT {i}]</b> - Waiting RSI ≤ {self.rsi_buy_target}\n"
         self.notify(msg)
 
     def notify(self, m):
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
-        except: pass
+        requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"})
 
 if __name__ == "__main__":
-    TitanOmniV14_Pro().run()
+    TitanOmniV15_Pro().run()
