@@ -128,7 +128,7 @@ class TitanOmniV16_1_Final:
                                 self.positions[sym] = new_pos; self._save_state(sym, new_pos)
                                 self.notify(f"🚀 <b>ENTRY {sym} @ {ind['price']:,.2f}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
-                        time.sleep(0.5)
+                        time.sleep(1.2)
 
                 # 4. Report (สรุปผลตามรูป 5364.jpg ทุก 10 นาที)
                 if time.time() - last_rep >= 600:
@@ -137,8 +137,8 @@ class TitanOmniV16_1_Final:
 
             except Exception as e: 
                 print(f"Error: {e}")
-                time.sleep(10)
-            time.sleep(10)
+                time.sleep(30)
+            time.sleep(30)
 
     def _report(self, thb):
         now = datetime.now(timezone(timedelta(hours=7)))
