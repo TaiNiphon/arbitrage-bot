@@ -147,4 +147,4 @@ class TitanOmniV16_Production:
         except: pass
 
 if __name__ == "__main__":
-    TitanOmniV16_Production().run(
+    TitanOmniV16_Production().run()
