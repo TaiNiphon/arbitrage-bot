@@ -18,7 +18,7 @@ class TitanOmniV16_1_Final:
         self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "1500.0"))
         
         # --- Filters (ป้องกันเหรียญผี/เหรียญไม่มีวอลลุ่ม) ---
-        self.min_volume_thb = 1000000.0
+        self.min_volume_thb = 3000000.0
         self.positions = {} 
 
         self._init_db_v16()
