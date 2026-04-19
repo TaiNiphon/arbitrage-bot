@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanOmniV16_2_Final:
+class TitanOmniV16_3_AllInOne:
     def __init__(self):
         # --- ดึงค่าจาก Railway ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -11,8 +11,8 @@ class TitanOmniV16_2_Final:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- Settings & Risk Management ---
-        # ใช้ยอดเงินปัจจุบันที่พี่มี (ถอนออกแล้วเหลือประมาณ 2,413) ให้แก้ใน Railway Variable ครับ
-        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2413.29")).replace(',', ''))
+        # แนะนำให้พี่ติ๊กตั้งค่า INITIAL_EQUITY ใน Railway ให้ตรงกับยอดเงินจริงปัจจุบัน (เช่น 4813.29)
+        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "4813.29")).replace(',', ''))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "35.0"))
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.5"))
         self.max_slots = int(os.getenv("MAX_SLOTS", "3"))
@@ -21,10 +21,11 @@ class TitanOmniV16_2_Final:
         # --- Filters ---
         self.min_volume_thb = 3000000.0 
         self.positions = {} 
+        self.latest_scan_results = [] # เก็บข้อมูลสแกนล่าสุดไว้โชว์รายงาน
 
         self._init_db_v16()
         self._sync_positions_from_db()
-        self.notify("<b>🔥 TITAN V.16.2 OMNI | PRO DEPLOYED</b>\n<i>Status: Deep Scanner Active</i>")
+        self.notify("<b>🔥 TITAN V.16.3 OMNI | ALL-IN-ONE</b>\n<i>Status: Scanner & Auto-Watchlist Active</i>")
 
     def _init_db_v16(self):
         conn = psycopg2.connect(self.db_url); cur = conn.cursor()
@@ -90,6 +91,8 @@ class TitanOmniV16_2_Final:
                 qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
                 thb = self.get_wallet()
                 
+                temp_scan_data = [] # เก็บข้อมูลสแกนในรอบนี้
+
                 # 1. Sell Logic
                 for sym in list(self.positions.keys()):
                     ind = self.get_indicators(sym)
@@ -99,66 +102,54 @@ class TitanOmniV16_2_Final:
                     if pnl > pos['max_pnl']: pos['max_pnl'] = pnl
                     new_sl = p - (atr * self.risk_per_trade)
                     if new_sl > pos['sl']: pos['sl'] = new_sl
-
                     if p <= pos['sl'] or pnl >= 10.0:
                         if self.place_order("sell", sym, pos['units'], p):
                             self.notify(f"📤 <b>CLOSE {sym} @ {p:,.2f}</b>\nPnL: {pnl:+.2f}%")
                             del self.positions[sym]; self._save_state(sym, None)
 
-                # 2. Buy Logic
-                if len(self.positions) < self.max_slots:
-                    for sym in qualified:
-                        if sym in self.positions or len(self.positions) >= self.max_slots: continue
-                        ind = self.get_indicators(sym)
-                        if ind and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
+                # 2. Buy Logic & Continuous Scanner
+                for sym in qualified:
+                    if sym in self.positions: continue
+                    ind = self.get_indicators(sym)
+                    if ind:
+                        # บันทึกข้อมูลเข้า List สแกนเสมอ
+                        temp_scan_data.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price'], "trend": ind['trend']})
+                        
+                        # เงื่อนไขการซื้อ
+                        if len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
                             if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
                                 new_pos = {"price": ind['price'], "units": self.budget_per_slot/ind['price'], 
                                            "sl": ind['price'] - (ind['atr'] * self.risk_per_trade), "max_pnl": 0.0}
                                 self.positions[sym] = new_pos; self._save_state(sym, new_pos)
                                 self.notify(f"🚀 <b>ENTRY {sym} @ {ind['price']:,.2f}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
-                        time.sleep(1.2) 
+                    time.sleep(1.1) 
+                
+                # เรียงลำดับตัวที่ RSI ต่ำสุดเก็บไว้ให้รายงาน
+                if temp_scan_data:
+                    self.latest_scan_results = sorted(temp_scan_data, key=lambda x: x['rsi'])
 
-                # 3. Report
+                # 3. Report (ส่งทุก 10 นาที)
                 if time.time() - last_rep >= 600:
-                    self._report(thb, qualified)
+                    self._report(thb)
                     last_rep = time.time()
 
             except Exception as e: 
-                print(f"Error: {e}"); time.sleep(30)
-            time.sleep(30)
+                print(f"Error: {e}"); time.sleep(15)
+            time.sleep(10)
 
-    def _report(self, thb, qualified):
+    def _report(self, thb):
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, total_units, slot_details = 0, 0, ""
         
-        # ค้นหาตัวจ่อเข้าเงื่อนไข (Watchlist) - สแกนหาตัวที่ RSI ต่ำสุดจริงๆ
-        best_watch = None
-        temp_watch_list = []
+        # ดึงตัวที่ RSI ต่ำสุดจากข้อมูลสแกนล่าสุด
+        best_watch = self.latest_scan_results[0] if self.latest_scan_results else None
         
-        # กรองเอาเฉพาะ 15 ตัวแรกที่มี Volume สูงสุดเพื่อความเร็วและแม่นยำ
-        for sym in qualified[:15]:
-            if sym not in self.positions:
-                ind = self.get_indicators(sym)
-                if ind:
-                    temp_watch_list.append({
-                        "sym": sym, 
-                        "rsi": ind['rsi'], 
-                        "price": ind['price'], 
-                        "trend": ind['trend']
-                    })
-        
-        if temp_watch_list:
-            best_watch = sorted(temp_watch_list, key=lambda x: x['rsi'])[0]
-
-        # ตั้งค่า Market Intelligence
         if self.positions:
-            # ถ้ามีเหรียญในมือ ให้โชว์ข้อมูลเหรียญตัวแรกที่ถือ
             first_sym = list(self.positions.keys())[0]
             ind_main = self.get_indicators(first_sym)
             main_p, main_t, main_r = (ind_main['price'], ind_main['trend'], ind_main['rsi']) if ind_main else (0, "N/A", 0)
         elif best_watch:
-            # ถ้าพอร์ตว่าง ให้โชว์ข้อมูลของเหรียญที่ใกล้เคียงเงื่อนไขที่สุด (Watchlist)
             main_p, main_t, main_r = best_watch['price'], best_watch['trend'], best_watch['rsi']
         else:
             main_p, main_t, main_r = 0, "N/A", 0
@@ -177,15 +168,9 @@ class TitanOmniV16_2_Final:
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         
-        # ส่วนแสดงผลชื่อเหรียญที่จ่อคิว
-        watch_msg = ""
-        if best_watch:
-            watch_msg = (f"👀 <b>WATCHLIST (Nearest)</b>\n"
-                         f"• <b>{best_watch['sym']}</b>\n"
-                         f"• RSI: {best_watch['rsi']:.2f} (Target: {self.rsi_buy_target})\n"
-                         f"━━━━━━━━━━━━━━━━━━\n")
+        watch_msg = f"👀 <b>WATCHLIST (Nearest)</b>\n• <b>{best_watch['sym']}</b> : {best_watch['rsi']:.2f} RSI\n━━━━━━━━━━━━━━━━━━\n" if best_watch else ""
         
-        msg = (f"🛡️ <b>TITAN V.16.2 OMNI | SCANNER</b>\n"
+        msg = (f"🛡️ <b>TITAN V.16.3 | OMNI</b>\n"
                f"Status : {'HOLDING' if self.positions else 'MONITORING'}\n"
                f"Date : {now.strftime('%d/%m/%Y')} | Time : {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
@@ -209,4 +194,4 @@ class TitanOmniV16_2_Final:
         except: pass
 
 if __name__ == "__main__":
-    TitanOmniV16_2_Final().run()
+    TitanOmniV16_3_AllInOne().run()
