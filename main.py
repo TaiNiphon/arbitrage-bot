@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 
 class TitanOmniV16_1_Final:
     def __init__(self):
-        # --- ดึงค่าจาก Railway (อ้างอิงตามรูป 5363.jpg ที่พี่ติ๊กยืนยัน) ---
+        # --- ดึงค่าจาก Railway ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,22 +11,21 @@ class TitanOmniV16_1_Final:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- Settings & Risk Management ---
-        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "5433.29")).replace(',', ''))
+        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "3433.29")).replace(',', ''))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "35.0"))
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.5"))
         self.max_slots = int(os.getenv("MAX_SLOTS", "3"))
-        self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "1500.0"))
+        self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "1000.0"))
         
-        # --- Filters (ป้องกันเหรียญผี/เหรียญไม่มีวอลลุ่ม) ---
-        self.min_volume_thb = 3000000.0
+        # --- Filters ---
+        self.min_volume_thb = 3000000.0 # ปรับเป็น 3 ล้านเพื่อความปลอดภัย
         self.positions = {} 
 
         self._init_db_v16()
         self._sync_positions_from_db()
-        self.notify("<b>🔥 TITAN V.16.1 OMNI | DEPLOYED</b>\n<i>Status: Scanner Mode Active (100+ Coins)</i>")
+        self.notify("<b>🔥 TITAN V.16.1 OMNI | PRO DEPLOYED</b>\n<i>Status: Scanner & Watchlist Active</i>")
 
     def _init_db_v16(self):
-        """สร้างตารางเก็บข้อมูลไม้เทรดถ้ายังไม่มี"""
         conn = psycopg2.connect(self.db_url); cur = conn.cursor()
         cur.execute("""CREATE TABLE IF NOT EXISTS bot_positions_v16 (
             symbol TEXT PRIMARY KEY, avg_price FLOAT, total_units FLOAT, 
@@ -34,7 +33,6 @@ class TitanOmniV16_1_Final:
         conn.commit(); cur.close(); conn.close()
 
     def _sync_positions_from_db(self):
-        """ดึงสถานะจาก Database มาใส่ในตัวแปรบอท"""
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
             cur.execute("SELECT symbol, avg_price, total_units, dynamic_sl, max_pnl FROM bot_positions_v16")
@@ -44,7 +42,6 @@ class TitanOmniV16_1_Final:
         except: pass
 
     def get_indicators(self, symbol):
-        """คำนวณ RSI, ATR และ Trend"""
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
             if res.get('s') != 'ok': return None
@@ -58,7 +55,6 @@ class TitanOmniV16_1_Final:
         except: return None
 
     def get_wallet(self):
-        """เช็กยอดเงินบาทคงเหลือจริงใน Bitkub"""
         ts = str(int(time.time() * 1000))
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+"/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
         res = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
@@ -66,7 +62,6 @@ class TitanOmniV16_1_Final:
         return float(res['result'].get('THB', 0)) if res.get('error') == 0 else 0.0
 
     def place_order(self, side, symbol, amt, price):
-        """ส่งคำสั่งซื้อ/ขาย"""
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         ts = str(int(time.time() * 1000))
         payload = {"sym": symbol.lower(), "amt": amt, "rat": price, "typ": "limit"}
@@ -75,7 +70,6 @@ class TitanOmniV16_1_Final:
         return r.json().get('error') == 0
 
     def _save_state(self, symbol, data=None):
-        """บันทึกหรือลบข้อมูลไม้ลง Database"""
         conn = psycopg2.connect(self.db_url); cur = conn.cursor()
         if data:
             cur.execute("""INSERT INTO bot_positions_v16 (symbol, avg_price, total_units, dynamic_sl, max_pnl, updated_at)
@@ -91,70 +85,78 @@ class TitanOmniV16_1_Final:
         last_rep = 0
         while True:
             try:
-                # 1. Scanner: กรองเหรียญที่มีโวลุ่ม > 1 ล้านบาท
                 ticker = requests.get("https://api.bitkub.com/api/market/ticker").json()
                 qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
                 thb = self.get_wallet()
                 
-                # 2. Sell Logic (Trailing Stop จาก ATR ป้องกันขายหมู)
+                # 1. Sell Logic
                 for sym in list(self.positions.keys()):
                     ind = self.get_indicators(sym)
                     if not ind: continue
                     p, atr, pos = ind['price'], ind['atr'], self.positions[sym]
                     pnl = ((p - pos['price']) / pos['price']) * 100
-                    
-                    if pnl > pos['max_pnl']: pos['max_pnl'] = pnl # เก็บสถิติกำไรสูงสุด
-                    
-                    # ขยับ SL ตามราคา (Trailing Stop)
+                    if pnl > pos['max_pnl']: pos['max_pnl'] = pnl
                     new_sl = p - (atr * self.risk_per_trade)
                     if new_sl > pos['sl']: pos['sl'] = new_sl
 
-                    # เงื่อนไขขาย: ราคาหลุด SL หรือ กำไรกระโดดถึง 10%
                     if p <= pos['sl'] or pnl >= 10.0:
                         if self.place_order("sell", sym, pos['units'], p):
                             self.notify(f"📤 <b>CLOSE {sym} @ {p:,.2f}</b>\nPnL: {pnl:+.2f}%")
                             del self.positions[sym]; self._save_state(sym, None)
 
-                # 3. Buy Logic (Scanner ค้นหาของถูก)
+                # 2. Buy Logic
                 if len(self.positions) < self.max_slots:
                     for sym in qualified:
                         if sym in self.positions or len(self.positions) >= self.max_slots: continue
                         ind = self.get_indicators(sym)
                         if ind and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
                             if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
-                                # จุด SL เริ่มต้น = ราคาซื้อ - (ความผันผวน * 2.5)
                                 new_pos = {"price": ind['price'], "units": self.budget_per_slot/ind['price'], 
                                            "sl": ind['price'] - (ind['atr'] * self.risk_per_trade), "max_pnl": 0.0}
                                 self.positions[sym] = new_pos; self._save_state(sym, new_pos)
                                 self.notify(f"🚀 <b>ENTRY {sym} @ {ind['price']:,.2f}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
-                        time.sleep(1.2)
+                        time.sleep(1.2) # เว้นระยะเพื่อความปลอดภัย
 
-                # 4. Report (สรุปผลตามรูป 5364.jpg ทุก 10 นาที)
+                # 3. Report
                 if time.time() - last_rep >= 600:
-                    self._report(thb)
+                    self._report(thb, qualified)
                     last_rep = time.time()
 
             except Exception as e: 
-                print(f"Error: {e}")
-                time.sleep(30)
-            time.sleep(30)
+                print(f"Error: {e}"); time.sleep(30)
+            time.sleep(30) # พักรอบใหญ่
 
-    def _report(self, thb):
+    def _report(self, thb, qualified):
         now = datetime.now(timezone(timedelta(hours=7)))
-        total_asset_val, total_units, slot_details, main_p, main_t, main_r = 0, 0, "", 0, "N/A", 0
+        total_asset_val, total_units, slot_details = 0, 0, ""
         
+        # ค้นหาตัวจ่อเข้าเงื่อนไข (Watchlist)
+        watch_list = []
+        for sym in qualified[:20]: # สุ่มเช็ค 20 ตัวแรกเพื่อไม่ให้รายงานมาช้าเกินไป
+            if sym not in self.positions:
+                ind = self.get_indicators(sym)
+                if ind: watch_list.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price'], "trend": ind['trend']})
+        
+        best_watch = sorted(watch_list, key=lambda x: x['rsi'])[0] if watch_list else None
+        
+        # ตั้งค่า Market Intelligence จากเหรียญที่ถือ หรือจาก Watchlist ถ้าพอร์ตว่าง
+        if self.positions:
+            first_sym = list(self.positions.keys())[0]
+            ind_main = self.get_indicators(first_sym)
+            main_p, main_t, main_r = (ind_main['price'], ind_main['trend'], ind_main['rsi']) if ind_main else (0, "N/A", 0)
+        elif best_watch:
+            main_p, main_t, main_r = best_watch['price'], best_watch['trend'], best_watch['rsi']
+        else:
+            main_p, main_t, main_r = 0, "N/A", 0
+
         for i, (sym, pos) in enumerate(self.positions.items(), 1):
             ind = self.get_indicators(sym)
             p = ind['price'] if ind else pos['price']
             total_asset_val += (pos['units'] * p); total_units += pos['units']
             pnl = ((p - pos['price']) / pos['price']) * 100
             sl_pct = ((pos['sl'] - p) / p) * 100
-            if i == 1: main_p, main_t, main_r = p, ind['trend'], ind['rsi']
-            
-            slot_details += (f"<b>[SLOT {i} | {sym}]</b>\n"
-                             f"• SL : {pos['sl']:,.2f} ({sl_pct:+.2f}%)\n"
-                             f"• Max PnL : {pos['max_pnl']:+.2f}%\n")
+            slot_details += f"<b>[SLOT {i} | {sym}]</b>\n• SL : {pos['sl']:,.2f} ({sl_pct:+.2f}%)\n• Max PnL : {pos['max_pnl']:+.2f}%\n"
 
         for i in range(len(self.positions) + 1, self.max_slots + 1):
             slot_details += f"<b>[SLOT {i}]</b> - Waiting RSI ≤ {self.rsi_buy_target}\n"
@@ -162,10 +164,13 @@ class TitanOmniV16_1_Final:
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         
+        watch_msg = f"👀 <b>WATCHLIST (Nearest)</b>\n• {best_watch['sym']} : {best_watch['rsi']:.2f} RSI\n━━━━━━━━━━━━━━━━━━\n" if best_watch else ""
+        
         msg = (f"🛡️ <b>TITAN V.16.1 OMNI | SCANNER</b>\n"
                f"Status : {'HOLDING' if self.positions else 'MONITORING'}\n"
-               f"Date : {now.strftime('%d/%m/%Y')}\nTime : {now.strftime('%H:%M:%S')}\n"
+               f"Date : {now.strftime('%d/%m/%Y')} | Time : {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
+               f"{watch_msg}"
                f"📊 <b>MARKET INTELLIGENCE</b>\n"
                f"• Price : {main_p:,.2f} THB\n"
                f"• Trend 1H : {main_t}\n"
@@ -174,7 +179,7 @@ class TitanOmniV16_1_Final:
                f"💰 <b>PORTFOLIO ANALYSIS</b>\n"
                f"• EQUITY : {equity:,.2f} THB\n"
                f"• GROWTH : {growth:+.2f}%\n"
-               f"• Cash : {thb:,.2f} | <b>Assets : {total_units:.4f}</b>\n"
+               f"• Cash : {thb:,.2f} | Assets : {total_units:.4f}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"🎯 <b>STRATEGY OMNI-SLOT</b>\n{slot_details}")
         self.notify(msg)
