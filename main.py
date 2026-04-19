@@ -1,28 +1,31 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanUltimateV16_4_Full:
+class TitanMasterV16_4:
     def __init__(self):
-        # --- 1. Load Settings (ดึงจาก Railway) ---
+        # --- 1. การดึงค่าจาก Railway (ยังคงใช้ตัวใหญ่ตามเดิม) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- 2. Strategy Parameters (จุดที่พี่เน้น) ---
-        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "4813.29")).replace(',', ''))
-        self.rsi_buy_target = 35.0
-        self.risk_per_trade = 2.5 # ป้องกันขายหมูด้วย Trailing Stop
-        self.max_slots = 3
-        self.budget_per_slot = 1000.0
-        self.min_volume_thb = 3000000.0 # คัดเกรดเหรียญ 3 ล้านบาทขึ้นไป
+        # --- 2. การตั้งค่าตัวแปรภายใน (Internal Variables) ---
+        # ผมรวมค่าที่พี่ต้องการไว้ตรงนี้ทั้งหมด ไม่ต้องไปแก้ใน Railway เพิ่มครับ
+        self.initial_equity = 4813.29      # ทุนเริ่มต้นของคุณ
+        self.rsi_buy_target = 35.0         # จุดซื้อ RSI (ของถูก)
+        self.risk_per_trade = 2.5          # ตัวคูณ ATR สำหรับ Trailing Stop (กันขายหมู)
+        self.max_slots = 3                 # จำกัด 3 ไม้เพื่อคุมความเสี่ยง
+        self.budget_per_slot = 1000.0      # งบต่อไม้ (1,000 บาท)
+        self.min_volume_thb = 3000000.0    # **แก้ปัญหาเหรียญขยะ** กรองเฉพาะ 3 ล้านขึ้นไป
 
-        self.positions = {} 
-        self.latest_scan_results = []
-        self._init_db()
-        self._sync_positions()
-        self.notify("<b>🛡️ TITAN V.16.4 | MASTER ONLINE</b>\n<i>Status: Full Report & 3M Filter Active</i>")
+        # --- 3. ระบบจัดการสถานะและความจำ ---
+        self.positions = {}                # เก็บข้อมูลเหรียญที่ถืออยู่
+        self.latest_scan_results = []      # เก็บผลสแกนล่าสุด (แก้ปัญหารายงานโชว์ 0.00)
+
+        self._init_db()                    # เชื่อมต่อฐานข้อมูล PostgreSQL
+        self._sync_positions()             # ดึงสถานะเหรียญที่ค้างอยู่จากฐานข้อมูล
+        self.notify("<b>🛡️ TITAN V.16.4 | MASTER ONLINE</b>\n<i>ระบบกรองเหรียญคุณภาพ (3M+) และรายงานฉบับเต็มเริ่มทำงานแล้ว</i>")
 
     def _init_db(self):
         try:
@@ -46,8 +49,8 @@ class TitanUltimateV16_4_Full:
         except: pass
 
     def get_indicators_deep(self, symbol):
-        # --- ระบบ Retry 3 รอบเพื่อแก้ปัญหาค่า 0.00 ---
-        for _ in range(3):
+        """ ระบบ Deep Scan: ป้องกันค่า 0.00 โดยการวนลูปดึงข้อมูลซ้ำ 3 รอบ """
+        for attempt in range(3):
             try:
                 res = requests.get(f"https://api.bitkub.com/api/market/candles?symbol={symbol}&resolution=15&limit=100", timeout=10).json()
                 if not res or 'c' not in res or len(res['c']) < 30:
@@ -58,19 +61,109 @@ class TitanUltimateV16_4_Full:
                 gain, loss = np.where(diff > 0, diff, 0), np.where(diff < 0, -diff, 0)
                 rsi = 100 - (100 / (1 + (np.mean(gain[-14:]) / (np.mean(loss[-14:]) + 1e-9))))
                 tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
-                return {'price': c[-1], 'rsi': rsi, 'atr': np.mean(tr[-14:]), 
+                atr = np.mean(tr[-14:])
+                
+                return {'price': c[-1], 'rsi': rsi, 'atr': atr, 
                         'trend': "BULLISH 📈" if c[-1] > np.mean(c[-20:]) else "BEARISH 📉"}
             except: time.sleep(1)
         return None
 
-    # ... (ส่วน place_order และ get_wallet เหมือนเดิมที่พี่มี) ...
+    def get_wallet(self):
+        try:
+            ts = str(int(time.time() * 1000))
+            sig = hmac.new(self.api_secret.encode(), (ts+"POST"+"/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
+            res = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
+                                headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
+            return float(res['result'].get('THB', 0)) if res.get('error') == 0 else 0.0
+        except: return 0.0
+
+    def place_order(self, side, symbol, amt, price):
+        # โครงสร้างการยิง API ของ Bitkub พี่ใช้ตัวเดิมที่เคยทำไว้ได้เลยครับ
+        try:
+            path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
+            ts = str(int(time.time() * 1000))
+            payload = {"sym": symbol.lower(), "amt": amt, "rat": price, "typ": "limit"}
+            sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
+            headers = {'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig, 'Content-Type': 'application/json'}
+            r = requests.post(f"https://api.bitkub.com{path}", headers=headers, data=json.dumps(payload), timeout=10)
+            return r.json().get('error') == 0
+        except: return False
+
+    def _save_state(self, symbol, data=None):
+        try:
+            conn = psycopg2.connect(self.db_url)
+            cur = conn.cursor()
+            if data:
+                cur.execute("""INSERT INTO bot_positions_v16 (symbol, avg_price, total_units, dynamic_sl, max_pnl, updated_at)
+                               VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (symbol) 
+                               DO UPDATE SET dynamic_sl=EXCLUDED.dynamic_sl, max_pnl=EXCLUDED.max_pnl, updated_at=EXCLUDED.updated_at""",
+                            (symbol, data['price'], data['units'], data['sl'], data['max_pnl'], datetime.now()))
+            else:
+                cur.execute("DELETE FROM bot_positions_v16 WHERE symbol = %s", (symbol,))
+            conn.commit(); cur.close(); conn.close()
+        except: pass
+
+    def run(self):
+        last_rep = 0
+        while True:
+            try:
+                # 1. ดึง Ticker และกรองเฉพาะเหรียญคุณภาพ 3,000,000 บาทขึ้นไป
+                ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
+                qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
+                
+                thb = self.get_wallet()
+                current_scan_data = []
+
+                # 2. จัดการเหรียญที่ถืออยู่ (Sell Logic / Trailing Stop)
+                for sym in list(self.positions.keys()):
+                    ind = self.get_indicators_deep(sym)
+                    if not ind: continue
+                    p, pos = ind['price'], self.positions[sym]
+                    pnl = ((p - pos['price']) / pos['price']) * 100
+                    if pnl > pos['max_pnl']: pos['max_pnl'] = pnl
+                    
+                    # ขยับจุด Stop Loss ตามกำไร (Trailing Stop)
+                    new_sl = p - (ind['atr'] * self.risk_per_trade)
+                    if new_sl > pos['sl']: 
+                        pos['sl'] = new_sl
+                        self._save_state(sym, pos)
+
+                    if p <= pos['sl']: 
+                        if self.place_order("sell", sym, pos['units'], p):
+                            self.notify(f"📤 <b>SELL {sym} @ {p:,.2f}</b>\nPnL: {pnl:+.2f}%")
+                            del self.positions[sym]; self._save_state(sym, None)
+
+                # 3. สแกนหาจังหวะซื้อ (Buy Logic)
+                for sym in qualified:
+                    if sym in self.positions: continue
+                    ind = self.get_indicators_deep(sym)
+                    if ind:
+                        current_scan_data.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price'], "trend": ind['trend']})
+                        if len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
+                            if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
+                                new_pos = {"price": ind['price'], "units": self.budget_per_slot/ind['price'], 
+                                           "sl": ind['price'] - (ind['atr'] * self.risk_per_trade), "max_pnl": 0.0}
+                                self.positions[sym] = new_pos; self._save_state(sym, new_pos)
+                                self.notify(f"🚀 <b>BUY {sym} @ {ind['price']:,.2f}</b>\nRSI: {ind['rsi']:.2f}")
+                                thb -= self.budget_per_slot
+                    time.sleep(0.5)
+
+                if current_scan_data:
+                    self.latest_scan_results = sorted(current_scan_data, key=lambda x: x['rsi'])[:5]
+
+                # 4. ส่งรายงานฉบับเต็มทุก 10 นาที
+                if time.time() - last_rep >= 600:
+                    self._report_full(thb)
+                    last_rep = time.time()
+
+            except Exception as e: print(f"Runtime Error: {e}"); time.sleep(15)
+            time.sleep(15)
 
     def _report_full(self, thb):
-        """ รายงานฉบับเต็มรูปแบบเดียวกับที่พี่เคยใช้ (สวยงามและครบถ้วน) """
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, total_units, slot_details = 0, 0, ""
         
-        # ดึงตัวที่ RSI ต่ำสุดมาโชว์ใน Market Intelligence
+        # เลือกตัวโชว์ Market Intelligence
         best = self.latest_scan_results[0] if self.latest_scan_results else None
         m_price, m_trend, m_rsi = (best['price'], best['trend'], best['rsi']) if best else (0, "SCANNING", 0)
 
@@ -104,4 +197,10 @@ class TitanUltimateV16_4_Full:
                f"🎯 <b>STRATEGY OMNI-SLOT</b>\n{slot_details}")
         self.notify(msg)
 
-    # ... (ส่วน run() ที่เรียกใช้ _report_full) ...
+    def notify(self, m):
+        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
+                           json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
+        except: pass
+
+if __name__ == "__main__":
+    TitanMasterV16_4().run()
