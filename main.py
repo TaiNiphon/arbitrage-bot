@@ -13,11 +13,12 @@ class TitanMasterV17_2:
         # --- 2. STRATEGY SETTINGS ---
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", "1800.0"))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "35.0"))
+        self.rsi_sell_zone = 70.0 # เพิ่มโซนเฝ้าระวังขาย
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.5"))
         self.max_slots = int(os.getenv("MAX_SLOTS", "3"))
         self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "600.0"))
         self.min_volume_thb = float(os.getenv("MIN_VOLUME_THB", "3000000.0")) 
-        self.fee_rate = 0.0025 # ค่าธรรมเนียม 0.25%
+        self.fee_rate = 0.0025
 
         # --- 3. SYSTEM STATE ---
         self.positions = {}                
@@ -27,7 +28,7 @@ class TitanMasterV17_2:
 
         self._init_db()                    
         self._sync_positions()
-        self.notify(f"<b>💠 TITAN V.17.2 | ULTIMATE ALPHA ONLINE</b>\n<i>Status: BTC Sentinel & Bar Precision Fixed</i>")
+        self.notify(f"<b>💠 TITAN V.17.2 | ULTIMATE ALPHA ONLINE</b>\n<i>Status: Smart Visual & Dual-Zone Active</i>")
 
     def _init_db(self):
         try:
@@ -49,7 +50,6 @@ class TitanMasterV17_2:
             for row in cur.fetchall():
                 self.positions[row[0]] = {"price": row[1], "units": row[2], "sl": row[3], "max_pnl": row[4]}
             cur.close(); conn.close()
-            print(f"✅ Synced {len(self.positions)} positions from DB")
         except: pass
 
     def get_indicators_v15_style(self, symbol):
@@ -125,7 +125,7 @@ class TitanMasterV17_2:
                     buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
                     sell_val = (p * pos['units']) * (1 - self.fee_rate)
                     pnl_pct = ((sell_val - buy_val) / buy_val) * 100
-
+                    
                     if pnl_pct > pos['max_pnl']: pos['max_pnl'] = pnl_pct 
                     new_sl = p - (ind['atr'] * self.risk_per_trade)
                     if new_sl > pos['sl']: 
@@ -179,7 +179,7 @@ class TitanMasterV17_2:
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, slot_details = 0, ""
         alpha = self.latest_scan_results[0] if self.latest_scan_results else self.sample_asset
-
+        
         for i, (sym, pos) in enumerate(self.positions.items(), 1):
             ind = self.get_indicators_v15_style(sym)
             p = ind['price'] if ind else pos['price']
@@ -189,18 +189,30 @@ class TitanMasterV17_2:
             pnl = ((current_val - buy_val) / buy_val) * 100
             slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
 
+        # --- แก้ไขส่วน Visual Bar ใหม่ทั้งหมด ---
         for i in range(len(self.positions) + 1, self.max_slots + 1):
-            # --- ปรับปรุงสูตรแถบพลังตรงนี้ครับพี่ติ๊ก ---
-            dist = max(0, alpha['rsi'] - self.rsi_buy_target)
-            black_count = max(0, 5 - int(dist/1.5)) # หาร 1.5 เพื่อให้แถบลดลงเร็วขึ้นเมื่อราคาดีด
-            if alpha['rsi'] <= self.rsi_buy_target: black_count = 5
+            rsi_now = alpha['rsi']
+            bar_display = ""
             
-            bar = ("▪️" * black_count + "▫️" * (5 - black_count))[:5]
-            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {alpha['rsi']:.1f} ({alpha['sym'].replace('THB_','')})\n"
+            if rsi_now <= self.rsi_buy_target:
+                # โซนซื้อ: ยิ่งต่ำ ยิ่งดำเติมจากซ้าย
+                fill = max(0, min(5, int((self.rsi_buy_target - rsi_now) / 2) + 1))
+                bar_display = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
+            elif rsi_now >= self.rsi_sell_zone:
+                # โซนขาย: ยิ่งสูง ยิ่งดำเติมจากขวา
+                fill = max(0, min(5, int((rsi_now - self.rsi_sell_zone) / 2) + 1))
+                bar_display = "📈 " + "▫️" * (5 - fill) + "▪️" * fill
+            else:
+                # โซนกลาง: ใช้จุดวิ่งบอกตำแหน่ง 35-70
+                progress = int((rsi_now - 35) / (70 - 35) * 5)
+                progress = max(0, min(4, progress))
+                bar_display = "▫️" * progress + "🔹" + "▫️" * (4 - progress)
+
+            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar_display}] RSI {rsi_now:.1f} ({alpha['sym'].replace('THB_','')})\n"
 
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-
+        
         msg = (
             f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -210,7 +222,7 @@ class TitanMasterV17_2:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 <b>INTELLIGENCE (Ref: {alpha['sym'].replace('THB_','')})</b>\n"
             f"• Last Price: {alpha['price']:,.2f} THB\n"
-            f"• Momentum: ⚡ RSI {alpha['rsi']:.1f} (Target: {self.rsi_buy_target})\n"
+            f"• Momentum: ⚡ RSI {alpha['rsi']:.1f} (TGT: {self.rsi_buy_target})\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
             f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
