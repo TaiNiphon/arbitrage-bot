@@ -18,7 +18,7 @@ class TitanMasterV17_2:
         self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "600.0"))
         self.min_volume_thb = float(os.getenv("MIN_VOLUME_THB", "3000000.0")) 
         self.fee_rate = 0.0025 # ค่าธรรมเนียม 0.25%
-        
+
         # --- 3. SYSTEM STATE ---
         self.positions = {}                
         self.latest_scan_results = []
@@ -26,8 +26,8 @@ class TitanMasterV17_2:
         self.sample_asset = {"sym": "XRP", "price": 0.0, "rsi": 0.0}
 
         self._init_db()                    
-        self._sync_positions() # แก้ไขจุดที่ทำให้ Error แล้วครับ
-        self.notify(f"<b>💠 TITAN V.17.2 | ULTIMATE ALPHA ONLINE</b>\n<i>Status: BTC Sentinel & Net Fee Active</i>")
+        self._sync_positions()
+        self.notify(f"<b>💠 TITAN V.17.2 | ULTIMATE ALPHA ONLINE</b>\n<i>Status: BTC Sentinel & Bar Precision Fixed</i>")
 
     def _init_db(self):
         try:
@@ -43,7 +43,6 @@ class TitanMasterV17_2:
         except Exception as e: print(f"⚠️ DB Error: {e}")
 
     def _sync_positions(self):
-        """ ดึงข้อมูลจากฐานข้อมูลเมื่อเริ่มระบบใหม่ """
         try:
             conn = psycopg2.connect(self.db_url); cur = conn.cursor()
             cur.execute("SELECT symbol, avg_price, total_units, dynamic_sl, max_pnl FROM bot_positions_v17")
@@ -118,17 +117,15 @@ class TitanMasterV17_2:
                 current_scan_data = []
                 bullish_count = 0
 
-                # 2. MONITOR & SELL (ระบบขายคำนวณหัก FEE 0.25%)
+                # MONITOR & SELL
                 for sym in list(self.positions.keys()):
                     ind = self.get_indicators_v15_style(sym)
                     if not ind: continue
                     p, pos = ind['price'], self.positions[sym]
-                    
-                    # คำนวณ ROI แบบหักค่าธรรมเนียมทั้งขาซื้อและขาขาย
                     buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
                     sell_val = (p * pos['units']) * (1 - self.fee_rate)
                     pnl_pct = ((sell_val - buy_val) / buy_val) * 100
-                    
+
                     if pnl_pct > pos['max_pnl']: pos['max_pnl'] = pnl_pct 
                     new_sl = p - (ind['atr'] * self.risk_per_trade)
                     if new_sl > pos['sl']: 
@@ -147,26 +144,22 @@ class TitanMasterV17_2:
                             cur.execute("DELETE FROM bot_positions_v17 WHERE symbol=%s", (sym,))
                             conn.commit(); cur.close(); conn.close()
 
-                # 3. SCAN & BUY (หัก FEE 0.25% เพื่อหาหน่วยเหรียญที่ได้จริง)
+                # SCAN & BUY
                 for sym in qualified:
                     if sym in self.positions: continue
                     ind = self.get_indicators_v15_style(sym)
                     if ind:
                         if ind['trend'] == 1: bullish_count += 1
                         current_scan_data.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
-
                         if btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
                             if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
-                                # จำนวนหน่วยเหรียญที่ได้รับจริงหลังหักค่าธรรมเนียม
                                 units = (self.budget_per_slot * (1 - self.fee_rate)) / ind['price']
                                 sl = ind['price'] - (ind['atr'] * self.risk_per_trade)
                                 self.positions[sym] = {"price": ind['price'], "units": units, "sl": sl, "max_pnl": 0.0}
-                                
                                 conn = psycopg2.connect(self.db_url); cur = conn.cursor()
                                 cur.execute("INSERT INTO bot_positions_v17 VALUES (%s,%s,%s,%s,%s,%s)", 
                                             (sym, ind['price'], units, sl, 0.0, datetime.now()))
                                 conn.commit(); cur.close(); conn.close()
-                                
                                 self._log_trade(sym, "BUY", ind['price'])
                                 self.notify(f"🚀 <b>BUY {sym.split('_')[1]}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
@@ -186,26 +179,28 @@ class TitanMasterV17_2:
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, slot_details = 0, ""
         alpha = self.latest_scan_results[0] if self.latest_scan_results else self.sample_asset
-        
+
         for i, (sym, pos) in enumerate(self.positions.items(), 1):
             ind = self.get_indicators_v15_style(sym)
             p = ind['price'] if ind else pos['price']
-            # มูลค่าเหรียญปัจจุบันหักค่าธรรมเนียมขาย
             current_val = (pos['units'] * p) * (1 - self.fee_rate)
             total_asset_val += current_val
-            
             buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
             pnl = ((current_val - buy_val) / buy_val) * 100
             slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
 
         for i in range(len(self.positions) + 1, self.max_slots + 1):
+            # --- ปรับปรุงสูตรแถบพลังตรงนี้ครับพี่ติ๊ก ---
             dist = max(0, alpha['rsi'] - self.rsi_buy_target)
-            bar = "▪️" * max(0, 5 - int(dist/1.5)) + "▫️" * min(5, int(dist/1.5))
-            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar[:5]}] RSI {alpha['rsi']:.1f} ({alpha['sym'].replace('THB_','')})\n"
+            black_count = max(0, 5 - int(dist/1.5)) # หาร 1.5 เพื่อให้แถบลดลงเร็วขึ้นเมื่อราคาดีด
+            if alpha['rsi'] <= self.rsi_buy_target: black_count = 5
+            
+            bar = ("▪️" * black_count + "▫️" * (5 - black_count))[:5]
+            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {alpha['rsi']:.1f} ({alpha['sym'].replace('THB_','')})\n"
 
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        
+
         msg = (
             f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
