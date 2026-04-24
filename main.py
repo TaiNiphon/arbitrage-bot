@@ -200,7 +200,7 @@ class TitanMasterV17_2:
 
         for i in range(len(self.positions) + 1, self.max_slots + 1):
             dist = max(0, alpha['rsi'] - self.rsi_buy_target)
-            bar = "▪️" * max(0, 5 - int(dist/3)) + "▫️" * min(5, int(dist/3))
+            bar = "▪️" * max(0, 5 - int(dist/1.5)) + "▫️" * min(5, int(dist/1.5))
             slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar[:5]}] RSI {alpha['rsi']:.1f} ({alpha['sym'].replace('THB_','')})\n"
 
         equity = thb + total_asset_val
