@@ -160,7 +160,7 @@ class TitanMasterV17:
                                 self.positions[sym] = new_pos; self._save_state(sym, new_pos)
                                 self.notify(f"🚀 <b>BUY {sym.split('_')[1]} @ {ind['price']:,.2f}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
-                    time.sleep(0.3)
+                    time.sleep(1.0)
 
                 if current_scan_data:
                     self.latest_scan_results = sorted(current_scan_data, key=lambda x: x['rsi'])[:5]
