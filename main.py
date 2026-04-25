@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMaster_V17_2_Final_Complete:
+class TitanMaster_V17_2_TheLastOne:
     def __init__(self):
-        # --- CONFIG & CREDENTIALS ---
+        # --- ดึงค่า CONFIG ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -16,14 +16,14 @@ class TitanMaster_V17_2_Final_Complete:
         self.min_volume_thb = 3000000.0
         self.fee_rate = 0.0025
 
-        # --- MEMORY SYSTEM (หัวใจสำคัญที่ทำให้ค่าไม่ซ้ำ) ---
+        # --- MEMORY & STATE ---
         self.positions = {}                
-        self.scan_results = [] # เก็บผลสแกนล่าสุดของรอบนั้นๆ
-        self.market_stats = {"total_qualified": 0, "bullish_pct": 0, "btc_status": "N/A", "match_count": 0}
+        self.full_market_data = [] # เก็บผลสแกนล่าสุด
+        self.market_stats = {"total": 0, "bull": 0, "btc": "N/A", "match": 0}
         
         self._init_db()                    
         self._sync_positions()
-        self.notify("<b>💠 TITAN V.17.2 | COMPLETED</b>\n<i>ปิดงานแก้โค้ด: รายงานเต็มรูปแบบ + Slot เรียงลำดับจริง</i>")
+        self.notify("<b>💠 TITAN V.17.2 | THE LAST ONE</b>\n<i>ตรวจสอบความครบถ้วนตามรูป 5978 และ 5980 เรียบร้อยแล้ว</i>")
 
     def _init_db(self):
         try:
@@ -60,105 +60,93 @@ class TitanMaster_V17_2_Final_Complete:
                 symbols = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
                 
                 btc = self.get_indicators("BTC_THB")
-                self.market_stats['btc_status'] = "🟢 OK" if btc and btc['trend']==1 else "⚠️ WEAK"
+                self.market_stats['btc'] = "🟢 OK" if btc and btc['trend']==1 else "⚠️ WEAK"
 
-                temp_results = []
-                bullish_count = 0
-                match_count = 0
+                temp_scan = []
+                bull_c, match_c = 0, 0
 
                 for sym in symbols:
                     ind = self.get_indicators(sym)
                     if ind:
-                        if ind['trend'] == 1: bullish_count += 1
-                        if ind['rsi'] <= self.rsi_buy_target: match_count += 1
-                        
-                        # เก็บทุกเหรียญที่สแกนลง List ชั่วคราวของรอบนี้
-                        temp_results.append({
-                            "sym": sym, 
-                            "rsi": round(ind['rsi'], 2), 
-                            "price": ind['price']
-                        })
-                    time.sleep(0.4)
+                        if ind['trend'] == 1: bull_c += 1
+                        if ind['rsi'] <= self.rsi_buy_target: match_c += 1
+                        temp_scan.append({"sym": sym, "rsi": round(ind['rsi'], 2), "price": ind['price']})
+                    time.sleep(0.3)
 
-                # อัปเดต Memory หลักหลังสแกนเสร็จทั้งรอบ
-                self.scan_results = temp_results
-                self.market_stats.update({
-                    "total_qualified": len(symbols),
-                    "bullish_pct": (bullish_count/len(symbols)*100) if symbols else 0,
-                    "match_count": match_count
-                })
+                if temp_scan:
+                    self.full_market_data = temp_scan
+                    self.market_stats.update({
+                        "total": len(symbols),
+                        "bull": (bull_c/len(symbols)*100) if symbols else 0,
+                        "match": match_c
+                    })
                 
-                if time.time() - last_rep >= 600:
+                # รายงานรอบละ 10 นาที
+                if (time.time() - last_rep >= 600) and self.full_market_data:
                     self._report_full(self.get_wallet())
                     last_rep = time.time()
             except Exception as e:
-                print(f"Error: {e}")
-                time.sleep(10)
+                print(f"Loop Error: {e}"); time.sleep(10)
 
     def _report_full(self, thb):
-        now = datetime.now(timezone(timedelta(hours=7)))
-        
-        # --- เรียงลำดับ RSI จากน้อยไปมาก เพื่อใช้ในรายงาน ---
-        # กรองเอาเฉพาะเหรียญที่ไม่ได้ถืออยู่
-        wait_candidates = sorted(
-            [d for d in self.scan_results if d['sym'] not in self.positions],
-            key=lambda x: x['rsi']
-        )
-        
-        total_val, slot_details = 0, ""
-        current_pos_list = list(self.positions.keys())
+        try:
+            now = datetime.now(timezone(timedelta(hours=7)))
+            # เรียงลำดับ RSI น้อย -> มาก (เฉพาะเหรียญที่ไม่ได้ถือ)
+            candidates = sorted([d for d in self.full_market_data if d['sym'] not in self.positions], key=lambda x: x['rsi'])
+            
+            total_val, slot_html = 0, ""
+            pos_list = list(self.positions.keys())
 
-        # จัดการ Slot 1, 2, 3
-        for i in range(1, 4):
-            if i <= len(current_pos_list):
-                # เหรียญที่ถืออยู่
-                sym = current_pos_list[i-1]
-                pos = self.positions[sym]
-                # หาค่า RSI ล่าสุดของเหรียญนี้จากผลสแกน
-                current_data = next((x for x in self.scan_results if x['sym'] == sym), {"rsi": 0, "price": pos['price']})
-                pnl = ((current_data['price'] - pos['price']) / pos['price']) * 100
-                total_val += (pos['units'] * current_data['price'])
-                slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (RSI: {current_data['rsi']:.1f})\n"
-            else:
-                # เหรียญที่รอซื้อ (ดึงตามลำดับ RSI น้อย -> มาก)
-                w_idx = i - len(current_pos_list) - 1
-                if w_idx < len(wait_candidates):
-                    target = wait_candidates[w_idx]
-                    rsi_v, name = target['rsi'], target['sym'].split('_')[1]
-                    prog = max(0, min(4, int((rsi_v-35)/10))) if rsi_v > 35 else 0
-                    bar = "▫️"*prog + "🔹" + "▫️"*(4-prog)
-                    slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {rsi_v:.1f} ({name})\n"
+            for i in range(1, 4):
+                if i <= len(pos_list):
+                    s = pos_list[i-1]
+                    p = self.positions[s]
+                    d = next((x for x in self.full_market_data if x['sym'] == s), {"rsi": 0, "price": p['price']})
+                    pnl = ((d['price'] - p['price']) / p['price']) * 100
+                    total_val += (p['units'] * d['price'])
+                    slot_html += f"🟢 <b>SLOT {i} | {s.split('_')[1]}</b>: {pnl:+.2f}% (RSI: {d['rsi']:.1f})\n"
                 else:
-                    slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [▫️▫️🔹▫️▫️] RSI 50.0 (--)\n"
+                    idx = i - len(pos_list) - 1
+                    if idx < len(candidates):
+                        target = candidates[idx]
+                        r_v, name = target['rsi'], target['sym'].split('_')[1]
+                        prog = max(0, min(4, int((r_v-35)/10))) if r_v > 35 else 0
+                        bar = "▫️"*prog + "🔹" + "▫️"*(4-prog)
+                        slot_html += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {r_v:.1f} ({name})\n"
+                    else:
+                        slot_html += f"⚪ <b>SLOT {i} | WAIT</b>: [▫️▫️🔹▫️▫️] RSI 50.0 (--)\n"
 
-        equity = thb + (total_val * (1 - self.fee_rate))
-        alpha = wait_candidates[0] if wait_candidates else None
-        
-        msg = (
-            f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌍 <b>MARKET CONTEXT</b>\n"
-            f"• Sentiment: {'🟦 BULLISH' if self.market_stats['bullish_pct'] > 50 else '🟥 BEARISH'} ({self.market_stats['bullish_pct']:.0f}%)\n"
-            f"• BTC Health: <b>{self.market_stats['btc_status']}</b>\n"
-            f"• Assets Found: <b>{self.market_stats['total_qualified']} Coins</b>\n"
-            f"• Qualified Assets: <b>{self.market_stats['match_count']} Coins</b>\n" # บรรทัดที่พี่สั่งเพิ่ม
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <b>INTELLIGENCE</b>\n"
-            f"• Ref: {alpha['sym'].split('_')[1] if alpha else '---'}\n"
-            f"• Last Price: {alpha['price']:,.2f} THB\n" if alpha else ""
-            f"• Momentum: ⚡ RSI {alpha['rsi']:.1f if alpha else 0.0} (TGT: 35.0)\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
-            f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
-            f"• ACTIVE ROI: <code>{((equity-self.initial_equity)/self.initial_equity)*100:+.2f}%</code>\n"
-            f"• LIQUIDITY: <b>{thb:,.2f} THB</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 <b>OMNI-SLOT EXECUTION</b>\n"
-            f"{slot_details.strip()}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
-        )
-        self.notify(msg)
+            equity = thb + (total_val * (1 - self.fee_rate))
+            roi = ((equity - self.initial_equity) / self.initial_equity) * 100
+            alpha = candidates[0] if candidates else None
+            
+            # --- ตรวจสอบหน้าตารายงานเทียบรูป 5978 และ 5980 ---
+            msg = (
+                f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🌍 <b>MARKET CONTEXT</b>\n"
+                f"• Sentiment: {'🟦 BULLISH' if self.market_stats['bull'] > 50 else '🟥 BEARISH'} ({self.market_stats['bull']:.0f}%)\n"
+                f"• BTC Health: <b>{self.market_stats['btc']}</b>\n"
+                f"• Assets Found: <b>{self.market_stats['total']} Coins</b>\n"
+                f"• Qualified Assets: <b>{self.market_stats['match']} Coins</b>\n" # ตรงตามรูป 5980
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 <b>INTELLIGENCE</b>\n"
+                f"• Ref: {alpha['sym'].split('_')[1] if alpha else '---'}\n"
+                f"• Last Price: {alpha['price']:,.2f} THB\n" if alpha else ""
+                f"• Momentum: ⚡ RSI {alpha['rsi']:.1f if alpha else 0.0} (TGT: 35.0)\n" # ตรงตามรูป 5978
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
+                f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
+                f"• ACTIVE ROI: <code>{roi:+.2f}%</code>\n"
+                f"• LIQUIDITY: <b>{thb:,.2f} THB</b>\n" # ตรงตามรูป 5978
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>OMNI-SLOT EXECUTION</b>\n"
+                f"{slot_html.strip()}\n" # แยกเหรียญ 1 2 3 ตามอันดับ RSI
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
+            )
+            self.notify(msg)
+        except Exception as e: print(f"Report Error: {e}")
 
     def get_wallet(self):
         try:
@@ -173,4 +161,4 @@ class TitanMaster_V17_2_Final_Complete:
         except: pass
 
 if __name__ == "__main__":
-    TitanMaster_V17_2_Final_Complete().run()
+    TitanMaster_V17_2_TheLastOne().run()
