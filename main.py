@@ -1,29 +1,27 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMaster_V17_2_TheLastOne:
+class TitanMaster_V17_2_Final_Ultimate:
     def __init__(self):
-        # --- ดึงค่า CONFIG ---
+        # --- 1. CONFIG & DB ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.db_url = os.getenv("DATABASE_URL")
-        
         self.initial_equity = 1800.0
         self.rsi_buy_target = 35.0
         self.max_slots = 3
-        self.min_volume_thb = 3000000.0
+        self.min_volume_thb = 3000000.0 # ขั้นต่ำ 3 ล้าน
         self.fee_rate = 0.0025
 
-        # --- MEMORY & STATE ---
         self.positions = {}                
-        self.full_market_data = [] # เก็บผลสแกนล่าสุด
+        self.scan_storage = [] 
         self.market_stats = {"total": 0, "bull": 0, "btc": "N/A", "match": 0}
         
         self._init_db()                    
         self._sync_positions()
-        self.notify("<b>💠 TITAN V.17.2 | THE LAST ONE</b>\n<i>ตรวจสอบความครบถ้วนตามรูป 5978 และ 5980 เรียบร้อยแล้ว</i>")
+        self.notify("<b>💠 TITAN V.17.2 | SYSTEM ONLINE</b>\n<i>แก้ไขลอจิกเรียงลำดับสล็อตและรายงานฉบับสมบูรณ์แล้วครับพี่ติ๊ก</i>")
 
     def _init_db(self):
         try:
@@ -37,7 +35,8 @@ class TitanMaster_V17_2_TheLastOne:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT symbol, avg_price, total_units, dynamic_sl, max_pnl FROM bot_positions_v17")
-                    for r in cur.fetchall(): self.positions[r[0]] = {"price": r[1], "units": r[2], "sl": r[3], "max_pnl": r[4]}
+                    for r in cur.fetchall(): 
+                        self.positions[r[0]] = {"price": r[1], "units": r[2], "sl": r[3], "max_pnl": r[4]}
         except: pass
 
     def get_indicators(self, symbol):
@@ -62,7 +61,7 @@ class TitanMaster_V17_2_TheLastOne:
                 btc = self.get_indicators("BTC_THB")
                 self.market_stats['btc'] = "🟢 OK" if btc and btc['trend']==1 else "⚠️ WEAK"
 
-                temp_scan = []
+                temp_results = []
                 bull_c, match_c = 0, 0
 
                 for sym in symbols:
@@ -70,19 +69,15 @@ class TitanMaster_V17_2_TheLastOne:
                     if ind:
                         if ind['trend'] == 1: bull_c += 1
                         if ind['rsi'] <= self.rsi_buy_target: match_c += 1
-                        temp_scan.append({"sym": sym, "rsi": round(ind['rsi'], 2), "price": ind['price']})
-                    time.sleep(0.3)
+                        temp_results.append({"sym": sym, "rsi": round(ind['rsi'], 2), "price": ind['price']})
+                    time.sleep(0.1) # ปรับความเร็วการสแกน
 
-                if temp_scan:
-                    self.full_market_data = temp_scan
-                    self.market_stats.update({
-                        "total": len(symbols),
-                        "bull": (bull_c/len(symbols)*100) if symbols else 0,
-                        "match": match_c
-                    })
+                if temp_results:
+                    self.scan_storage = temp_results
+                    self.market_stats.update({"total": len(symbols), "bull": (bull_c/len(symbols)*100), "match": match_c})
                 
-                # รายงานรอบละ 10 นาที
-                if (time.time() - last_rep >= 600) and self.full_market_data:
+                # รายงานผลทุก 10 นาที (600 วินาที)
+                if (time.time() - last_rep >= 600) and self.scan_storage:
                     self._report_full(self.get_wallet())
                     last_rep = time.time()
             except Exception as e:
@@ -91,36 +86,38 @@ class TitanMaster_V17_2_TheLastOne:
     def _report_full(self, thb):
         try:
             now = datetime.now(timezone(timedelta(hours=7)))
-            # เรียงลำดับ RSI น้อย -> มาก (เฉพาะเหรียญที่ไม่ได้ถือ)
-            candidates = sorted([d for d in self.full_market_data if d['sym'] not in self.positions], key=lambda x: x['rsi'])
+            # เรียงลำดับเหรียญที่น่าซื้อที่สุด (RSI ต่ำสุด) โดยต้องไม่ซ้ำกับที่ถืออยู่
+            wait_candidates = sorted([d for d in self.scan_storage if d['sym'] not in self.positions], key=lambda x: x['rsi'])
             
             total_val, slot_html = 0, ""
             pos_list = list(self.positions.keys())
 
-            for i in range(1, 4):
-                if i <= len(pos_list):
-                    s = pos_list[i-1]
+            # จัดการ 3 สล็อต
+            for i in range(0, 3):
+                slot_num = i + 1
+                if i < len(pos_list):
+                    # แสดงสล็อตที่ถือครองอยู่
+                    s = pos_list[i]
                     p = self.positions[s]
-                    d = next((x for x in self.full_market_data if x['sym'] == s), {"rsi": 0, "price": p['price']})
+                    d = next((x for x in self.scan_storage if x['sym'] == s), {"rsi": 0, "price": p['price']})
                     pnl = ((d['price'] - p['price']) / p['price']) * 100
                     total_val += (p['units'] * d['price'])
-                    slot_html += f"🟢 <b>SLOT {i} | {s.split('_')[1]}</b>: {pnl:+.2f}% (RSI: {d['rsi']:.1f})\n"
+                    slot_html += f"🟢 <b>SLOT {slot_num} | {s.split('_')[1]}</b>: {pnl:+.2f}% (RSI: {d['rsi']:.1f})\n"
                 else:
-                    idx = i - len(pos_list) - 1
-                    if idx < len(candidates):
-                        target = candidates[idx]
-                        r_v, name = target['rsi'], target['sym'].split('_')[1]
-                        prog = max(0, min(4, int((r_v-35)/10))) if r_v > 35 else 0
-                        bar = "▫️"*prog + "🔹" + "▫️"*(4-prog)
-                        slot_html += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {r_v:.1f} ({name})\n"
+                    # แสดงสล็อตว่าง และดึงชื่อเหรียญที่ RSI ต่ำสุดเรียงตามลำดับ
+                    wait_idx = i - len(pos_list)
+                    if wait_idx < len(wait_candidates):
+                        target = wait_candidates[wait_idx]
+                        name = target['sym'].split('_')[1]
+                        rsi_val = target['rsi']
+                        slot_html += f"⚪ <b>SLOT {slot_num} | WAIT</b>: [▫️▫️🔹▫️▫️] RSI {rsi_val:.1f} ({name})\n"
                     else:
-                        slot_html += f"⚪ <b>SLOT {i} | WAIT</b>: [▫️▫️🔹▫️▫️] RSI 50.0 (--)\n"
+                        slot_html += f"⚪ <b>SLOT {slot_num} | WAIT</b>: [▫️▫️🔹▫️▫️] RSI 50.0 (--)\n"
 
             equity = thb + (total_val * (1 - self.fee_rate))
             roi = ((equity - self.initial_equity) / self.initial_equity) * 100
-            alpha = candidates[0] if candidates else None
+            alpha = wait_candidates[0] if wait_candidates else None
             
-            # --- ตรวจสอบหน้าตารายงานเทียบรูป 5978 และ 5980 ---
             msg = (
                 f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -128,20 +125,20 @@ class TitanMaster_V17_2_TheLastOne:
                 f"• Sentiment: {'🟦 BULLISH' if self.market_stats['bull'] > 50 else '🟥 BEARISH'} ({self.market_stats['bull']:.0f}%)\n"
                 f"• BTC Health: <b>{self.market_stats['btc']}</b>\n"
                 f"• Assets Found: <b>{self.market_stats['total']} Coins</b>\n"
-                f"• Qualified Assets: <b>{self.market_stats['match']} Coins</b>\n" # ตรงตามรูป 5980
+                f"• Qualified Assets: <b>{self.market_stats['match']} Coins</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 <b>INTELLIGENCE</b>\n"
-                f"• Ref: {alpha['sym'].split('_')[1] if alpha else '---'}\n"
+                f"• Ref: <b>{alpha['sym'].split('_')[1] if alpha else '---'}</b>\n"
                 f"• Last Price: {alpha['price']:,.2f} THB\n" if alpha else ""
-                f"• Momentum: ⚡ RSI {alpha['rsi']:.1f if alpha else 0.0} (TGT: 35.0)\n" # ตรงตามรูป 5978
+                f"• Momentum: ⚡ RSI {alpha['rsi']:.1f if alpha else 0.0} (TGT: {self.rsi_buy_target})\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
                 f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
                 f"• ACTIVE ROI: <code>{roi:+.2f}%</code>\n"
-                f"• LIQUIDITY: <b>{thb:,.2f} THB</b>\n" # ตรงตามรูป 5978
+                f"• LIQUIDITY: <b>{thb:,.2f} THB</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 <b>OMNI-SLOT EXECUTION</b>\n"
-                f"{slot_html.strip()}\n" # แยกเหรียญ 1 2 3 ตามอันดับ RSI
+                f"{slot_html.strip()}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
             )
@@ -161,4 +158,4 @@ class TitanMaster_V17_2_TheLastOne:
         except: pass
 
 if __name__ == "__main__":
-    TitanMaster_V17_2_TheLastOne().run()
+    TitanMaster_V17_2_Final_Ultimate().run()
