@@ -24,11 +24,16 @@ class TitanMasterV17_2:
         self.positions = {}                
         self.latest_scan_results = []
         self.market_stats = {"total_qualified": 0, "bullish_pct": 0, "btc_status": "N/A"}
-        self.sample_asset = {"sym": "XRP_THB", "price": 0.0, "rsi": 0.0}
+        # เหรียญสำรองสำหรับรายงานรอบแรกที่บอทยังไม่ได้สแกนตลาด
+        self.fallback_assets = [
+            {"sym": "XRP_THB", "rsi": 50.0},
+            {"sym": "ADA_THB", "rsi": 50.0},
+            {"sym": "IOST_THB", "rsi": 50.0}
+        ]
 
         self._init_db()                    
         self._sync_positions()
-        self.notify(f"<b>💠 TITAN V.17.2 | ONLINE</b>\n<i>Status: Smart Scan & Visual Fixed</i>")
+        self.notify(f"<b>💠 TITAN V.17.2 | ONLINE</b>\n<i>Status: Smart Scan & Unique Slots Fixed</i>")
 
     def _init_db(self):
         try:
@@ -111,11 +116,6 @@ class TitanMasterV17_2:
                 ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
                 qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
 
-                # Update XRP sample for fallback
-                xrp_data = self.get_indicators_v15_style("XRP_THB")
-                if xrp_data:
-                    self.sample_asset = {"sym": "XRP_THB", "price": xrp_data['price'], "rsi": xrp_data['rsi']}
-
                 thb = self.get_wallet()
                 temp_scan = []
                 bullish_count = 0
@@ -131,7 +131,7 @@ class TitanMasterV17_2:
 
                     if pnl_pct > pos['max_pnl']: pos['max_pnl'] = pnl_pct 
                     new_sl = p - (ind['atr'] * self.risk_per_trade)
-                    
+
                     if new_sl > pos['sl']: 
                         pos['sl'] = new_sl
                         with psycopg2.connect(self.db_url) as conn:
@@ -154,7 +154,7 @@ class TitanMasterV17_2:
                     if ind:
                         if ind['trend'] == 1: bullish_count += 1
                         temp_scan.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
-                        
+
                         if sym not in self.positions and btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
                             if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
                                 units = (self.budget_per_slot * (1 - self.fee_rate)) / ind['price']
@@ -169,8 +169,10 @@ class TitanMasterV17_2:
                                 thb -= self.budget_per_slot
                     time.sleep(0.3)
 
-                # Update results after scanning all
-                self.latest_scan_results = sorted([d for d in temp_scan if d['sym'] not in self.positions], key=lambda x: x['rsi'])
+                # อัปเดตข้อมูลสแกนตลาดหลังจากการสแกนเหรียญทั้งหมดเสร็จสิ้น
+                if temp_scan:
+                    self.latest_scan_results = sorted([d for d in temp_scan if d['sym'] not in self.positions], key=lambda x: x['rsi'])
+                
                 self.market_stats.update({"total_qualified": len(qualified), "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0})
 
                 if time.time() - last_rep >= 600:
@@ -183,49 +185,47 @@ class TitanMasterV17_2:
     def _report_full(self, thb):
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, slot_details = 0, ""
-        
+
         # 1. รายละเอียดเหรียญที่ถืออยู่
-        for i, (sym, pos) in enumerate(self.positions.items(), 1):
-            ind = self.get_indicators_v15_style(sym)
-            p = ind['price'] if ind else pos['price']
-            current_val = (pos['units'] * p) * (1 - self.fee_rate)
-            total_asset_val += current_val
-            buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
-            pnl = ((current_val - buy_val) / buy_val) * 100
-            slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
-
-        # 2. รายละเอียดสล็อตที่ว่าง (Fix: ป้องกันค่า RSI 0.0)
-        filled = len(self.positions)
-        for i in range(filled + 1, self.max_slots + 1):
-            scan_idx = i - filled - 1
-            # ถ้ามีข้อมูลสแกนให้ใช้สแกน ถ้าไม่มีให้ใช้ XRP เป็นค่าเริ่มต้น
-            if scan_idx < len(self.latest_scan_results):
-                target = self.latest_scan_results[scan_idx]
+        current_slots = list(self.positions.keys())
+        for i in range(1, self.max_slots + 1):
+            if i <= len(current_slots):
+                sym = current_slots[i-1]
+                pos = self.positions[sym]
+                ind = self.get_indicators_v15_style(sym)
+                p = ind['price'] if ind else pos['price']
+                current_val = (pos['units'] * p) * (1 - self.fee_rate)
+                total_asset_val += current_val
+                buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
+                pnl = ((current_val - buy_val) / buy_val) * 100
+                slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
             else:
-                target = self.sample_asset
+                # 2. รายละเอียดสล็อตที่ว่าง (Logic แยกอันดับ)
+                scan_idx = i - len(current_slots) - 1
+                if scan_idx < len(self.latest_scan_results):
+                    target = self.latest_scan_results[scan_idx]
+                else:
+                    # ถ้ายังไม่มีผลสแกน ให้ใช้เหรียญสำรองตามลำดับสล็อต
+                    target = self.fallback_assets[min(i-1, 2)]
 
-            rsi_now = target['rsi']
-            name = target['sym'].replace('THB_','').replace('_THB','')
-            
-            # ป้องกันกรณีสแกนไม่สำเร็จให้โชว์ RSI ล่าสุดของ XRP
-            if rsi_now == 0.0 and self.sample_asset['rsi'] > 0:
-                rsi_now = self.sample_asset['rsi']
+                rsi_now = target['rsi']
+                name = target['sym'].replace('THB_','').replace('_THB','')
 
-            if rsi_now <= self.rsi_buy_target:
-                fill = max(0, min(5, int((self.rsi_buy_target - rsi_now) / 2) + 1))
-                bar = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
-            elif rsi_now >= self.rsi_sell_zone:
-                fill = max(0, min(5, int((rsi_now - self.rsi_sell_zone) / 2) + 1))
-                bar = "📈 " + "▫️" * (5 - fill) + "▪️" * fill
-            else:
-                progress = max(0, min(4, int((rsi_now - 35) / (70 - 35) * 5)))
-                bar = "▫️" * progress + "🔹" + "▫️" * (4 - progress)
+                if rsi_now <= self.rsi_buy_target:
+                    fill = max(0, min(5, int((self.rsi_buy_target - rsi_now) / 2) + 1))
+                    bar = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
+                elif rsi_now >= self.rsi_sell_zone:
+                    fill = max(0, min(5, int((rsi_now - self.rsi_sell_zone) / 2) + 1))
+                    bar = "📈 " + "▫️" * (5 - fill) + "▪️" * fill
+                else:
+                    progress = max(0, min(4, int((rsi_now - 35) / (70 - 35) * 5)))
+                    bar = "▫️" * progress + "🔹" + "▫️" * (4 - progress)
 
-            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {rsi_now:.1f} ({name})\n"
+                slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {rsi_now:.1f} ({name})\n"
 
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        alpha_name = self.latest_scan_results[0]['sym'].replace('THB_','') if self.latest_scan_results else "XRP"
+        alpha_name = self.latest_scan_results[0]['sym'].replace('THB_','') if self.latest_scan_results else "Scanning..."
 
         msg = (
             f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
