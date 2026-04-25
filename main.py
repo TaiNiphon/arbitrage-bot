@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMasterV17_2_Official:
+class TitanMasterV17_2_Final_Stable:
     def __init__(self):
-        # --- 1. CORE CONFIG ---
+        # --- 1. CORE CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -13,21 +13,21 @@ class TitanMasterV17_2_Official:
         # --- 2. STRATEGY SETTINGS ---
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", "1800.0"))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "35.0"))
-        self.rsi_sell_zone = 70.0 
+        self.rsi_sell_zone = 70.0
         self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "2.5"))
         self.max_slots = int(os.getenv("MAX_SLOTS", "3"))
         self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "600.0"))
-        self.min_volume_thb = 3000000.0 
+        self.min_volume_thb = 1000000.0  # ปรับลดลงเพื่อให้เห็นเหรียญตอนตลาดนิ่ง
         self.fee_rate = 0.0025
 
         # --- 3. SYSTEM STATE ---
         self.positions = {}                
         self.latest_scan_results = []
         self.market_stats = {"total_qualified": 0, "bullish_pct": 0, "btc_status": "N/A"}
-
+        
         self._init_db()                    
         self._sync_positions()
-        self.notify("<b>💠 TITAN V.17.2 | SYSTEM ONLINE</b>\n<i>Status: Scanner & RSI-Slots Active</i>")
+        self.notify("<b>💠 TITAN V.17.2 | FULL STABLE READY</b>\n<i>ระบบพร้อมสแกนทั้งตลาดและจัดลำดับ RSI แล้วครับ</i>")
 
     def _init_db(self):
         try:
@@ -36,7 +36,7 @@ class TitanMasterV17_2_Official:
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_positions_v17 (
                         symbol TEXT PRIMARY KEY, avg_price FLOAT, total_units FLOAT, 
                         dynamic_sl FLOAT, max_pnl FLOAT, updated_at TIMESTAMP)""")
-        except: pass
+        except Exception as e: print(f"DB Init Error: {e}")
 
     def _sync_positions(self):
         try:
@@ -49,7 +49,8 @@ class TitanMasterV17_2_Official:
 
     def get_indicators(self, symbol):
         try:
-            url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}"
+            end = int(time.time())
+            url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={end-86400}&to={end}"
             res = requests.get(url, timeout=10).json()
             if not res or 'c' not in res or len(res['c']) < 20: return None
             c, h, l = np.array(res['c'], dtype=float), np.array(res['h'], dtype=float), np.array(res['l'], dtype=float)
@@ -75,52 +76,62 @@ class TitanMasterV17_2_Official:
         last_rep = 0
         while True:
             try:
-                # 1. BTC & MARKET SCAN
-                btc = self.get_indicators("BTC_THB")
-                self.market_stats['btc_status'] = "🟢 OK" if btc and btc['trend'] == 1 else "⚠️ WEAK"
+                # 1. MARKET SCANNING
+                ticker_res = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
+                qualified = [s for s, v in ticker_res.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
 
-                ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
-                qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
-
-                current_scan_data, bullish_count = [], 0
+                temp_scan_data, bullish_count = [], 0
                 for sym in qualified:
                     ind = self.get_indicators(sym)
                     if ind:
                         if ind['trend'] == 1: bullish_count += 1
-                        current_scan_data.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
-                    time.sleep(0.3)
+                        temp_scan_data.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price'], "atr": ind['atr']})
+                    time.sleep(0.1)
 
-                if current_scan_data:
-                    self.latest_scan_results = sorted(current_scan_data, key=lambda x: x['rsi'])
-                    self.market_stats.update({"total_qualified": len(qualified), "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0})
+                if temp_scan_data:
+                    # เรียงลำดับตาม RSI น้อยไปมาก (คัดเอา 10 อันดับแรกมาไว้ดูข้อมูล)
+                    self.latest_scan_results = sorted(temp_scan_data, key=lambda x: x['rsi'])
+                    self.market_stats.update({
+                        "total_qualified": len(temp_scan_data),
+                        "bullish_pct": (bullish_count/len(temp_scan_data)*100)
+                    })
 
-                # 2. REPORT TRIGGER
+                # 2. BTC CHECK
+                btc = self.get_indicators("BTC_THB")
+                self.market_stats['btc_status'] = "🟢 OK" if btc and btc['trend'] == 1 else "⚠️ WEAK"
+
+                # 3. REPORTING (ทุก 10 นาที)
                 if time.time() - last_rep >= 600:
-                    self._report_full(self.get_wallet())
-                    last_rep = time.time()
+                    if self.latest_scan_results: # ป้องกันรายงานว่างเปล่าตอนเริ่มรัน
+                        self._report_full(self.get_wallet())
+                        last_rep = time.time()
+                    else:
+                        time.sleep(10) # รอสแกนรอบแรกให้เสร็จ
 
-            except Exception as e: print(f"Error: {e}"); time.sleep(10)
+            except Exception as e: 
+                print(f"Main Loop Error: {e}")
+                time.sleep(10)
 
     def _report_full(self, thb):
         now = datetime.now(timezone(timedelta(hours=7)))
         total_val, slot_html = 0, ""
         
-        # กองกลางเหรียญที่น่าสนใจ (เรียง RSI ต่ำสุด 3 อันดับแรก)
+        # รายการเหรียญที่รอคิว (ตัดเหรียญที่ถืออยู่ออก)
         wait_list = [d for d in self.latest_scan_results if d['sym'] not in self.positions]
         
         for i in range(1, self.max_slots + 1):
             pos_sym = list(self.positions.keys())[i-1] if i <= len(self.positions) else None
             
             if pos_sym:
-                # --- SLOT ถือครอง ---
-                p_data = self.positions[pos_sym]
+                # กรณีถือเหรียญอยู่ (🟢 ACTIVE SLOT)
+                pos_info = self.positions[pos_sym]
                 ind = next((x for x in self.latest_scan_results if x['sym'] == pos_sym), None)
-                curr_p = ind['price'] if ind else p_data['price']
-                total_val += (p_data['units'] * curr_p)
-                pnl = ((curr_p - p_data['price']) / p_data['price']) * 100
+                curr_p = ind['price'] if ind else pos_info['price']
+                total_val += (pos_info['units'] * curr_p)
+                pnl = ((curr_p - pos_info['price']) / pos_info['price']) * 100
                 slot_html += f"🟢 <b>SLOT {i} | {pos_sym.split('_')[1]}</b>: {pnl:+.2f}% (RSI: {ind['rsi'] if ind else 0:.1f})\n"
             else:
-                # --- SLOT ว่าง (แสดงเหรียญตามลำดับ RSI 1-2-3) ---
+                # กรณีสล็อตว่าง (⚪ WAITING SLOT - เรียงตามอันดับ RSI)
                 w_idx = i - len(self.positions) - 1
                 if 0 <= w_idx < len(wait_list):
                     t = wait_list[w_idx]
@@ -141,7 +152,7 @@ class TitanMasterV17_2_Official:
 
         equity = thb + (total_val * 0.9975)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        ref = self.latest_scan_results[0] if self.latest_scan_results else {"sym": "THB_BTC", "price": 0, "rsi": 0}
+        ref_asset = self.latest_scan_results[0] if self.latest_scan_results else {"sym": "BTC_THB", "price": 0, "rsi": 0}
 
         msg = (
             f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
@@ -151,9 +162,9 @@ class TitanMasterV17_2_Official:
             f"• BTC Health: <b>{self.market_stats['btc_status']}</b>\n"
             f"• Qualified: <b>{self.market_stats['total_qualified']} Assets</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <b>INTELLIGENCE (Rank #1: {ref['sym'].split('_')[1]})</b>\n"
-            f"• Last Price: {ref['price']:,.2f} THB\n"
-            f"• Momentum: ⚡ RSI {ref['rsi']:.1f}\n"
+            f"📊 <b>INTELLIGENCE (Rank #1: {ref_asset['sym'].split('_')[1]})</b>\n"
+            f"• Last Price: {ref_asset['price']:,.2f} THB\n"
+            f"• Momentum: ⚡ RSI {ref_asset['rsi']:.1f}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
             f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
@@ -172,4 +183,4 @@ class TitanMasterV17_2_Official:
         except: pass
 
 if __name__ == "__main__":
-    TitanMasterV17_2_Official().run()
+    TitanMasterV17_2_Final_Stable().run()
