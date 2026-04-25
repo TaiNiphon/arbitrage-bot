@@ -1,16 +1,16 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMasterV17_2_Final:
+class TitanMasterV17_2_Full_Final:
     def __init__(self):
-        # --- 1. CORE CONFIGURATION ---
+        # --- 1. CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- 2. STRATEGY SETTINGS ---
+        # --- 2. STRATEGY (V.15 Style) ---
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", "1800.0"))
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "35.0"))
         self.rsi_sell_zone = 70.0 
@@ -20,21 +20,14 @@ class TitanMasterV17_2_Final:
         self.min_volume_thb = float(os.getenv("MIN_VOLUME_THB", "3000000.0")) 
         self.fee_rate = 0.0025
 
-        # --- 3. SYSTEM STATE ---
+        # --- 3. STATE ---
         self.positions = {}                
         self.latest_scan_results = [] 
         self.market_stats = {"total_qualified": 0, "bullish_pct": 0, "btc_status": "N/A"}
         
-        # Fallback Assets: โชว์เฉพาะตอนเริ่มรันแล้วยังสแกนไม่เจอเหรียญจริง
-        self.fallback_assets = [
-            {"sym": "XRP_THB", "rsi": 50.0, "price": 0.0},
-            {"sym": "ADA_THB", "rsi": 50.0, "price": 0.0},
-            {"sym": "IOST_THB", "rsi": 50.0, "price": 0.0}
-        ]
-
         self._init_db()                    
         self._sync_positions()
-        self.notify(f"<b>💠 TITAN V.17.2 | FINAL MASTER</b>\n<i>Status: Line-by-Line Audited & Ready</i>")
+        self.notify(f"<b>💠 TITAN V.17.2 | FULL DEPLOY</b>\n<i>Status: All Systems & Reports Fixed</i>")
 
     def _init_db(self):
         try:
@@ -46,7 +39,7 @@ class TitanMasterV17_2_Final:
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_log_v17 (
                         id SERIAL PRIMARY KEY, symbol TEXT, side TEXT, price FLOAT, 
                         pnl_pct FLOAT, pnl_thb FLOAT, timestamp TIMESTAMP)""")
-        except Exception as e: print(f"⚠️ DB Init Error: {e}")
+        except Exception as e: print(f"⚠️ DB Error: {e}")
 
     def _sync_positions(self):
         try:
@@ -59,7 +52,6 @@ class TitanMasterV17_2_Final:
 
     def get_indicators_v15_style(self, symbol):
         try:
-            # ดึงข้อมูลจาก TradingView Bitkub Direct ย้อนหลัง 100 แท่ง
             end = int(time.time())
             start = end - (15 * 60 * 100) 
             url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={start}&to={end}"
@@ -74,15 +66,136 @@ class TitanMasterV17_2_Final:
             rsi = 100 - (100 / (1 + (np.mean(gain[-14:]) / (np.mean(loss[-14:]) + 1e-9))))
             
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
-            atr = np.mean(tr[-14:])
-            return {'price': c[-1], 'rsi': rsi, 'atr': atr, 'trend': 1 if c[-1] > np.mean(c[-20:]) else 0}
+            return {'price': c[-1], 'rsi': rsi, 'atr': np.mean(tr[-14:]), 'trend': 1 if c[-1] > np.mean(c[-20:]) else 0}
         except: return None
 
-    def get_btc_sentinel(self):
-        btc = self.get_indicators_v15_style("BTC_THB")
-        if not btc: return False
-        self.market_stats['btc_status'] = "🟢 OK" if btc['trend'] == 1 else "⚠️ WEAK"
-        return btc['trend'] == 1
+    def run(self):
+        last_rep = 0
+        while True:
+            try:
+                # 1. เช็ค BTC
+                btc = self.get_indicators_v15_style("BTC_THB")
+                btc_safe = btc['trend'] == 1 if btc else False
+                self.market_stats['btc_status'] = "🟢 OK" if btc_safe else "⚠️ WEAK"
+
+                # 2. กรองเหรียญ
+                ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
+                qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
+                
+                thb = self.get_wallet()
+                temp_scan = []
+                bullish_count = 0
+
+                # 3. MONITOR & SELL (เหมือนเดิม)
+                for sym in list(self.positions.keys()):
+                    ind = self.get_indicators_v15_style(sym)
+                    if not ind: continue
+                    p, pos = ind['price'], self.positions[sym]
+                    buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
+                    sell_val = (p * pos['units']) * (1 - self.fee_rate)
+                    pnl_pct = ((sell_val - buy_val) / buy_val) * 100
+                    if pnl_pct > pos['max_pnl']: pos['max_pnl'] = pnl_pct 
+                    new_sl = p - (ind['atr'] * self.risk_per_trade)
+                    if new_sl > pos['sl']: 
+                        pos['sl'] = new_sl
+                        with psycopg2.connect(self.db_url) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE bot_positions_v17 SET dynamic_sl=%s, max_pnl=%s WHERE symbol=%s", (new_sl, pos['max_pnl'], sym))
+                    if p <= pos['sl']: 
+                        if self.place_order("sell", sym, pos['units'], p):
+                            self._log_trade(sym, "SELL", p, pnl_pct, sell_val - buy_val)
+                            self.notify(f"📤 <b>SELL {sym.split('_')[1]}</b>\nROI: {pnl_pct:+.2f}%")
+                            del self.positions[sym]
+                            with psycopg2.connect(self.db_url) as conn:
+                                with conn.cursor() as cur: cur.execute("DELETE FROM bot_positions_v17 WHERE symbol=%s", (sym,))
+
+                # 4. SCAN & BUY (จุดแก้ไข: ดึง RSI จริงเข้าลิสต์ทันที)
+                for sym in qualified:
+                    ind = self.get_indicators_v15_style(sym)
+                    if ind:
+                        if ind['trend'] == 1: bullish_count += 1
+                        if sym not in self.positions:
+                            temp_scan.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
+                            # อัปเดตลิสต์หลักทันที (Sort RSI ต่ำสุด)
+                            self.latest_scan_results = sorted(temp_scan, key=lambda x: x['rsi'])[:10]
+
+                        if sym not in self.positions and btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
+                            if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
+                                units = (self.budget_per_slot * (1 - self.fee_rate)) / ind['price']
+                                sl = ind['price'] - (ind['atr'] * self.risk_per_trade)
+                                self.positions[sym] = {"price": ind['price'], "units": units, "sl": sl, "max_pnl": 0.0}
+                                with psycopg2.connect(self.db_url) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("INSERT INTO bot_positions_v17 VALUES (%s,%s,%s,%s,%s,%s)", 
+                                                    (sym, ind['price'], units, sl, 0.0, datetime.now()))
+                                self.notify(f"🚀 <b>BUY {sym.split('_')[1]}</b>\nRSI: {ind['rsi']:.2f}")
+                                thb -= self.budget_per_slot
+                    time.sleep(0.4)
+
+                self.market_stats.update({"total_qualified": len(qualified), "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0})
+
+                if time.time() - last_rep >= 600:
+                    self._report_full(thb)
+                    last_rep = time.time()
+
+            except Exception as e: print(f"Main Error: {e}"); time.sleep(10)
+            time.sleep(10)
+
+    def _report_full(self, thb):
+        now = datetime.now(timezone(timedelta(hours=7)))
+        total_asset_val, slot_details = 0, ""
+        current_slots = list(self.positions.keys())
+
+        for i in range(1, self.max_slots + 1):
+            if i <= len(current_slots):
+                sym = current_slots[i-1]
+                pos = self.positions[sym]
+                ind = self.get_indicators_v15_style(sym)
+                p = ind['price'] if ind else pos['price']
+                current_val = (pos['units'] * p) * (1 - self.fee_rate)
+                total_asset_val += current_val
+                pnl = ((current_val - ((pos['price'] * pos['units']) / (1 - self.fee_rate))) / ((pos['price'] * pos['units']) / (1 - self.fee_rate))) * 100
+                slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
+            else:
+                # ระบบดึง RSI จริงจากผลสแกนล่าสุด
+                scan_idx = i - len(current_slots) - 1
+                if scan_idx < len(self.latest_scan_results):
+                    target = self.latest_scan_results[scan_idx]
+                    rsi_now = target['rsi']
+                    name = target['sym'].split('_')[1]
+                else:
+                    rsi_now = 50.0
+                    name = "Scanning"
+
+                # แสดงแถบ Visual Bar แบบเดิมที่พี่ชอบ
+                if rsi_now <= self.rsi_buy_target:
+                    bar = "▪️" * max(0, min(5, int((35 - rsi_now) / 2) + 1)) + "▫️" * 5
+                else:
+                    prog = max(0, min(4, int((rsi_now - 35) / 35 * 5)))
+                    bar = "▫️" * prog + "🔹" + "▫️" * (4 - prog)
+
+                slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {rsi_now:.1f} ({name})\n"
+
+        equity = thb + total_asset_val
+        growth = ((equity - self.initial_equity) / self.initial_equity) * 100
+        msg = (
+            f"💠 <b>TITAN V.17.2 | FULL MASTER</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌍 <b>MARKET CONTEXT</b>\n"
+            f"• Sentiment: {'🟥 BEARISH' if self.market_stats['bullish_pct'] < 50 else '🟦 BULLISH'} ({self.market_stats['bullish_pct']:.0f}%)\n"
+            f"• BTC Health: <b>{self.market_stats['btc_status']}</b>\n"
+            f"• Assets Found: <b>{self.market_stats['total_qualified']} Coins</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>PORTFOLIO</b>\n"
+            f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
+            f"• GROWTH: <code>{growth:+.2f}%</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>SLOT EXECUTION</b>\n"
+            f"{slot_details.strip()}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <i>{now.strftime('%H:%M:%S')}</i>"
+        )
+        self.notify(msg)
 
     def get_wallet(self):
         try:
@@ -112,153 +225,10 @@ class TitanMasterV17_2_Final:
                                 (symbol, side, price, pnl_pct, pnl_thb, datetime.now()))
         except: pass
 
-    def run(self):
-        last_rep = 0
-        while True:
-            try:
-                btc_safe = self.get_btc_sentinel()
-                ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
-                qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
-
-                thb = self.get_wallet()
-                temp_scan = []
-                bullish_count = 0
-
-                # MONITOR & SELL
-                for sym in list(self.positions.keys()):
-                    ind = self.get_indicators_v15_style(sym)
-                    if not ind: continue
-                    p, pos = ind['price'], self.positions[sym]
-                    buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
-                    sell_val = (p * pos['units']) * (1 - self.fee_rate)
-                    pnl_pct = ((sell_val - buy_val) / buy_val) * 100
-
-                    if pnl_pct > pos['max_pnl']: pos['max_pnl'] = pnl_pct 
-                    new_sl = p - (ind['atr'] * self.risk_per_trade)
-
-                    if new_sl > pos['sl']: 
-                        pos['sl'] = new_sl
-                        with psycopg2.connect(self.db_url) as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE bot_positions_v17 SET dynamic_sl=%s, max_pnl=%s WHERE symbol=%s", (new_sl, pos['max_pnl'], sym))
-
-                    if p <= pos['sl']: 
-                        if self.place_order("sell", sym, pos['units'], p):
-                            pnl_thb = sell_val - buy_val
-                            self._log_trade(sym, "SELL", p, pnl_pct, pnl_thb)
-                            self.notify(f"📤 <b>SELL {sym.split('_')[1]}</b>\nROI: {pnl_pct:+.2f}% ({pnl_thb:+.2f} THB)")
-                            del self.positions[sym]
-                            with psycopg2.connect(self.db_url) as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute("DELETE FROM bot_positions_v17 WHERE symbol=%s", (sym,))
-
-                # SCAN & BUY (Real-time อัปเดตเพื่อแก้ปัญหา RSI ค้าง 50.0)
-                for sym in qualified:
-                    ind = self.get_indicators_v15_style(sym)
-                    if ind:
-                        if ind['trend'] == 1: bullish_count += 1
-                        
-                        if sym not in self.positions:
-                            # ล้างข้อมูลตัวเดิมในลิสต์ชั่วคราวออกก่อนใส่ค่าใหม่
-                            temp_scan = [d for d in temp_scan if d['sym'] != sym]
-                            temp_scan.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
-                            # อัปเดตตัวแปรหลักทันทีหลังได้ค่าใหม่ เรียง RSI ต่ำสุด
-                            self.latest_scan_results = sorted(temp_scan, key=lambda x: x['rsi'])
-
-                        if sym not in self.positions and btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
-                            if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
-                                units = (self.budget_per_slot * (1 - self.fee_rate)) / ind['price']
-                                sl = ind['price'] - (ind['atr'] * self.risk_per_trade)
-                                self.positions[sym] = {"price": ind['price'], "units": units, "sl": sl, "max_pnl": 0.0}
-                                with psycopg2.connect(self.db_url) as conn:
-                                    with conn.cursor() as cur:
-                                        cur.execute("INSERT INTO bot_positions_v17 VALUES (%s,%s,%s,%s,%s,%s)", 
-                                                    (sym, ind['price'], units, sl, 0.0, datetime.now()))
-                                self._log_trade(sym, "BUY", ind['price'])
-                                self.notify(f"🚀 <b>BUY {sym.split('_')[1]}</b>\nRSI: {ind['rsi']:.2f}")
-                                thb -= self.budget_per_slot
-                    time.sleep(0.4) 
-
-                self.market_stats.update({"total_qualified": len(qualified), "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0})
-
-                if time.time() - last_rep >= 600:
-                    self._report_full(thb)
-                    last_rep = time.time()
-
-            except Exception as e: print(f"Main Error: {e}"); time.sleep(10)
-            time.sleep(10)
-
-    def _report_full(self, thb):
-        now = datetime.now(timezone(timedelta(hours=7)))
-        total_asset_val, slot_details = 0, ""
-
-        current_slots = list(self.positions.keys())
-        for i in range(1, self.max_slots + 1):
-            if i <= len(current_slots):
-                sym = current_slots[i-1]
-                pos = self.positions[sym]
-                ind = self.get_indicators_v15_style(sym)
-                p = ind['price'] if ind else pos['price']
-                current_val = (pos['units'] * p) * (1 - self.fee_rate)
-                total_asset_val += current_val
-                buy_val = (pos['price'] * pos['units']) / (1 - self.fee_rate)
-                pnl = ((current_val - buy_val) / buy_val) * 100
-                slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
-            else:
-                # ระบบแยกอันดับเหรียญในสล็อตที่ว่าง ไม่ให้ชื่อซ้ำกัน
-                scan_idx = i - len(current_slots) - 1
-                if scan_idx < len(self.latest_scan_results):
-                    target = self.latest_scan_results[scan_idx]
-                else:
-                    target = self.fallback_assets[min(scan_idx, 2)]
-
-                rsi_now = target['rsi']
-                name = target['sym'].replace('THB_','').replace('_THB','')
-                
-                # Visual Bar แบบเดิมที่พี่ชอบ
-                if rsi_now <= self.rsi_buy_target:
-                    fill = max(0, min(5, int((self.rsi_buy_target - rsi_now) / 2) + 1))
-                    bar = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
-                elif rsi_now >= self.rsi_sell_zone:
-                    fill = max(0, min(5, int((rsi_now - self.rsi_sell_zone) / 2) + 1))
-                    bar = "📈 " + "▫️" * (5 - fill) + "▪️" * fill
-                else:
-                    progress = max(0, min(4, int((rsi_now - 35) / (70 - 35) * 5)))
-                    bar = "▫️" * progress + "🔹" + "▫️" * (4 - progress)
-
-                slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {rsi_now:.1f} ({name})\n"
-
-        equity = thb + total_asset_val
-        growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        alpha_name = self.latest_scan_results[0]['sym'].replace('_THB','') if self.latest_scan_results else "Scanning"
-
-        msg = (
-            f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌍 <b>MARKET CONTEXT</b>\n"
-            f"• Sentiment: {'🟥 BEARISH' if self.market_stats['bullish_pct'] < 50 else '🟦 BULLISH'} ({self.market_stats['bullish_pct']:.0f}%)\n"
-            f"• BTC Health: <b>{self.market_stats['btc_status']}</b>\n"
-            f"• Assets Found: <b>{self.market_stats['total_qualified']} Coins</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <b>INTELLIGENCE (Alpha: {alpha_name})</b>\n"
-            f"• Momentum: Multi-Slot Scan Active\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
-            f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
-            f"• ACTIVE ROI: <code>{growth:+.2f}%</code>\n"
-            f"• LIQUIDITY: {thb:,.2f} THB\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 <b>OMNI-SLOT EXECUTION</b>\n"
-            f"{slot_details.strip()}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
-        )
-        self.notify(msg)
-
     def notify(self, m):
         try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
                            json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
         except: pass
 
 if __name__ == "__main__":
-    TitanMasterV17_2_Final().run()
+    TitanMasterV17_2_Full_Final().run()
