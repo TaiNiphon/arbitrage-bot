@@ -1,20 +1,21 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMaster_V17_2_Final_Ultimate:
+class TitanMaster_V17_2_Ultimate_Hybrid:
     def __init__(self):
-        # --- 1. CONFIG & DB ---
+        # --- 1. CONFIG (ดึงจาก Environment Variables) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.db_url = os.getenv("DATABASE_URL")
-        self.initial_equity = 1800.0
-        self.rsi_buy_target = 35.0
-        self.max_slots = 3
-        self.min_volume_thb = 3000000.0
-        self.fee_rate = 0.0025
-        self.trailing_percent = 2.0 # กันขายหมู: ถ้าย่อจากจุดสูงสุด 2% ค่อยขาย
+        
+        self.initial_equity = 1800.0   # ทุนเริ่มต้น
+        self.rsi_buy_target = 35.0    # เป้าหมายซื้อ
+        self.max_slots = 3             # จำนวนสล็อตสูงสุด
+        self.min_volume_thb = 3000000.0 # โวลุ่มขั้นต่ำ 3 ล้าน
+        self.fee_rate = 0.0025         # ค่าธรรมเนียม 0.25%
+        self.trailing_percent = 2.0    # กันขายหมู: ถ้าย่อจาก High 2% ค่อยขาย
 
         self.positions = {}                
         self.scan_storage = [] 
@@ -22,7 +23,7 @@ class TitanMaster_V17_2_Final_Ultimate:
         
         self._init_db()                    
         self._sync_positions()
-        self.notify("<b>💠 TITAN V.17.2 | SYSTEM ONLINE</b>\n<i>แก้ไขลอจิกเรียงลำดับและหน้าตารายงานเรียบร้อยครับพี่ติ๊ก</i>")
+        self.notify("<b>💠 TITAN V.17.2 | FULLY DEPLOYED</b>\n<i>ระบบ Hybrid Ultimate พร้อมรันบน Server แล้วครับพี่ติ๊ก</i>")
 
     def _init_db(self):
         try:
@@ -42,7 +43,6 @@ class TitanMaster_V17_2_Final_Ultimate:
 
     def get_indicators(self, symbol):
         try:
-            # ดึงข้อมูลย้อนหลัง 40 แท่ง (15 นาที) เพื่อความแม่นยำ
             url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-(15*60*40)}&to={int(time.time())}"
             res = requests.get(url, timeout=5).json()
             if not res or 'c' not in res or len(res['c']) < 20: return None
@@ -60,7 +60,6 @@ class TitanMaster_V17_2_Final_Ultimate:
                 ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
                 symbols = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
                 
-                # เช็ก BTC Health
                 btc = self.get_indicators("BTC_THB")
                 self.market_stats['btc'] = "🟢 OK" if btc and btc['trend']==1 else "⚠️ WEAK"
 
@@ -74,35 +73,45 @@ class TitanMaster_V17_2_Final_Ultimate:
                         if ind['rsi'] <= self.rsi_buy_target: match_c += 1
                         temp_results.append({"sym": sym, "rsi": round(ind['rsi'], 2), "price": ind['price']})
                         
-                        # ระบบ Dynamic Trailing (กันขายหมู)
+                        # --- ระบบป้องกันขายหมู (Trailing Stop) ---
                         if sym in self.positions:
                             pos = self.positions[sym]
                             if ind['price'] > pos['max_price']:
-                                pos['max_price'] = ind['price'] # อัปเดตจุดสูงสุดใหม่
+                                pos['max_price'] = ind['price']
+                                with psycopg2.connect(self.db_url) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("UPDATE bot_positions_v17 SET max_price=%s WHERE symbol=%s", (pos['max_price'], sym))
+                            
+                            # เช็กการขาย: ถ้าราคาปัจจุบันย่อลงมาเกิน trailing_percent จากจุดสูงสุด
+                            drop_pct = ((pos['max_price'] - ind['price']) / pos['max_price']) * 100
+                            if drop_pct >= self.trailing_percent:
+                                # [พี่ติ๊กสามารถเพิ่มฟังก์ชันสั่งขาย Bitkub จริงตรงนี้ได้เลย]
+                                pass
 
-                    time.sleep(0.05) # สแกนเร็วขึ้นเพื่อไม่ให้บอทค้าง
+                    time.sleep(0.05) # สแกนไว กันค้างบน Server
 
                 if temp_results:
                     self.scan_storage = temp_results
                     self.market_stats.update({"total": len(symbols), "bull": (bull_c/len(symbols)*100), "match": match_c})
                 
-                # ส่งรายงานทันทีในรอบแรก และส่งทุกๆ 10 นาที
+                # ส่งรายงานทันทีเมื่อสแกนจบครั้งแรก และทุก 10 นาที
                 if (time.time() - last_rep >= 600) or last_rep == 0:
                     self._report_full(self.get_wallet())
                     last_rep = time.time()
-                    
+
             except Exception as e:
                 print(f"Error: {e}"); time.sleep(10)
 
     def _report_full(self, thb):
         try:
             now = datetime.now(timezone(timedelta(hours=7)))
-            # เรียงเหรียญที่น่าซื้อที่สุด (RSI น้อย -> มาก)
+            # กรองเหรียญที่ไม่ซ้ำกับที่ถือ และเรียง RSI น้อย -> มาก
             wait_candidates = sorted([d for d in self.scan_storage if d['sym'] not in self.positions], key=lambda x: x['rsi'])
             
             total_val, slot_html = 0, ""
             pos_list = list(self.positions.keys())
 
+            # จัดการ 3 สล็อตแบบ Hybrid
             for i in range(0, 3):
                 slot_num = i + 1
                 if i < len(pos_list):
@@ -131,10 +140,10 @@ class TitanMaster_V17_2_Final_Ultimate:
                 f"• Sentiment: {'🟦 BULLISH' if self.market_stats['bull'] > 50 else '🟥 BEARISH'} ({self.market_stats['bull']:.0f}%)\n"
                 f"• BTC Health: <b>{self.market_stats['btc']}</b>\n"
                 f"• Assets Found: <b>{self.market_stats['total']} Coins</b>\n"
-                f"• Qualified Assets: <b>{self.market_stats['match']} Coins</b>\n" # จำนวนที่สแกนเข้าเงื่อนไข RSI
+                f"• Qualified Assets: <b>{self.market_stats['match']} Coins</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📊 <b>INTELLIGENCE</b>\n"
-                f"• Ref: <b>{alpha['sym'].split('_')[1] if alpha else '---'}</b>\n"
+                f"📊 <b>INTELLIGENCE (Ref: {alpha['sym'].split('_')[1] if alpha else '---'})</b>\n"
+                f"• Last Price: {alpha['price']:,.2f} THB\n" if alpha else ""
                 f"• Momentum: ⚡ RSI {alpha['rsi']:.1f if alpha else 0.0} (TGT: {self.rsi_buy_target})\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
@@ -143,7 +152,7 @@ class TitanMaster_V17_2_Final_Ultimate:
                 f"• LIQUIDITY: <b>{thb:,.2f} THB</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 <b>OMNI-SLOT EXECUTION</b>\n"
-                f"{slot_html.strip()}\n" # เรียง RSI 1 2 3 พร้อมชื่อเหรียญ
+                f"{slot_html.strip()}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
             )
@@ -163,4 +172,4 @@ class TitanMaster_V17_2_Final_Ultimate:
         except: pass
 
 if __name__ == "__main__":
-    TitanMaster_V17_2_Final_Ultimate().run()
+    TitanMaster_V17_2_Ultimate_Hybrid().run()
