@@ -28,28 +28,27 @@ class TitanMasterV17_2:
 
         self._init_db()                    
         self._sync_positions()
-        self.notify(f"<b>💠 TITAN V.17.2 | ULTIMATE ALPHA ONLINE</b>\n<i>Status: Multi-Slot Scan & Visual Ready</i>")
+        self.notify(f"<b>💠 TITAN V.17.2 | ULTIMATE ALPHA ONLINE</b>\n<i>Status: Smart Scan & DB-Safe Active</i>")
 
     def _init_db(self):
         try:
-            conn = psycopg2.connect(self.db_url, connect_timeout=10)
-            cur = conn.cursor()
-            cur.execute("""CREATE TABLE IF NOT EXISTS bot_positions_v17 (
-                symbol TEXT PRIMARY KEY, avg_price FLOAT, total_units FLOAT, 
-                dynamic_sl FLOAT, max_pnl FLOAT, updated_at TIMESTAMP)""")
-            cur.execute("""CREATE TABLE IF NOT EXISTS trade_log_v17 (
-                id SERIAL PRIMARY KEY, symbol TEXT, side TEXT, price FLOAT, 
-                pnl_pct FLOAT, pnl_thb FLOAT, timestamp TIMESTAMP)""")
-            conn.commit(); cur.close(); conn.close()
-        except Exception as e: print(f"⚠️ DB Error: {e}")
+            with psycopg2.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""CREATE TABLE IF NOT EXISTS bot_positions_v17 (
+                        symbol TEXT PRIMARY KEY, avg_price FLOAT, total_units FLOAT, 
+                        dynamic_sl FLOAT, max_pnl FLOAT, updated_at TIMESTAMP)""")
+                    cur.execute("""CREATE TABLE IF NOT EXISTS trade_log_v17 (
+                        id SERIAL PRIMARY KEY, symbol TEXT, side TEXT, price FLOAT, 
+                        pnl_pct FLOAT, pnl_thb FLOAT, timestamp TIMESTAMP)""")
+        except Exception as e: print(f"⚠️ DB Init Error: {e}")
 
     def _sync_positions(self):
         try:
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("SELECT symbol, avg_price, total_units, dynamic_sl, max_pnl FROM bot_positions_v17")
-            for row in cur.fetchall():
-                self.positions[row[0]] = {"price": row[1], "units": row[2], "sl": row[3], "max_pnl": row[4]}
-            cur.close(); conn.close()
+            with psycopg2.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT symbol, avg_price, total_units, dynamic_sl, max_pnl FROM bot_positions_v17")
+                    for row in cur.fetchall():
+                        self.positions[row[0]] = {"price": row[1], "units": row[2], "sl": row[3], "max_pnl": row[4]}
         except: pass
 
     def get_indicators_v15_style(self, symbol):
@@ -58,7 +57,9 @@ class TitanMasterV17_2:
             url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={end-86400}&to={end}"
             res = requests.get(url, timeout=10).json()
             if not res or 'c' not in res or len(res['c']) < 30: return None
-            c, h, l = np.array(res['c'], dtype=float), np.array(res['h'], dtype=float), np.array(res['l'], dtype=float)
+            c = np.array(res['c'], dtype=float)
+            h = np.array(res['h'], dtype=float)
+            l = np.array(res['l'], dtype=float)
             diff = np.diff(c)
             gain, loss = np.where(diff > 0, diff, 0), np.where(diff < 0, -diff, 0)
             rsi = 100 - (100 / (1 + (np.mean(gain[-14:]) / (np.mean(loss[-14:]) + 1e-9))))
@@ -96,10 +97,10 @@ class TitanMasterV17_2:
 
     def _log_trade(self, symbol, side, price, pnl_pct=0.0, pnl_thb=0.0):
         try:
-            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-            cur.execute("INSERT INTO trade_log_v17 (symbol, side, price, pnl_pct, pnl_thb, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
-                        (symbol, side, price, pnl_pct, pnl_thb, datetime.now()))
-            conn.commit(); cur.close(); conn.close()
+            with psycopg2.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO trade_log_v17 (symbol, side, price, pnl_pct, pnl_thb, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
+                                (symbol, side, price, pnl_pct, pnl_thb, datetime.now()))
         except: pass
 
     def run(self):
@@ -110,14 +111,11 @@ class TitanMasterV17_2:
                 ticker = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
                 qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
 
-                xrp = self.get_indicators_v15_style("XRP_THB")
-                if xrp: self.sample_asset = {"sym": "XRP", "price": xrp['price'], "rsi": xrp['rsi']}
-
                 thb = self.get_wallet()
                 current_scan_data = []
                 bullish_count = 0
 
-                # MONITOR & SELL
+                # MONITOR & SELL (Trailing Stop)
                 for sym in list(self.positions.keys()):
                     ind = self.get_indicators_v15_style(sym)
                     if not ind: continue
@@ -128,11 +126,12 @@ class TitanMasterV17_2:
 
                     if pnl_pct > pos['max_pnl']: pos['max_pnl'] = pnl_pct 
                     new_sl = p - (ind['atr'] * self.risk_per_trade)
+                    
                     if new_sl > pos['sl']: 
                         pos['sl'] = new_sl
-                        conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-                        cur.execute("UPDATE bot_positions_v17 SET dynamic_sl=%s, max_pnl=%s WHERE symbol=%s", (new_sl, pos['max_pnl'], sym))
-                        conn.commit(); cur.close(); conn.close()
+                        with psycopg2.connect(self.db_url) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE bot_positions_v17 SET dynamic_sl=%s, max_pnl=%s WHERE symbol=%s", (new_sl, pos['max_pnl'], sym))
 
                     if p <= pos['sl']: 
                         if self.place_order("sell", sym, pos['units'], p):
@@ -140,49 +139,47 @@ class TitanMasterV17_2:
                             self._log_trade(sym, "SELL", p, pnl_pct, pnl_thb)
                             self.notify(f"📤 <b>SELL {sym.split('_')[1]}</b>\nROI: {pnl_pct:+.2f}% ({pnl_thb:+.2f} THB)")
                             del self.positions[sym]
-                            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-                            cur.execute("DELETE FROM bot_positions_v17 WHERE symbol=%s", (sym,))
-                            conn.commit(); cur.close(); conn.close()
+                            with psycopg2.connect(self.db_url) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("DELETE FROM bot_positions_v17 WHERE symbol=%s", (sym,))
 
                 # SCAN & BUY
                 for sym in qualified:
-                    if sym in self.positions: continue
                     ind = self.get_indicators_v15_style(sym)
                     if ind:
                         if ind['trend'] == 1: bullish_count += 1
                         current_scan_data.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
-                        if btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
+                        
+                        if sym not in self.positions and btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
                             if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
                                 units = (self.budget_per_slot * (1 - self.fee_rate)) / ind['price']
                                 sl = ind['price'] - (ind['atr'] * self.risk_per_trade)
                                 self.positions[sym] = {"price": ind['price'], "units": units, "sl": sl, "max_pnl": 0.0}
-                                conn = psycopg2.connect(self.db_url); cur = conn.cursor()
-                                cur.execute("INSERT INTO bot_positions_v17 VALUES (%s,%s,%s,%s,%s,%s)", 
-                                            (sym, ind['price'], units, sl, 0.0, datetime.now()))
-                                conn.commit(); cur.close(); conn.close()
+                                with psycopg2.connect(self.db_url) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("INSERT INTO bot_positions_v17 VALUES (%s,%s,%s,%s,%s,%s)", 
+                                                    (sym, ind['price'], units, sl, 0.0, datetime.now()))
                                 self._log_trade(sym, "BUY", ind['price'])
                                 self.notify(f"🚀 <b>BUY {sym.split('_')[1]}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
-                    time.sleep(0.4)
+                    time.sleep(0.3)
 
-                self.latest_scan_results = sorted(current_scan_data, key=lambda x: x['rsi'])[:5]
+                # คิวเหรียญที่ไม่ได้ถืออยู่ เรียงตาม RSI จากน้อยไปมาก
+                self.latest_scan_results = sorted([d for d in current_scan_data if d['sym'] not in self.positions], key=lambda x: x['rsi'])
                 self.market_stats.update({"total_qualified": len(qualified), "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0})
 
                 if time.time() - last_rep >= 600:
                     self._report_full(thb)
                     last_rep = time.time()
 
-            except Exception as e: print(f"Error: {e}"); time.sleep(10)
+            except Exception as e: print(f"Main Error: {e}"); time.sleep(10)
             time.sleep(10)
 
     def _report_full(self, thb):
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, slot_details = 0, ""
         
-        # ดึงตัวอ้างอิงหลัก (อันดับ 1)
-        alpha = self.latest_scan_results[0] if self.latest_scan_results else self.sample_asset
-
-        # 1. แสดงเหรียญที่ถืออยู่
+        # 1. รายละเอียดเหรียญที่ถืออยู่
         for i, (sym, pos) in enumerate(self.positions.items(), 1):
             ind = self.get_indicators_v15_style(sym)
             p = ind['price'] if ind else pos['price']
@@ -192,34 +189,31 @@ class TitanMasterV17_2:
             pnl = ((current_val - buy_val) / buy_val) * 100
             slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
 
-        # 2. แสดงสล็อตที่ว่าง โดยดึงอันดับ 1, 2, 3 ตามลำดับ
-        filled_slots = len(self.positions)
-        for i in range(filled_slots + 1, self.max_slots + 1):
-            scan_idx = i - 1 
+        # 2. รายละเอียดสล็อตที่ว่าง (ดึงจากตัวที่ไม่ได้ถือ เรียงตาม RSI)
+        filled = len(self.positions)
+        for i in range(filled + 1, self.max_slots + 1):
+            scan_idx = i - filled - 1
             if scan_idx < len(self.latest_scan_results):
-                target_asset = self.latest_scan_results[scan_idx]
+                target = self.latest_scan_results[scan_idx]
+                rsi_now, name = target['rsi'], target['sym'].replace('THB_','')
             else:
-                target_asset = alpha
-
-            rsi_now = target_asset['rsi']
-            asset_name = target_asset['sym'].replace('THB_','')
-            bar_display = ""
+                rsi_now, name = self.sample_asset['rsi'], self.sample_asset['sym']
 
             if rsi_now <= self.rsi_buy_target:
                 fill = max(0, min(5, int((self.rsi_buy_target - rsi_now) / 2) + 1))
-                bar_display = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
+                bar = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
             elif rsi_now >= self.rsi_sell_zone:
                 fill = max(0, min(5, int((rsi_now - self.rsi_sell_zone) / 2) + 1))
-                bar_display = "📈 " + "▫️" * (5 - fill) + "▪️" * fill
+                bar = "📈 " + "▫️" * (5 - fill) + "▪️" * fill
             else:
-                progress = int((rsi_now - 35) / (70 - 35) * 5)
-                progress = max(0, min(4, progress))
-                bar_display = "▫️" * progress + "🔹" + "▫️" * (4 - progress)
+                progress = max(0, min(4, int((rsi_now - 35) / (70 - 35) * 5)))
+                bar = "▫️" * progress + "🔹" + "▫️" * (4 - progress)
 
-            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar_display}] RSI {rsi_now:.1f} ({asset_name})\n"
+            slot_details += f"⚪ <b>SLOT {i} | WAIT</b>: [{bar}] RSI {rsi_now:.1f} ({name})\n"
 
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
+        alpha_name = self.latest_scan_results[0]['sym'].replace('THB_','') if self.latest_scan_results else "Scanning..."
 
         msg = (
             f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
@@ -229,9 +223,9 @@ class TitanMasterV17_2:
             f"• BTC Health: <b>{self.market_stats['btc_status']}</b>\n"
             f"• Assets Found: <b>{self.market_stats['total_qualified']} Coins</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <b>INTELLIGENCE (Ref: {alpha['sym'].replace('THB_','')})</b>\n"
-            f"• Last Price: {alpha['price']:,.2f} THB\n"
-            f"• Momentum: ⚡ RSI {alpha['rsi']:.1f} (TGT: {self.rsi_buy_target})\n"
+            f"📊 <b>INTELLIGENCE (Alpha: {alpha_name})</b>\n"
+            f"• Strategy: Multi-Slot Scan v17.2\n"
+            f"• Status: DB-Safe & Performance Optimized\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
             f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
