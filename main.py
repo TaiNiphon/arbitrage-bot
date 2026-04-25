@@ -1,8 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMasterV17_2_Ultimate:
+class TitanMasterV17_2_Stable_Hybrid:
     def __init__(self):
+        # --- CONFIG ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -19,8 +20,7 @@ class TitanMasterV17_2_Ultimate:
         
         self._init_db()                    
         self._sync_positions()
-        # แจ้งเตือนสถานะเริ่มต้น
-        self.notify("<b>💠 TITAN V.17.2 | ULTIMATE ALPHA</b>\n<i>ระบบกำลังเริ่มสแกน... กรุณารอสักครู่เพื่อให้ข้อมูลครบถ้วนครับ</i>")
+        self.notify("<b>💠 TITAN V.17.2 | FULL HYBRID</b>\n<i>ระบบกำลังเริ่มสแกนแบบละเอียด ข้อมูลครบถ้วนแน่นอนครับ</i>")
 
     def _init_db(self):
         try:
@@ -41,7 +41,7 @@ class TitanMasterV17_2_Ultimate:
         try:
             url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}"
             res = requests.get(url, timeout=10).json()
-            if not res or 'c' not in res or len(res['c']) < 30: return None
+            if not res or 'c' not in res or len(res['c']) < 20: return None
             c = np.array(res['c'], dtype=float)
             diff = np.diff(c)
             g, lo = np.where(diff > 0, diff, 0), np.where(diff < 0, -diff, 0)
@@ -54,7 +54,7 @@ class TitanMasterV17_2_Ultimate:
         last_rep = 0
         while True:
             try:
-                # เช็ก BTC Health ก่อน
+                # BTC Status (ดึงใหม่ทุกรอบ)
                 btc = self.get_indicators("BTC_THB")
                 self.market_stats['btc_status'] = "🟢 OK" if btc and btc['trend'] == 1 else "⚠️ WEAK"
 
@@ -62,8 +62,7 @@ class TitanMasterV17_2_Ultimate:
                 qualified = [s for s, v in ticker.items() if s.startswith("THB_") and float(v['quoteVolume']) >= self.min_volume_thb]
 
                 current_scan_data = []
-                bullish_count = 0
-                match_count = 0
+                bullish_count, match_count = 0, 0
 
                 for sym in qualified:
                     ind = self.get_indicators(sym)
@@ -74,14 +73,15 @@ class TitanMasterV17_2_Ultimate:
                     time.sleep(0.3)
 
                 if current_scan_data:
+                    # เรียงลำดับ RSI น้อย -> มาก
                     self.latest_scan_results = sorted(current_scan_data, key=lambda x: x['rsi'])
                     self.market_stats.update({
                         "total_qualified": match_count,
                         "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0
                     })
 
-                # ส่งรายงานเมื่อมีข้อมูล (ป้องกันรายงานสั้นจุ๊ดจู๋)
-                if (time.time() - last_rep >= 600) or (last_rep == 0 and len(self.latest_scan_results) > 0):
+                # ส่งรายงานแบบ Full เมื่อข้อมูลพร้อม
+                if (time.time() - last_rep >= 600) or (last_rep == 0 and self.latest_scan_results):
                     self._report_full(self.get_wallet())
                     last_rep = time.time()
 
@@ -90,6 +90,8 @@ class TitanMasterV17_2_Ultimate:
     def _report_full(self, thb):
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, slot_html = 0, ""
+        
+        # ดึงเหรียญที่น่าสนใจมาเรียง 1-2-3 (เฉพาะที่ยังไม่ได้ถือ)
         wait_candidates = [d for d in self.latest_scan_results if d['sym'] not in self.positions]
         alpha = self.latest_scan_results[0] if self.latest_scan_results else None
 
@@ -147,4 +149,4 @@ class TitanMasterV17_2_Ultimate:
         except: pass
 
 if __name__ == "__main__":
-    TitanMasterV17_2_Ultimate().run()
+    TitanMasterV17_2_Stable_Hybrid().run()
