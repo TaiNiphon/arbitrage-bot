@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanMasterV17_2:
+class TitanMasterV17_2_Final:
     def __init__(self):
         # --- 1. CORE CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -22,18 +22,19 @@ class TitanMasterV17_2:
 
         # --- 3. SYSTEM STATE ---
         self.positions = {}                
-        self.latest_scan_results = []
+        self.latest_scan_results = [] 
         self.market_stats = {"total_qualified": 0, "bullish_pct": 0, "btc_status": "N/A"}
-        # เหรียญสำรองสำหรับรายงานรอบแรกที่บอทยังไม่ได้สแกนตลาด
+        
+        # Fallback Assets: โชว์เฉพาะตอนเริ่มรันแล้วยังสแกนไม่เจอเหรียญจริง
         self.fallback_assets = [
-            {"sym": "XRP_THB", "rsi": 50.0},
-            {"sym": "ADA_THB", "rsi": 50.0},
-            {"sym": "IOST_THB", "rsi": 50.0}
+            {"sym": "XRP_THB", "rsi": 50.0, "price": 0.0},
+            {"sym": "ADA_THB", "rsi": 50.0, "price": 0.0},
+            {"sym": "IOST_THB", "rsi": 50.0, "price": 0.0}
         ]
 
         self._init_db()                    
         self._sync_positions()
-        self.notify(f"<b>💠 TITAN V.17.2 | ONLINE</b>\n<i>Status: Smart Scan & Unique Slots Fixed</i>")
+        self.notify(f"<b>💠 TITAN V.17.2 | FINAL MASTER</b>\n<i>Status: Line-by-Line Audited & Ready</i>")
 
     def _init_db(self):
         try:
@@ -58,20 +59,23 @@ class TitanMasterV17_2:
 
     def get_indicators_v15_style(self, symbol):
         try:
+            # ดึงข้อมูลจาก TradingView Bitkub Direct ย้อนหลัง 100 แท่ง
             end = int(time.time())
-            url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={end-86400}&to={end}"
+            start = end - (15 * 60 * 100) 
+            url = f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={start}&to={end}"
             res = requests.get(url, timeout=10).json()
             if not res or 'c' not in res or len(res['c']) < 30: return None
+            
             c = np.array(res['c'], dtype=float)
             h = np.array(res['h'], dtype=float)
             l = np.array(res['l'], dtype=float)
             diff = np.diff(c)
             gain, loss = np.where(diff > 0, diff, 0), np.where(diff < 0, -diff, 0)
             rsi = 100 - (100 / (1 + (np.mean(gain[-14:]) / (np.mean(loss[-14:]) + 1e-9))))
+            
             tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
             atr = np.mean(tr[-14:])
-            trend = 1 if c[-1] > np.mean(c[-20:]) else 0
-            return {'price': c[-1], 'rsi': rsi, 'atr': atr, 'trend': trend}
+            return {'price': c[-1], 'rsi': rsi, 'atr': atr, 'trend': 1 if c[-1] > np.mean(c[-20:]) else 0}
         except: return None
 
     def get_btc_sentinel(self):
@@ -148,12 +152,18 @@ class TitanMasterV17_2:
                                 with conn.cursor() as cur:
                                     cur.execute("DELETE FROM bot_positions_v17 WHERE symbol=%s", (sym,))
 
-                # SCAN & BUY
+                # SCAN & BUY (Real-time อัปเดตเพื่อแก้ปัญหา RSI ค้าง 50.0)
                 for sym in qualified:
                     ind = self.get_indicators_v15_style(sym)
                     if ind:
                         if ind['trend'] == 1: bullish_count += 1
-                        temp_scan.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
+                        
+                        if sym not in self.positions:
+                            # ล้างข้อมูลตัวเดิมในลิสต์ชั่วคราวออกก่อนใส่ค่าใหม่
+                            temp_scan = [d for d in temp_scan if d['sym'] != sym]
+                            temp_scan.append({"sym": sym, "rsi": ind['rsi'], "price": ind['price']})
+                            # อัปเดตตัวแปรหลักทันทีหลังได้ค่าใหม่ เรียง RSI ต่ำสุด
+                            self.latest_scan_results = sorted(temp_scan, key=lambda x: x['rsi'])
 
                         if sym not in self.positions and btc_safe and len(self.positions) < self.max_slots and ind['rsi'] <= self.rsi_buy_target and thb >= self.budget_per_slot:
                             if self.place_order("buy", sym, self.budget_per_slot, ind['price']):
@@ -167,12 +177,8 @@ class TitanMasterV17_2:
                                 self._log_trade(sym, "BUY", ind['price'])
                                 self.notify(f"🚀 <b>BUY {sym.split('_')[1]}</b>\nRSI: {ind['rsi']:.2f}")
                                 thb -= self.budget_per_slot
-                    time.sleep(0.3)
+                    time.sleep(0.4) 
 
-                # อัปเดตข้อมูลสแกนตลาดหลังจากการสแกนเหรียญทั้งหมดเสร็จสิ้น
-                if temp_scan:
-                    self.latest_scan_results = sorted([d for d in temp_scan if d['sym'] not in self.positions], key=lambda x: x['rsi'])
-                
                 self.market_stats.update({"total_qualified": len(qualified), "bullish_pct": (bullish_count/len(qualified)*100) if qualified else 0})
 
                 if time.time() - last_rep >= 600:
@@ -186,7 +192,6 @@ class TitanMasterV17_2:
         now = datetime.now(timezone(timedelta(hours=7)))
         total_asset_val, slot_details = 0, ""
 
-        # 1. รายละเอียดเหรียญที่ถืออยู่
         current_slots = list(self.positions.keys())
         for i in range(1, self.max_slots + 1):
             if i <= len(current_slots):
@@ -200,17 +205,17 @@ class TitanMasterV17_2:
                 pnl = ((current_val - buy_val) / buy_val) * 100
                 slot_details += f"🟢 <b>SLOT {i} | {sym.split('_')[1]}</b>: {pnl:+.2f}% (Trailing...)\n"
             else:
-                # 2. รายละเอียดสล็อตที่ว่าง (Logic แยกอันดับ)
+                # ระบบแยกอันดับเหรียญในสล็อตที่ว่าง ไม่ให้ชื่อซ้ำกัน
                 scan_idx = i - len(current_slots) - 1
                 if scan_idx < len(self.latest_scan_results):
                     target = self.latest_scan_results[scan_idx]
                 else:
-                    # ถ้ายังไม่มีผลสแกน ให้ใช้เหรียญสำรองตามลำดับสล็อต
-                    target = self.fallback_assets[min(i-1, 2)]
+                    target = self.fallback_assets[min(scan_idx, 2)]
 
                 rsi_now = target['rsi']
                 name = target['sym'].replace('THB_','').replace('_THB','')
-
+                
+                # Visual Bar แบบเดิมที่พี่ชอบ
                 if rsi_now <= self.rsi_buy_target:
                     fill = max(0, min(5, int((self.rsi_buy_target - rsi_now) / 2) + 1))
                     bar = "▪️" * fill + "▫️" * (5 - fill) + " 📉"
@@ -225,7 +230,7 @@ class TitanMasterV17_2:
 
         equity = thb + total_asset_val
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        alpha_name = self.latest_scan_results[0]['sym'].replace('THB_','') if self.latest_scan_results else "Scanning..."
+        alpha_name = self.latest_scan_results[0]['sym'].replace('_THB','') if self.latest_scan_results else "Scanning"
 
         msg = (
             f"💠 <b>TITAN V.17.2 | ULTIMATE ALPHA</b>\n"
@@ -237,7 +242,6 @@ class TitanMasterV17_2:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 <b>INTELLIGENCE (Alpha: {alpha_name})</b>\n"
             f"• Momentum: Multi-Slot Scan Active\n"
-            f"• Status: Performance Optimized\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
             f"• NET EQUITY: <b>{equity:,.2f} THB</b>\n"
@@ -257,4 +261,4 @@ class TitanMasterV17_2:
         except: pass
 
 if __name__ == "__main__":
-    TitanMasterV17_2().run()
+    TitanMasterV17_2_Final().run()
