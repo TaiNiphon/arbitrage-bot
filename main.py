@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 
 class TitanHybridV15_Final:
     def __init__(self):
-        # --- 1. CONFIGURATION (เดิม) ---
+        # --- 1. CONFIGURATION (คงเดิมทั้งหมด) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -22,11 +22,11 @@ class TitanHybridV15_Final:
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
         self.prev_rsi = 0.0
-        self.btc_status = "CONNECTING V3..." 
+        self.btc_status = "SYNCHRONIZING..." 
 
         self._setup_database()
         self._load_state_from_db()
-        self.notify("<b>🛡️ TITAN V.15.3.0 | API V3 ACTIVE</b>\n<i>Status: กลยุทธ์เดิม เสริมความแกร่งด้วย V3</i>")
+        self.notify("<b>🛡️ TITAN V.15.3.1 | FIXED BTC TREND</b>\n<i>Status: กลยุทธ์เดิม เสถียรขึ้นด้วยระบบ Hybrid V3</i>")
 
     def _setup_database(self):
         try:
@@ -66,21 +66,28 @@ class TitanHybridV15_Final:
         return None, None
 
     def get_btc_trend_optimized(self):
-        """ใช้ API v3 เพื่อความแม่นยำสูงสุด"""
+        """แก้ไขด่วน: ระบบดึงข้อมูล BTC แบบ Hybrid เพื่อให้สถานะเปลี่ยนแน่นอน"""
         try:
-            res = requests.get("https://api.bitkub.com/api/v3/market/ticker?sym=THB_BTC", timeout=10).json()
-            if res.get('error') == 0:
-                data = res['result']
+            # ใช้ Public Ticker API ที่เสถียรที่สุดของ Bitkub
+            res = requests.get("https://api.bitkub.com/api/market/ticker?sym=THB_BTC", timeout=10).json()
+            if 'THB_BTC' in res:
+                data = res['THB_BTC']
                 change = float(data.get('percentChange', 0))
                 
+                # ถ้าค่าเป็น 0 ให้คำนวณเองทันทีจากราคาปัจจุบันเทียบราคาเปิด 24 ชม.
+                if change == 0:
+                    last = float(data.get('last', 0))
+                    open_p = float(data.get('open24h',  open_p if 'open_p' in locals() else last))
+                    change = ((last - open_p) / open_p) * 100 if open_p > 0 else 0.0
+
                 if change > 0.5: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
                 elif change < -2.0: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
                 else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
                 
-                return change > -3.5 # เงื่อนไขป้องกันความเสี่ยงเดิม
+                return change > -3.5 # เงื่อนไขรักษาความเสี่ยงเดิม
             return True
         except:
-            self.btc_status = "V3 FETCH ERROR ⚠️"
+            self.btc_status = "FETCH ERROR ⚠️"
             return True
 
     def get_indicators(self):
@@ -141,7 +148,7 @@ class TitanHybridV15_Final:
                 
                 growth = ((curr_equity - self.initial_equity) / self.initial_equity) * 100
 
-                # --- BUY LOGIC ---
+                # --- BUY LOGIC (คงเดิม) ---
                 active_ids = [i for i in self.slots if self.slots[i]["active"]]
                 if len(active_ids) < 2 and rsi <= self.rsi_buy_target:
                     if btc_allowed:
@@ -152,7 +159,7 @@ class TitanHybridV15_Final:
                                 self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
                                 self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC: {self.btc_status}")
 
-                # --- SELL LOGIC (Trailing Stop) ---
+                # --- SELL LOGIC (Trailing Stop คงเดิม) ---
                 for s_id, s in self.slots.items():
                     if s["active"]:
                         curr_pnl = ((p - s['price']) / s['price']) * 100
@@ -164,7 +171,7 @@ class TitanHybridV15_Final:
                                 self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | PnL: {curr_pnl:+.2f}%")
                                 self.slots[s_id] = {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}
 
-                # --- REPORTING (หน้าตาเดิม) ---
+                # --- REPORTING (หน้าตาเดิมที่คุณต้องการ) ---
                 if time.time() - last_rep >= 600:
                     self._send_full_report(p, rsi, curr_equity, growth, thb or 0, coin or 0)
                     last_rep = time.time(); self.prev_rsi = rsi
@@ -173,7 +180,7 @@ class TitanHybridV15_Final:
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.15.3.0 | {self.symbol}</b>\n"
+        msg = (f"🛡️ <b>TITAN V.15.3.1 | {self.symbol}</b>\n"
                f"Status: ONLINE & MONITORING\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
