@@ -29,7 +29,8 @@ class TitanHybridV15_Final:
 
         self._setup_database()
         self._load_state_from_db()
-        self.notify("<b>🛡️ TITAN V.15.2.2 HYBRID | UPDATED</b>\n<i>Status: BTC Filter Fix & Stable Wallet Active</i>")
+        # ปรับปรุง Version Tag เพื่อให้ทราบว่ามีการอัปเดต Fix แล้ว
+        self.notify("<b>🛡️ TITAN V.15.2.3 HYBRID | HOTFIX</b>\n<i>Status: BTC Data Fallback & Stable Wallet Active</i>")
 
     def _setup_database(self):
         try:
@@ -55,7 +56,6 @@ class TitanHybridV15_Final:
         except: pass
 
     def get_wallet_stable(self):
-        """ดึงข้อมูลกระเป๋าเงินพร้อมระบบ Retry ป้องกันยอด 0.00"""
         for _ in range(3):
             try:
                 ts = str(int(time.time() * 1000))
@@ -70,26 +70,37 @@ class TitanHybridV15_Final:
         return None, None
 
     def get_btc_trend_optimized(self):
-        """เช็คเทรนด์ BTC แบบลดภาระ API เพื่อแก้ปัญหา FETCH ERROR"""
+        """แก้ไขปัญหา INITIALIZING โดยใช้ระบบ Fallback ตรวจสอบราคาเปิดและราคาต่ำสุด"""
         try:
-            # ใช้ Ticker API ซึ่งเสถียรกว่าและดึงง่ายกว่า History สำหรับ BTC
             res = requests.get("https://api.bitkub.com/api/market/ticker?sym=THB_BTC", timeout=10).json()
             if 'THB_BTC' in res:
                 data = res['THB_BTC']
                 last = float(data['last'])
-                open24 = float(data['open24h'])
-                change = ((last - open24) / open24) * 100
+                open24 = float(data.get('open24h', 0))
+                low24 = float(data.get('low24h', 0))
                 
-                # กำหนดสถานะตามการเปลี่ยนแปลงของราคา
-                if change > 0: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
-                elif change < -2: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
-                else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
+                # กลไก 1: ใช้ราคาเปิด (Open Price) เป็นเกณฑ์หลัก
+                if open24 > 0:
+                    change = ((last - open24) / open24) * 100
+                    if change > 0: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
+                    elif change < -2: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
+                    else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
+                    return change > -3.5
                 
-                return change > -3.5 # อนุโลมให้เทรดได้ถ้า BTC ไม่ดิ่งเกิน 3.5%
+                # กลไก 2: ถ้าราคาเปิดเป็น 0 (API รวน) ให้ใช้ราคาต่ำสุด (Low) เทียบเพื่อหาความเสถียรแทน
+                elif low24 > 0:
+                    change_from_low = ((last - low24) / low24) * 100
+                    self.btc_status = f"STABLE 📈 ({change_from_low:+.2f}%)"
+                    return True
+                
+                # กลไก 3: ถ้าข้อมูลอื่นๆ ไม่มาเลย ให้เช็คแค่ว่ามีราคาปัจจุบันอยู่จริง
+                else:
+                    self.btc_status = "MARKET OPEN ✅"
+                    return last > 0
             return True
         except:
             self.btc_status = "FETCH ERROR ⚠️"
-            return True # กรณี Error ให้ปล่อยผ่านเพื่อไม่ให้ระบบซื้อขายค้าง
+            return True
 
     def get_indicators(self):
         try:
@@ -150,14 +161,14 @@ class TitanHybridV15_Final:
                     self.last_known_equity = curr_equity
                 else:
                     curr_equity = self.last_known_equity
-                    thb = 0 # ป้องกัน Error ในการคำนวณ buy_amt
+                    thb = 0 
                 
                 growth = ((curr_equity - self.initial_equity) / self.initial_equity) * 100
 
-                # --- BUY LOGIC WITH OPTIMIZED BTC FILTER ---
+                # --- BUY LOGIC ---
                 active_ids = [i for i in self.slots if self.slots[i]["active"]]
                 if len(active_ids) < 2 and rsi <= self.rsi_buy_target:
-                    if self.get_btc_trend_optimized():
+                    if self.get_btc_trend_optimized(): # เรียกใช้ฟังก์ชันที่แก้ใหม่
                         s_id = 1 if 1 not in active_ids else 2
                         if thb >= 10:
                             buy_amt = thb / (2 - len(active_ids))
@@ -165,7 +176,7 @@ class TitanHybridV15_Final:
                                 self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
                                 self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC: {self.btc_status}")
 
-                # --- SELL LOGIC: TRAILING STOP & TAKE PROFIT ---
+                # --- SELL LOGIC ---
                 for s_id, s in self.slots.items():
                     if s["active"]:
                         curr_pnl = ((p - s['price']) / s['price']) * 100
@@ -174,7 +185,6 @@ class TitanHybridV15_Final:
                         new_sl = p - (atr * 2.5)
                         if new_sl > s['sl']: s['sl'] = new_sl
                         
-                        # เงื่อนไขขาย: ชน Trailing SL หรือ กำไรถึงเป้า 10%
                         if p <= s['sl'] or curr_pnl >= 10.0:
                             if self.place_order("sell", s_id, p, s['units']):
                                 self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | PnL: {curr_pnl:+.2f}%")
@@ -191,7 +201,7 @@ class TitanHybridV15_Final:
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.15.2.2 | {self.symbol}</b>\n"
+        msg = (f"🛡️ <b>TITAN V.15.2.3 | {self.symbol}</b>\n"
                f"Status: ONLINE & MONITORING\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
