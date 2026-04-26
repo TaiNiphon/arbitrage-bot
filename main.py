@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 
 class TitanHybridV15_Final:
     def __init__(self):
-        # --- 1. CONFIGURATION ---
+        # --- 1. CONFIGURATION (เดิม) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,16 +11,14 @@ class TitanHybridV15_Final:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
         
-        # Risk & Equity Management
         raw_eq = os.getenv("INITIAL_EQUITY", "1800")
-        try:
-            self.initial_equity = float(str(raw_eq).replace(',', ''))
-        except:
-            self.initial_equity = 1800.0
+        try: self.initial_equity = float(str(raw_eq).replace(',', ''))
+        except: self.initial_equity = 1800.0
             
         self.last_known_equity = self.initial_equity
         self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "30.0"))
         
+        # State Management
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
         self.prev_rsi = 0.0
@@ -28,7 +26,7 @@ class TitanHybridV15_Final:
 
         self._setup_database()
         self._load_state_from_db()
-        self.notify("<b>🛡️ TITAN V.15.3.0 | API V3 ACTIVE</b>\n<i>Status: Native V3 Ticker Implemented</i>")
+        self.notify("<b>🛡️ TITAN V.15.3.0 | API V3 ACTIVE</b>\n<i>Status: กลยุทธ์เดิม เสริมความแกร่งด้วย V3</i>")
 
     def _setup_database(self):
         try:
@@ -68,12 +66,10 @@ class TitanHybridV15_Final:
         return None, None
 
     def get_btc_trend_optimized(self):
-        """🚀 ใช้ API V3 ในการเช็คเทรนด์ BTC (แม่นยำและเสถียรที่สุด)"""
+        """ใช้ API v3 เพื่อความแม่นยำสูงสุด"""
         try:
-            # API V3 Endpoint สำหรับ Ticker
             res = requests.get("https://api.bitkub.com/api/v3/market/ticker?sym=THB_BTC", timeout=10).json()
             if res.get('error') == 0:
-                # ใน V3 ข้อมูลจะอยู่ใน 'result' และ Bitkub ใส่เครื่องหมาย + หรือ - มาให้เสร็จสรรพ
                 data = res['result']
                 change = float(data.get('percentChange', 0))
                 
@@ -81,7 +77,7 @@ class TitanHybridV15_Final:
                 elif change < -2.0: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
                 else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
                 
-                return change > -3.5
+                return change > -3.5 # เงื่อนไขป้องกันความเสี่ยงเดิม
             return True
         except:
             self.btc_status = "V3 FETCH ERROR ⚠️"
@@ -91,14 +87,10 @@ class TitanHybridV15_Final:
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
             if 'c' not in res or len(res['c']) < 15: return None
-            
             c = np.array(res['c'], dtype=float)
             diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
-            
-            m_up = np.mean(up[-14:])
-            m_down = np.mean(down[-14:])
+            m_up = np.mean(up[-14:]); m_down = np.mean(down[-14:])
             rsi = 100 - (100 / (1 + (m_up / (m_down + 1e-9))))
-            
             tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
             return {"price": c[-1], "rsi": rsi, "atr": np.mean(tr[-14:])}
         except: return None
@@ -134,8 +126,7 @@ class TitanHybridV15_Final:
         while True:
             try:
                 d = self.get_indicators()
-                if not d: 
-                    time.sleep(10); continue
+                if not d: time.sleep(10); continue
                     
                 p, rsi, atr = d['price'], d['rsi'], d['atr']
                 btc_allowed = self.get_btc_trend_optimized()
@@ -161,7 +152,7 @@ class TitanHybridV15_Final:
                                 self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
                                 self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC: {self.btc_status}")
 
-                # --- SELL LOGIC ---
+                # --- SELL LOGIC (Trailing Stop) ---
                 for s_id, s in self.slots.items():
                     if s["active"]:
                         curr_pnl = ((p - s['price']) / s['price']) * 100
@@ -173,35 +164,36 @@ class TitanHybridV15_Final:
                                 self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | PnL: {curr_pnl:+.2f}%")
                                 self.slots[s_id] = {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}
 
-                # --- REPORTING ---
+                # --- REPORTING (หน้าตาเดิม) ---
                 if time.time() - last_rep >= 600:
                     self._send_full_report(p, rsi, curr_equity, growth, thb or 0, coin or 0)
                     last_rep = time.time(); self.prev_rsi = rsi
-            except Exception as e: 
-                print(f"Main Loop Error: {e}")
+            except Exception as e: print(f"Error: {e}")
             time.sleep(20)
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
         msg = (f"🛡️ <b>TITAN V.15.3.0 | {self.symbol}</b>\n"
-               f"Status: ONLINE (API v3)\n"
+               f"Status: ONLINE & MONITORING\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"📊 <b>MARKET INTELLIGENCE</b>\n"
                f"• Price : <b>{p:,.2f} THB</b>\n"
                f"• BTC Trend : {self.btc_status}\n"
-               f"• RSI : {rsi:.2f}\n"
+               f"• RSI : {rsi:.2f} (Prev: {self.prev_rsi:.2f})\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"💰 <b>PORTFOLIO PERFORMANCE</b>\n"
                f"• NET EQUITY : <b>{equity:,.2f} THB</b>\n"
                f"• TOTAL GROWTH : {growth:+.2f}%\n"
-               f"━━━━━━━━━━━━━━━━━━\n")
+               f"• Cash : {thb:,.2f} | Assets: {coin:.4f}\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"🎯 <b>STRATEGY DUAL-SLOT</b>\n")
         for i, s in self.slots.items():
             if s["active"]:
                 pnl = ((p - s['price']) / s['price']) * 100
-                msg += f"<b>[SLOT {i}]</b> ACTIVE | PnL: {pnl:+.2f}%\n"
+                msg += f"<b>[SLOT {i}]</b> - ACTIVE\n  └ SL: {s['sl']:,.2f} | PnL: {pnl:+.2f}%\n"
             else:
-                msg += f"<b>[SLOT {i}]</b> Waiting RSI ≤ {self.rsi_buy_target}\n"
+                msg += f"<b>[SLOT {i}]</b> - Waiting RSI ≤ {self.rsi_buy_target}\n"
         self.notify(msg)
 
     def notify(self, m):
