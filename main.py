@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanHybrid_Final:
+class TitanHybrid_V17_9:
     def __init__(self):
-        # --- 1. CONFIG (ดึงตาม V.15 เป๊ะๆ เพื่อความชัวร์) ---
+        # 1. Config (ถอดจาก V.15 ที่รันผ่าน)
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,18 +11,17 @@ class TitanHybrid_Final:
         self.db_url = os.getenv("DATABASE_URL")
         self.symbol = os.getenv("SYMBOL", "THB_XRP")
 
-        # --- 2. STRATEGY & RISK (3-Slots / RSI 35 / ATR Stop) ---
+        # 2. Strategy & Risk (3-Slots / RSI 35)
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", "1800"))
         self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "600"))
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "35.0"))
-        self.atr_mult = 2.5 
         
         self.tz = timezone(timedelta(hours=7))
         self.slots = {1: {"active": False}, 2: {"active": False}, 3: {"active": False}}
         
         self._init_db()
         self._sync_slots()
-        self.notify("<b>🏛️ TITAN V.17.9 HYBRID | ONLINE</b>\n<i>ระบบเสถียร 100% พร้อมรายงานผลแบบมืออาชีพ</i>")
+        self.notify("<b>🏛️ TITAN V.17.9 HYBRID | ACTIVE</b>\n<i>Engine: Stability Base V.15 Audit Pass</i>")
 
     def _init_db(self):
         with psycopg2.connect(self.db_url) as conn:
@@ -42,7 +41,6 @@ class TitanHybrid_Final:
         except: pass
 
     def get_balance(self):
-        # ใช้ Logic ดึงเงินที่รันผ่านใน V.15
         ts = str(int(time.time() * 1000))
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+"/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
         try:
@@ -50,7 +48,7 @@ class TitanHybrid_Final:
                                 headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
             if res.get('error') == 0:
                 thb = float(res['result'].get('THB', 0.0))
-                coin_key = self.symbol.split('_')[1]
+                coin_key = self.symbol.split('_')[1] # ดึง XRP
                 coin = float(res['result'].get(coin_key, 0.0))
                 return thb, coin
         except: pass
@@ -70,6 +68,7 @@ class TitanHybrid_Final:
     def execute_order(self, side, amt, price):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         ts = str(int(time.time() * 1000))
+        # ตรวจสอบทศนิยม: XRP ราคาต้อง 4 ตำแหน่ง / จำนวนต้อง 8 ตำแหน่ง
         payload = {"sym": self.symbol.lower(), "amt": round(amt, 8), "rat": round(price, 4), "typ": "limit"}
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
         try:
@@ -84,42 +83,44 @@ class TitanHybrid_Final:
         while True:
             try:
                 m = self.get_market_data()
-                if not m: continue
+                if not m: 
+                    time.sleep(2)
+                    continue
                 p, rsi, atr = m['price'], m['rsi'], m['atr']
                 thb, coin = self.get_balance()
 
-                # --- 🚀 BUY LOGIC (3-Slots) ---
+                # --- BUY (3-Slots) ---
                 active_count = sum(1 for s in self.slots.values() if s.get('active'))
                 if active_count < 3 and rsi <= self.rsi_buy_max and thb >= self.budget_per_slot:
                     for s_id in [1, 2, 3]:
                         if not self.slots[s_id].get('active'):
                             if self.execute_order("buy", self.budget_per_slot, p):
-                                units = (self.budget_per_slot * 0.9975) / p
-                                self.slots[s_id] = {"active": True, "price": p, "units": units, "sl": p - (atr * self.atr_mult), "max_pnl": 0.0}
+                                units = (self.budget_per_slot * 0.9975) / p # หักค่าธรรมเนียม
+                                self.slots[s_id] = {"active": True, "price": p, "units": units, "sl": p - (atr * 2.5), "max_pnl": 0.0}
                                 self._update_db(s_id)
-                                self.notify(f"🚀 <b>TRADE ENTRY | SLOT {s_id}</b>\nPrice: {p:,.4f}\nATR Stop Loss Set.")
+                                self.notify(f"🚀 <b>ENTRY | SLOT {s_id}</b>\nPrice: {p:,.4f}\nATR SL Active")
                             break
 
-                # --- 📤 SELL LOGIC (Trailing Stop) ---
+                # --- SELL (Trailing Stop) ---
                 for s_id, s in self.slots.items():
                     if s.get('active'):
                         pnl = ((p - s['price']) / s['price']) * 100
                         if pnl > s['max_pnl']: s['max_pnl'] = pnl
-                        if p - (atr * self.atr_mult) > s['sl']: s['sl'] = p - (atr * self.atr_mult)
+                        if p - (atr * 2.5) > s['sl']: s['sl'] = p - (atr * 2.5) # เลื่อน SL ขึ้นตาม
                         
                         if p <= s['sl'] or (rsi >= 75 and pnl > 2.0):
                             if self.execute_order("sell", s['units'], p):
-                                self.notify(f"📤 <b>TRADE EXIT | SLOT {s_id}</b>\nPrice: {p:,.4f}\nROI: {pnl:+.2f}%")
+                                self.notify(f"📤 <b>EXIT | SLOT {s_id}</b>\nROI: {pnl:+.2f}%")
                                 self.slots[s_id] = {"active": False}
                                 self._update_db(s_id)
 
-                # --- 📊 PROFESSIONAL REPORT (Every 10 Mins) ---
+                # --- REPORT (Every 10 Mins) ---
                 if time.time() - last_rep >= 600:
                     self._send_pro_report(p, rsi, thb, coin)
                     last_rep = time.time()
 
             except Exception as e: print(f"Error: {e}")
-            time.sleep(5) # ใช้ความถี่ 5 วินาทีเพื่อให้ Railway ขยับตลอดเวลา
+            time.sleep(5) # ความถี่ที่ Railway ยอมรับได้ ไม่ค้าง
 
     def _update_db(self, s_id):
         with psycopg2.connect(self.db_url) as conn:
@@ -139,18 +140,18 @@ class TitanHybrid_Final:
         now = datetime.now(self.tz)
         
         msg = (f"💠 <b>TITAN V.17.9 | PORTFOLIO REPORT</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-               f"📊 <b>MARKET DATA</b>\n• Price: {p:,.4f} | RSI: {rsi:.2f}\n"
+               f"📊 <b>MARKET</b>\n• Price: {p:,.4f} | RSI: {rsi:.2f}\n"
                f"💰 <b>FINANCIALS</b>\n"
                f"• Total Equity: {equity:,.2f} ({growth:+.2f}%)\n"
                f"• Available Cash: 🟢 <b>{thb:,.2f} THB</b>\n"
-               f"• Assets Value: 🔵 {coin * p:,.2f} THB\n━━━━━━━━━━━━━━━━━━━━\n"
-               f"🎯 <b>STRATEGY (3-SLOTS)</b>\n")
+               f"• Assets: 🔵 {coin * p:,.2f} THB\n━━━━━━━━━━━━━━━━━━━━\n"
+               f"🎯 <b>SLOTS STATUS</b>\n")
         for i in [1, 2, 3]:
             s = self.slots[i]
             if s.get('active'):
                 pnl = ((p - s['price']) / s['price']) * 100
                 msg += f"• SLOT {i}: 🟢 ROI {pnl:+.2f}% | SL {s['sl']:,.2f}\n"
-            else: msg += f"• SLOT {i}: ⚪ WAITING FOR RSI\n"
+            else: msg += f"• SLOT {i}: ⚪ WAITING SIGNAL\n"
         msg += f"━━━━━━━━━━━━━━━━━━━━\n📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
         self.notify(msg)
 
@@ -160,4 +161,4 @@ class TitanHybrid_Final:
         except: pass
 
 if __name__ == "__main__":
-    TitanHybrid_Final().run()
+    TitanHybrid_V17_9().run()
