@@ -13,7 +13,11 @@ class TitanHybridV15:
         
         # Risk & Equity Management
         raw_eq = os.getenv("INITIAL_EQUITY", "1800")
-        self.initial_equity = float(str(raw_eq).replace(',', ''))
+        try:
+            self.initial_equity = float(str(raw_eq).replace(',', ''))
+        except:
+            self.initial_equity = 1800.0
+            
         self.last_known_equity = self.initial_equity
         self.rsi_buy_target = 30.0
         
@@ -21,11 +25,11 @@ class TitanHybridV15:
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
         self.prev_rsi = 0.0
-        self.btc_status = "UNKNOWN"
+        self.btc_status = "INITIALIZING..."
 
         self._setup_database()
         self._load_state_from_db()
-        self.notify("<b>🛡️ TITAN V.15.2 HYBRID | DEPLOYED</b>\n<i>Status: ATR Trailing & BTC Filter Active</i>")
+        self.notify("<b>🛡️ TITAN V.15.2.1 HYBRID | DEPLOYED</b>\n<i>Status: Fix NoneType & BTC Filter Optimized</i>")
 
     def _setup_database(self):
         try:
@@ -52,6 +56,10 @@ class TitanHybridV15:
 
     def get_wallet_stable(self):
         """ระบบป้องกันยอดเงิน 0.00"""
+        if not self.api_secret or "postgresql" in self.api_secret:
+            print("Critical: BITKUB_SECRET is invalid.")
+            return None, None
+            
         for _ in range(3):
             try:
                 ts = str(int(time.time() * 1000))
@@ -64,30 +72,57 @@ class TitanHybridV15:
         return None, None
 
     def get_btc_trend(self):
-        """เช็คเทรนด์ BTC/THB ก่อนตัดสินใจซื้อ"""
+        """เช็คเทรนด์ BTC/THB ป้องกัน NoneType Error"""
         try:
+            # 1. เช็ค Ticker ก่อน
             res = requests.get("https://api.bitkub.com/api/market/ticker?sym=THB_BTC", timeout=10).json()
-            last_price = float(res['THB_BTC']['last'])
-            # เช็ค RSI BTC (1H) แบบย่อ
+            if 'THB_BTC' not in res:
+                self.btc_status = "FETCH ERROR ⚠️"
+                return True 
+
+            # 2. ดึง History มาคำนวณ RSI
             h = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=60&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
+            
+            if 'c' not in h or len(h['c']) < 15:
+                self.btc_status = "LOW DATA 📊"
+                return True
+
             c = np.array(h['c'], dtype=float)
-            diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
-            rsi_btc = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
-            self.btc_status = "BULLISH 📈" if rsi_btc > 50 else "BEARISH 📉"
-            return rsi_btc > 40 # ถ้า BTC RSI ต่ำกว่า 40 ถือว่าเสี่ยงเกินไป
-        except: return True # ถ้าดึงไม่ได้ ให้เทรดตามปกติ
+            diff = np.diff(c)
+            up = diff.clip(min=0)
+            down = -diff.clip(max=0)
+            
+            m_up = np.mean(up[-14:])
+            m_down = np.mean(down[-14:])
+            
+            # ป้องกันการหารด้วยศูนย์
+            rsi_btc = 100 - (100 / (1 + (m_up / (m_down + 1e-9))))
+            
+            self.btc_status = f"{'BULLISH 📈' if rsi_btc > 50 else 'BEARISH 📉'} ({rsi_btc:.1f})"
+            return rsi_btc > 40 
+        except Exception as e:
+            print(f"BTC Trend Error: {e}")
+            self.btc_status = "UNKNOWN ⚠️"
+            return True
 
     def get_indicators(self):
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
+            if 'c' not in res or len(res['c']) < 15: return None
+            
             c = np.array(res['c'], dtype=float)
             diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
-            rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
+            
+            m_up = np.mean(up[-14:])
+            m_down = np.mean(down[-14:])
+            rsi = 100 - (100 / (1 + (m_up / (m_down + 1e-9))))
+            
             tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
             return {"price": c[-1], "rsi": rsi, "atr": np.mean(tr[-14:])}
         except: return None
 
     def place_order(self, side, slot_id, price, amt_or_units, atr=0):
+        if not self.api_secret or "postgresql" in self.api_secret: return False
         try:
             path = f"/api/v3/market/place-{'bid' if side == 'buy' else 'ask'}"
             ts = str(int(time.time() * 1000))
@@ -118,10 +153,13 @@ class TitanHybridV15:
         while True:
             try:
                 d = self.get_indicators()
-                if not d: continue
+                if not d: 
+                    time.sleep(5)
+                    continue
+                    
                 p, rsi, atr = d['price'], d['rsi'], d['atr']
-                
                 thb, coin = self.get_wallet_stable()
+                
                 if thb is not None:
                     curr_equity = thb + (coin * p)
                     self.last_known_equity = curr_equity
@@ -133,39 +171,45 @@ class TitanHybridV15:
                 # --- 🎯 STRATEGY: BUY WITH BTC FILTER ---
                 active_ids = [i for i in self.slots if self.slots[i]["active"]]
                 if len(active_ids) < 2 and rsi <= self.rsi_buy_target:
-                    if self.get_btc_trend(): # เช็คเทรนด์ BTC ก่อน
+                    # เรียกใช้ get_btc_trend เพื่ออัปเดต btc_status
+                    is_btc_safe = self.get_btc_trend()
+                    if is_btc_safe:
                         s_id = 1 if 1 not in active_ids else 2
-                        buy_amt = thb / (2 - len(active_ids))
-                        if buy_amt >= 10 and self.place_order("buy", s_id, p, buy_amt, atr):
-                            self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
-                            self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC Trend: {self.btc_status}")
+                        if thb and thb >= 10:
+                            buy_amt = thb / (2 - len(active_ids))
+                            if buy_amt >= 10 and self.place_order("buy", s_id, p, buy_amt, atr):
+                                self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
+                                self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC Trend: {self.btc_status}")
+                    else:
+                        # อัปเดตสถานะ BTC แม้จะไม่ซื้อ เพื่อให้ Report แสดงผลล่าสุด
+                        pass
 
-                # --- 📤 STRATEGY: TRAILING STOP (ป้องกันขายหมู) ---
+                # --- 📤 STRATEGY: TRAILING STOP ---
                 for s_id, s in self.slots.items():
                     if s["active"]:
                         curr_pnl = ((p - s['price']) / s['price']) * 100
                         if curr_pnl > s['max_pnl']: s['max_pnl'] = curr_pnl
                         
-                        # ขยับ SL ขึ้นตามราคา (Trailing)
                         new_sl = p - (atr * 2.5)
                         if new_sl > s['sl']: s['sl'] = new_sl
                         
-                        # เงื่อนไขขาย: ชน SL หรือ กำไรถึงเป้า 10%
                         if p <= s['sl'] or curr_pnl >= 10.0:
                             if self.place_order("sell", s_id, p, s['units']):
                                 self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | PnL: {curr_pnl:+.2f}%")
                                 self.slots[s_id] = {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}
 
-                # --- 📊 REPORTING ---
+                # --- 📊 REPORTING (Every 10 Mins) ---
                 if time.time() - last_rep >= 600:
+                    self.get_btc_trend() # อัปเดตสถานะก่อนส่งรายงาน
                     self._send_full_report(p, rsi, curr_equity, growth, thb or 0, coin or 0)
                     last_rep = time.time(); self.prev_rsi = rsi
-            except Exception as e: print(f"Error: {e}")
+            except Exception as e: 
+                print(f"Main Loop Error: {e}")
             time.sleep(15)
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.15.2 HYBRID | {self.symbol}</b>\n"
+        msg = (f"🛡️ <b>TITAN V.15.2.1 | {self.symbol}</b>\n"
                f"Status: ONLINE & MONITORING\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
