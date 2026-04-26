@@ -29,8 +29,8 @@ class TitanHybridV15_Final:
 
         self._setup_database()
         self._load_state_from_db()
-        # ปรับปรุง Version Tag เพื่อให้ทราบว่ามีการอัปเดต Fix แล้ว
-        self.notify("<b>🛡️ TITAN V.15.2.3 HYBRID | HOTFIX</b>\n<i>Status: BTC Data Fallback & Stable Wallet Active</i>")
+        # เปลี่ยน Version Tag ให้คุณตรวจสอบได้ง่ายบน Telegram
+        self.notify("<b>🛡️ TITAN V.15.2.4 HYBRID | RE-FIX</b>\n<i>Status: BTC percentChange Native & Dual-Slot Active</i>")
 
     def _setup_database(self):
         try:
@@ -70,33 +70,20 @@ class TitanHybridV15_Final:
         return None, None
 
     def get_btc_trend_optimized(self):
-        """แก้ไขปัญหา INITIALIZING โดยใช้ระบบ Fallback ตรวจสอบราคาเปิดและราคาต่ำสุด"""
+        """แก้ไขปัญหา INITIALIZING โดยใช้ค่าเปอร์เซ็นต์จาก API โดยตรง ไม่ต้องคำนวณเอง"""
         try:
             res = requests.get("https://api.bitkub.com/api/market/ticker?sym=THB_BTC", timeout=10).json()
             if 'THB_BTC' in res:
                 data = res['THB_BTC']
-                last = float(data['last'])
-                open24 = float(data.get('open24h', 0))
-                low24 = float(data.get('low24h', 0))
+                # ใช้ค่า percentChange ที่ Bitkub คำนวณมาให้แล้ว จะไม่มีปัญหาเรื่องค่า 0 หรือ Null ค้าง
+                change = float(data.get('percentChange', 0))
                 
-                # กลไก 1: ใช้ราคาเปิด (Open Price) เป็นเกณฑ์หลัก
-                if open24 > 0:
-                    change = ((last - open24) / open24) * 100
-                    if change > 0: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
-                    elif change < -2: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
-                    else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
-                    return change > -3.5
+                if change > 0: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
+                elif change < -2.5: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
+                else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
                 
-                # กลไก 2: ถ้าราคาเปิดเป็น 0 (API รวน) ให้ใช้ราคาต่ำสุด (Low) เทียบเพื่อหาความเสถียรแทน
-                elif low24 > 0:
-                    change_from_low = ((last - low24) / low24) * 100
-                    self.btc_status = f"STABLE 📈 ({change_from_low:+.2f}%)"
-                    return True
-                
-                # กลไก 3: ถ้าข้อมูลอื่นๆ ไม่มาเลย ให้เช็คแค่ว่ามีราคาปัจจุบันอยู่จริง
-                else:
-                    self.btc_status = "MARKET OPEN ✅"
-                    return last > 0
+                # เงื่อนไขความปลอดภัย: อนุญาตให้เทรดถ้า BTC ไม่ติดลบหนักกว่า -4%
+                return change > -4.0
             return True
         except:
             self.btc_status = "FETCH ERROR ⚠️"
@@ -168,7 +155,7 @@ class TitanHybridV15_Final:
                 # --- BUY LOGIC ---
                 active_ids = [i for i in self.slots if self.slots[i]["active"]]
                 if len(active_ids) < 2 and rsi <= self.rsi_buy_target:
-                    if self.get_btc_trend_optimized(): # เรียกใช้ฟังก์ชันที่แก้ใหม่
+                    if self.get_btc_trend_optimized():
                         s_id = 1 if 1 not in active_ids else 2
                         if thb >= 10:
                             buy_amt = thb / (2 - len(active_ids))
@@ -201,7 +188,7 @@ class TitanHybridV15_Final:
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.15.2.3 | {self.symbol}</b>\n"
+        msg = (f"🛡️ <b>TITAN V.15.2.4 | {self.symbol}</b>\n"
                f"Status: ONLINE & MONITORING\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
