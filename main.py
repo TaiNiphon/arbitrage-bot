@@ -10,7 +10,8 @@ class TitanHybridV15_Final:
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
-        
+        self.fee_rate = 0.0025 # 0.25% Bitkub Fee
+
         raw_eq = os.getenv("INITIAL_EQUITY", "1800")
         try: self.initial_equity = float(str(raw_eq).replace(',', ''))
         except: self.initial_equity = 1800.0
@@ -22,11 +23,11 @@ class TitanHybridV15_Final:
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
         self.prev_rsi = 0.0
-        self.btc_status = "INITIALIZING V3..." 
+        self.btc_status = "INITIALIZING..." 
 
         self._setup_database()
         self._load_state_from_db()
-        self.notify("<b>🛡️ TITAN V.15.3.2 | BTC STATUS FIXED</b>\n<i>Status: ระบบดึงข้อมูลแบบใหม่ พร้อมใช้งานแล้ว</i>")
+        self.notify("<b>🛡️ TITAN V.15.3.3 | NET PROFIT MODE</b>\n<i>Status: ระบบคำนวณค่าธรรมเนียม 0.5% เปิดใช้งานแล้ว</i>")
 
     def _setup_database(self):
         try:
@@ -66,32 +67,21 @@ class TitanHybridV15_Final:
         return None, None
 
     def get_btc_trend_optimized(self):
-        """NEW FIX: ดึงข้อมูลจาก All Ticker เพื่อให้ค่า BTC Update แน่นอน 100%"""
         try:
-            # ดึงข้อมูล Ticker ทั้งหมด (เสถียรที่สุด ไม่ติด Rate Limit ง่าย)
             res = requests.get("https://api.bitkub.com/api/market/ticker", timeout=10).json()
-            
             if 'THB_BTC' in res:
                 data = res['THB_BTC']
                 change = float(data.get('percentChange', 0))
-                
-                # มาตรการสำรอง: ถ้า percentChange เป็น 0 ให้คำนวณเองจากราคา Last เทียบ Open24h
                 if change == 0:
                     last = float(data.get('last', 0))
                     open_p = float(data.get('open24h', 0))
                     change = ((last - open_p) / open_p) * 100 if open_p > 0 else 0.0
-
                 if change > 0.5: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
                 elif change < -2.0: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
                 else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
-                
-                return change > -3.5 # เงื่อนไขความเสี่ยงเดิม
-            
-            self.btc_status = "SYNC ERROR 🔄"
+                return change > -3.5
             return True
-        except Exception:
-            self.btc_status = "FETCH ERROR ⚠️"
-            return True
+        except: return True
 
     def get_indicators(self):
         try:
@@ -116,7 +106,10 @@ class TitanHybridV15_Final:
             if res.get('error') == 0:
                 pnl = 0
                 if side == "sell":
-                    pnl = ((price - self.slots[slot_id]['price']) / self.slots[slot_id]['price']) * 100
+                    # คำนวณ PnL สุทธิหลังหัก Fee ทั้งไปและกลับ
+                    entry_cost = self.slots[slot_id]['price'] * (1 + self.fee_rate)
+                    exit_revenue = price * (1 - self.fee_rate)
+                    pnl = ((exit_revenue - entry_cost) / entry_cost) * 100
                 
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
@@ -140,8 +133,8 @@ class TitanHybridV15_Final:
                     
                 p, rsi, atr = d['price'], d['rsi'], d['atr']
                 btc_allowed = self.get_btc_trend_optimized()
-                
                 thb, coin = self.get_wallet_stable()
+                
                 if thb is not None:
                     curr_equity = thb + (coin * p)
                     self.last_known_equity = curr_equity
@@ -158,23 +151,30 @@ class TitanHybridV15_Final:
                         s_id = 1 if 1 not in active_ids else 2
                         if thb >= 10:
                             buy_amt = thb / (2 - len(active_ids))
-                            if buy_amt >= 10 and self.place_order("buy", s_id, p, buy_amt, atr):
+                            if self.place_order("buy", s_id, p, buy_amt, atr):
                                 self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
                                 self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC: {self.btc_status}")
 
-                # --- SELL LOGIC (Trailing Stop คงเดิม) ---
+                # --- SELL LOGIC (ปรับปรุงเรื่องค่าธรรมเนียม) ---
                 for s_id, s in self.slots.items():
                     if s["active"]:
-                        curr_pnl = ((p - s['price']) / s['price']) * 100
-                        if curr_pnl > s['max_pnl']: s['max_pnl'] = curr_pnl
+                        # คำนวณ Net PnL (หัก Fee 0.25% ขาเข้า และ 0.25% ขาออก)
+                        entry_with_fee = s['price'] * (1 + self.fee_rate)
+                        exit_with_fee = p * (1 - self.fee_rate)
+                        curr_net_pnl = ((exit_with_fee - entry_with_fee) / entry_with_fee) * 100
+                        
+                        if curr_net_pnl > s['max_pnl']: s['max_pnl'] = curr_net_pnl
+                        
+                        # Trailing SL (ให้ทำงานเฉพาะเมื่อไม่ขาดทุนค่าธรรมเนียม หรือเป็นจุด Stop Loss จริง)
                         new_sl = p - (atr * 2.5)
                         if new_sl > s['sl']: s['sl'] = new_sl
-                        if p <= s['sl'] or curr_pnl >= 10.0:
+                        
+                        # เงื่อนไขขาย: 1. กำไรถึงเป้า 10% 2. หลุด SL (แต่ต้องเช็คว่า Net PnL ต้องสมเหตุสมผล)
+                        if p <= s['sl'] or curr_net_pnl >= 10.0:
                             if self.place_order("sell", s_id, p, s['units']):
-                                self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | PnL: {curr_pnl:+.2f}%")
+                                self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | Net PnL: {curr_net_pnl:+.2f}%")
                                 self.slots[s_id] = {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}
 
-                # --- REPORTING (คงหน้าตาเดิมที่คุณต้องการ) ---
                 if time.time() - last_rep >= 600:
                     self._send_full_report(p, rsi, curr_equity, growth, thb or 0, coin or 0)
                     last_rep = time.time(); self.prev_rsi = rsi
@@ -183,8 +183,8 @@ class TitanHybridV15_Final:
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.15.3.2 | {self.symbol}</b>\n"
-               f"Status: ONLINE & MONITORING\n"
+        msg = (f"🛡️ <b>TITAN V.15.3.3 | {self.symbol}</b>\n"
+               f"Status: ONLINE (NET PROFIT MODE)\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
                f"📊 <b>MARKET INTELLIGENCE</b>\n"
@@ -200,8 +200,10 @@ class TitanHybridV15_Final:
                f"🎯 <b>STRATEGY DUAL-SLOT</b>\n")
         for i, s in self.slots.items():
             if s["active"]:
-                pnl = ((p - s['price']) / s['price']) * 100
-                msg += f"<b>[SLOT {i}]</b> - ACTIVE\n  └ SL: {s['sl']:,.2f} | PnL: {pnl:+.2f}%\n"
+                entry_with_fee = s['price'] * (1 + self.fee_rate)
+                exit_with_fee = p * (1 - self.fee_rate)
+                net_pnl = ((exit_with_fee - entry_with_fee) / entry_with_fee) * 100
+                msg += f"<b>[SLOT {i}]</b> - ACTIVE\n  └ SL: {s['sl']:,.2f} | Net PnL: {net_pnl:+.2f}%\n"
             else:
                 msg += f"<b>[SLOT {i}]</b> - Waiting RSI ≤ {self.rsi_buy_target}\n"
         self.notify(msg)
