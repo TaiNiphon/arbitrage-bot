@@ -1,164 +1,141 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timezone, timedelta
 
-class TitanHybrid_V17_9:
+class TitanOmniV15_Pro:
     def __init__(self):
-        # 1. Config (ถอดจาก V.15 ที่รันผ่าน)
+        # --- Config (ดึงจาก Environment Variables) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
         self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
-        self.symbol = os.getenv("SYMBOL", "THB_XRP")
 
-        # 2. Strategy & Risk (3-Slots / RSI 35)
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", "1800"))
-        self.budget_per_slot = float(os.getenv("BUDGET_PER_SLOT", "600"))
-        self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "35.0"))
+        # --- Strategy & Risk ---
+        self.initial_equity = float(str(os.getenv("INITIAL_EQUITY", "2578")).replace(',', ''))
+        self.risk_per_trade = float(os.getenv("RISK_PER_TRADE", "1.0"))
+        self.rsi_buy_target = float(os.getenv("RSI_BUY_MAX", "30.0"))
+        self.daily_drawdown_limit = 5.0
+        self.prev_rsi = 0.0
+
+        # --- Slot Memory ---
+        self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
+                      2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
         
-        self.tz = timezone(timedelta(hours=7))
-        self.slots = {1: {"active": False}, 2: {"active": False}, 3: {"active": False}}
-        
-        self._init_db()
-        self._sync_slots()
-        self.notify("<b>🏛️ TITAN V.17.9 HYBRID | ACTIVE</b>\n<i>Engine: Stability Base V.15 Audit Pass</i>")
+        self._init_db_v15()
+        self._sync_slots_from_db()
+        self.notify("<b>🔥 TITAN V.15.0 DUAL-SLOT | DEPLOYED</b>\n<i>System: Dual-Engine Active</i>")
 
-    def _init_db(self):
-        with psycopg2.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""CREATE TABLE IF NOT EXISTS bot_slots_v17_9 (
-                    slot_id INTEGER PRIMARY KEY, price FLOAT, units FLOAT, 
-                    sl FLOAT, max_pnl FLOAT, updated_at TIMESTAMP)""")
+    def _init_db_v15(self):
+        conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v15 (
+            slot_id INTEGER PRIMARY KEY, last_action TEXT, avg_price FLOAT, 
+            total_units FLOAT, dynamic_sl FLOAT, max_pnl FLOAT, updated_at TIMESTAMP)""")
+        conn.commit(); cur.close(); conn.close()
 
-    def _sync_slots(self):
+    def _sync_slots_from_db(self):
         try:
-            with psycopg2.connect(self.db_url) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT slot_id, price, units, sl, max_pnl FROM bot_slots_v17_9")
-                    for r in cur.fetchall():
-                        if r[2] > 0:
-                            self.slots[r[0]] = {"active": True, "price": r[1], "units": r[2], "sl": r[3], "max_pnl": r[4]}
+            conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+            cur.execute("SELECT slot_id, avg_price, total_units, dynamic_sl, max_pnl FROM bot_state_v15")
+            for row in cur.fetchall():
+                if row[2] > 0:
+                    self.slots[row[0]] = {"active": True, "price": row[1], "units": row[2], "sl": row[3], "max_pnl": row[4]}
+            cur.close(); conn.close()
         except: pass
 
     def get_balance(self):
         ts = str(int(time.time() * 1000))
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+"/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
-        try:
-            res = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
-                                headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
-            if res.get('error') == 0:
-                thb = float(res['result'].get('THB', 0.0))
-                coin_key = self.symbol.split('_')[1] # ดึง XRP
-                coin = float(res['result'].get(coin_key, 0.0))
-                return thb, coin
-        except: pass
+        res = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
+                            headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
+        if res.get('error') == 0:
+            return float(res['result'].get('THB', 0)), float(res['result'].get(self.symbol.split('_')[0], 0))
         return 0.0, 0.0
 
-    def get_market_data(self):
-        try:
-            url = f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}"
-            res = requests.get(url, timeout=10).json()
-            c = np.array(res['c'], dtype=float)
-            diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
-            rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
-            tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
-            return {"price": c[-1], "rsi": rsi, "atr": np.mean(tr[-14:])}
-        except: return None
+    def get_indicators(self):
+        res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-86400}&to={int(time.time())}", timeout=10).json()
+        c = np.array(res['c'], dtype=float)
+        diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
+        rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
+        tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
+        return {"price": c[-1], "rsi": rsi, "atr": np.mean(tr[-14:])}
 
-    def execute_order(self, side, amt, price):
+    def place_smart_order(self, side, amt, price):
         path = "/api/v3/market/place-bid" if side == "buy" else "/api/v3/market/place-ask"
         ts = str(int(time.time() * 1000))
-        # ตรวจสอบทศนิยม: XRP ราคาต้อง 4 ตำแหน่ง / จำนวนต้อง 8 ตำแหน่ง
-        payload = {"sym": self.symbol.lower(), "amt": round(amt, 8), "rat": round(price, 4), "typ": "limit"}
+        payload = {"sym": self.symbol.lower(), "amt": amt, "rat": price, "typ": "limit"}
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
-        try:
-            r = requests.post(f"https://api.bitkub.com{path}", 
-                             headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, 
-                             data=json.dumps(payload), timeout=10)
-            return r.json().get('error') == 0
-        except: return False
+        r = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, data=json.dumps(payload), timeout=10)
+        return r.json().get('error') == 0
 
     def run(self):
         last_rep = 0
         while True:
             try:
-                m = self.get_market_data()
-                if not m: 
-                    time.sleep(2)
-                    continue
-                p, rsi, atr = m['price'], m['rsi'], m['atr']
+                d = self.get_indicators()
+                p, rsi, atr = d['price'], d['rsi'], d['atr']
                 thb, coin = self.get_balance()
+                equity = thb + (coin * p)
+                growth = ((equity - self.initial_equity) / self.initial_equity) * 100
 
-                # --- BUY (3-Slots) ---
-                active_count = sum(1 for s in self.slots.values() if s.get('active'))
-                if active_count < 3 and rsi <= self.rsi_buy_max and thb >= self.budget_per_slot:
-                    for s_id in [1, 2, 3]:
-                        if not self.slots[s_id].get('active'):
-                            if self.execute_order("buy", self.budget_per_slot, p):
-                                units = (self.budget_per_slot * 0.9975) / p # หักค่าธรรมเนียม
-                                self.slots[s_id] = {"active": True, "price": p, "units": units, "sl": p - (atr * 2.5), "max_pnl": 0.0}
-                                self._update_db(s_id)
-                                self.notify(f"🚀 <b>ENTRY | SLOT {s_id}</b>\nPrice: {p:,.4f}\nATR SL Active")
-                            break
+                # --- BUY LOGIC ---
+                active_slots = [i for i in self.slots if self.slots[i]["active"]]
+                if len(active_slots) < 2 and rsi <= self.rsi_buy_target and growth > -self.daily_drawdown_limit:
+                    s_id = 1 if 1 not in active_slots else 2
+                    buy_amt = thb if len(active_slots) == 1 else thb / 2
+                    if buy_amt >= 10:
+                        if self.place_smart_order("buy", buy_amt, p):
+                            self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr * 2.5), "max_pnl": 0.0}
+                            self._save_state(s_id); self.notify(f"🚀 <b>ENTRY SLOT {s_id} @ {p:,.2f}</b>")
 
-                # --- SELL (Trailing Stop) ---
+                # --- SELL LOGIC ---
                 for s_id, s in self.slots.items():
-                    if s.get('active'):
-                        pnl = ((p - s['price']) / s['price']) * 100
-                        if pnl > s['max_pnl']: s['max_pnl'] = pnl
-                        if p - (atr * 2.5) > s['sl']: s['sl'] = p - (atr * 2.5) # เลื่อน SL ขึ้นตาม
+                    if s["active"]:
+                        curr_pnl = ((p - s['price']) / s['price']) * 100
+                        if curr_pnl > s['max_pnl']: s['max_pnl'] = curr_pnl
+                        # Trailing Stop Update
+                        if p - (atr * 2.5) > s['sl']: s['sl'] = p - (atr * 2.5)
                         
-                        if p <= s['sl'] or (rsi >= 75 and pnl > 2.0):
-                            if self.execute_order("sell", s['units'], p):
-                                self.notify(f"📤 <b>EXIT | SLOT {s_id}</b>\nROI: {pnl:+.2f}%")
-                                self.slots[s_id] = {"active": False}
-                                self._update_db(s_id)
+                        if p <= s['sl'] or curr_pnl >= 10.0:
+                            if self.place_smart_order("sell", s['units'], p):
+                                self.notify(f"📤 <b>CLOSE SLOT {s_id} @ {p:,.2f}</b>\nPnL: {curr_pnl:+.2f}%")
+                                self.slots[s_id] = {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}
+                                self._save_state(s_id)
 
-                # --- REPORT (Every 10 Mins) ---
+                # --- REPORTING ---
                 if time.time() - last_rep >= 600:
-                    self._send_pro_report(p, rsi, thb, coin)
-                    last_rep = time.time()
-
+                    self._report(p, rsi, equity, growth, thb, coin)
+                    last_rep = time.time(); self.prev_rsi = rsi
             except Exception as e: print(f"Error: {e}")
-            time.sleep(5) # ความถี่ที่ Railway ยอมรับได้ ไม่ค้าง
+            time.sleep(1)
 
-    def _update_db(self, s_id):
-        with psycopg2.connect(self.db_url) as conn:
-            with conn.cursor() as cur:
-                s = self.slots[s_id]
-                if s['active']:
-                    cur.execute("""INSERT INTO bot_slots_v17_9 (slot_id, price, units, sl, max_pnl, updated_at)
-                        VALUES (%s,%s,%s,%s,%s,NOW()) ON CONFLICT (slot_id) DO UPDATE SET 
-                        price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl, max_pnl=EXCLUDED.max_pnl, updated_at=NOW()""",
-                        (s_id, s['price'], s['units'], s['sl'], s['max_pnl']))
-                else:
-                    cur.execute("DELETE FROM bot_slots_v17_9 WHERE slot_id=%s", (s_id,))
+    def _save_state(self, s_id):
+        conn = psycopg2.connect(self.db_url); cur = conn.cursor()
+        s = self.slots[s_id]
+        cur.execute("""INSERT INTO bot_state_v15 (slot_id, last_action, avg_price, total_units, dynamic_sl, max_pnl, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (slot_id) 
+                       DO UPDATE SET avg_price=EXCLUDED.avg_price, total_units=EXCLUDED.total_units, 
+                       dynamic_sl=EXCLUDED.dynamic_sl, max_pnl=EXCLUDED.max_pnl, updated_at=EXCLUDED.updated_at""",
+                    (s_id, "buy" if s['active'] else "sell", s['price'], s['units'], s['sl'], s['max_pnl'], datetime.now()))
+        conn.commit(); cur.close(); conn.close()
 
-    def _send_pro_report(self, p, rsi, thb, coin):
-        equity = thb + (coin * p)
-        growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        now = datetime.now(self.tz)
-        
-        msg = (f"💠 <b>TITAN V.17.9 | PORTFOLIO REPORT</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-               f"📊 <b>MARKET</b>\n• Price: {p:,.4f} | RSI: {rsi:.2f}\n"
-               f"💰 <b>FINANCIALS</b>\n"
-               f"• Total Equity: {equity:,.2f} ({growth:+.2f}%)\n"
-               f"• Available Cash: 🟢 <b>{thb:,.2f} THB</b>\n"
-               f"• Assets: 🔵 {coin * p:,.2f} THB\n━━━━━━━━━━━━━━━━━━━━\n"
-               f"🎯 <b>SLOTS STATUS</b>\n")
-        for i in [1, 2, 3]:
-            s = self.slots[i]
-            if s.get('active'):
+    def _report(self, p, rsi, equity, growth, thb, coin):
+        now = datetime.now(timezone(timedelta(hours=7)))
+        status = "HOLDING" if any(s['active'] for s in self.slots.values()) else "MONITORING"
+        msg = (f"🛡️ <b>TITAN V.15.0 PRO | {self.symbol}</b>\nStatus : {status}\nDate : {now.strftime('%d/%m/%Y')}\nTime : {now.strftime('%H:%M:%S')}\n"
+               f"━━━━━━━━━━━━━━━━━━\n📊 <b>MARKET INTELLIGENCE</b>\n• Price : {p:,.2f} THB\n• Trend 1H : BEARISH 📉\n• RSI : {rsi:.2f} (Prev:{self.prev_rsi:.2f})\n"
+               f"━━━━━━━━━━━━━━━━━━\n💰 <b>PORTFOLIO ANALYSIS</b>\n• EQUITY : {equity:,.2f} THB\n• GROWTH : {growth:+.2f}%\n• Cash : {thb:,.2f} | Assets: {coin:.4f}\n"
+               f"━━━━━━━━━━━━━━━━━━\n🎯 <b>STRATEGY DUAL-SLOT</b>\n")
+        for i, s in self.slots.items():
+            if s['active']:
                 pnl = ((p - s['price']) / s['price']) * 100
-                msg += f"• SLOT {i}: 🟢 ROI {pnl:+.2f}% | SL {s['sl']:,.2f}\n"
-            else: msg += f"• SLOT {i}: ⚪ WAITING SIGNAL\n"
-        msg += f"━━━━━━━━━━━━━━━━━━━━\n📅 <i>{now.strftime('%d/%m/%Y | %H:%M:%S')}</i>"
+                msg += f"<b>[SLOT {i}]</b> - Risk: {self.risk_per_trade}%\n• SL : {s['sl']:,.2f} ({pnl:+.2f}%)\n• Max PnL : {s['max_pnl']:+.2f}%\n"
+            else:
+                msg += f"<b>[SLOT {i}]</b> - Waiting RSI ≤ {self.rsi_buy_target}\n"
         self.notify(msg)
 
     def notify(self, m):
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
-                           json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=5)
-        except: pass
+        requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"})
 
 if __name__ == "__main__":
-    TitanHybrid_V17_9().run()
+    TitanOmniV15_Pro().run()
