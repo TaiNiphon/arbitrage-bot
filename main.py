@@ -25,12 +25,11 @@ class TitanHybridV15_Final:
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0, "max_pnl": 0.0}}
         self.prev_rsi = 0.0
-        self.btc_status = "INITIALIZING..."
+        self.btc_status = "WAITING DATA..." # เปลี่ยนจาก INITIALIZING เพื่อสังเกตความต่าง
 
         self._setup_database()
         self._load_state_from_db()
-        # เปลี่ยนเป็น V.15.2.5 เพื่อทดสอบ Fix ล่าสุด
-        self.notify("<b>🛡️ TITAN V.15.2.5 HYBRID | FINAL FIX</b>\n<i>Status: BTC Native Percent Active & RSI Monitor Online</i>")
+        self.notify("<b>🛡️ TITAN V.15.2.6 HYBRID | AUTO-RECOVERY</b>\n<i>Status: Multi-Path BTC Trend Active</i>")
 
     def _setup_database(self):
         try:
@@ -70,19 +69,29 @@ class TitanHybridV15_Final:
         return None, None
 
     def get_btc_trend_optimized(self):
-        """แก้ไขปัญหา INITIALIZING... โดยดึงค่า percentChange ตรงจาก API (เสถียรที่สุด)"""
+        """ระบบดึงเทรนด์ BTC แบบ 2 ชั้น (Hybrid) เพื่อป้องกันสถานะค้าง"""
         try:
             res = requests.get("https://api.bitkub.com/api/market/ticker?sym=THB_BTC", timeout=10).json()
             if 'THB_BTC' in res:
                 data = res['THB_BTC']
-                # ใช้ค่า percentChange ที่ Bitkub สรุปไว้ให้แล้ว เพื่อป้องกันค่า 0 จากระบบคำนวณเอง
-                change = float(data.get('percentChange', 0))
                 
+                # ชั้นที่ 1: พยายามใช้ percentChange ตรงๆ
+                change = data.get('percentChange')
+                
+                # ชั้นที่ 2: ถ้า percentChange เป็น None หรือ 0 พยายามคำนวณเองจาก Last vs Open
+                if change is None or float(change) == 0:
+                    last = float(data.get('last', 0))
+                    open_p = float(data.get('open24h', 0))
+                    if open_p > 0:
+                        change = ((last - open_p) / open_p) * 100
+                    else:
+                        change = 0.0
+                
+                change = float(change)
                 if change > 0.5: self.btc_status = f"BULLISH 📈 ({change:+.2f}%)"
                 elif change < -2.0: self.btc_status = f"BEARISH 📉 ({change:+.2f}%)"
                 else: self.btc_status = f"SIDEWAYS ↔️ ({change:+.2f}%)"
                 
-                # Risk Control: ห้ามซื้อถ้า BTC ร่วงหนักเกิน -3.5%
                 return change > -3.5
             return True
         except:
@@ -123,7 +132,6 @@ class TitanHybridV15_Final:
                         cur.execute("INSERT INTO trade_history (slot_id, action, price, units, pnl, timestamp) VALUES (%s, %s, %s, %s, %s, %s)",
                                    (slot_id, side.upper(), price, amt_or_units if side == "sell" else amt_or_units/price, pnl, datetime.now()))
                         if side == "buy":
-                            # Dynamic SL: ใช้ 2.5 * ATR ตามหลักการเดิม
                             cur.execute("INSERT INTO bot_state_v15 (slot_id, avg_price, total_units, dynamic_sl, max_pnl, updated_at) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET avg_price=EXCLUDED.avg_price, total_units=EXCLUDED.total_units, dynamic_sl=EXCLUDED.dynamic_sl, max_pnl=EXCLUDED.max_pnl",
                                        (slot_id, price, amt_or_units/price, price - (atr*2.5), 0.0, datetime.now()))
                         else:
@@ -153,7 +161,7 @@ class TitanHybridV15_Final:
                 
                 growth = ((curr_equity - self.initial_equity) / self.initial_equity) * 100
 
-                # --- BUY LOGIC (DUAL-SLOT) ---
+                # --- BUY LOGIC (Dual-Slot) ---
                 active_ids = [i for i in self.slots if self.slots[i]["active"]]
                 if len(active_ids) < 2 and rsi <= self.rsi_buy_target:
                     if self.get_btc_trend_optimized():
@@ -164,17 +172,15 @@ class TitanHybridV15_Final:
                                 self.slots[s_id] = {"active": True, "price": p, "units": buy_amt/p, "sl": p - (atr*2.5), "max_pnl": 0.0}
                                 self.notify(f"🚀 <b>BUY ENTRY SLOT {s_id}</b>\nPrice: {p:,.2f} | BTC: {self.btc_status}")
 
-                # --- SELL LOGIC (TRAILING STOP & PNL TARGET) ---
+                # --- SELL LOGIC (Trailing Stop) ---
                 for s_id, s in self.slots.items():
                     if s["active"]:
                         curr_pnl = ((p - s['price']) / s['price']) * 100
                         if curr_pnl > s['max_pnl']: s['max_pnl'] = curr_pnl
                         
-                        # Trailing Stop: ขยับ SL ขึ้นตามราคา
                         new_sl = p - (atr * 2.5)
                         if new_sl > s['sl']: s['sl'] = new_sl
                         
-                        # เงื่อนไขขาย: หลุด SL หรือ PnL ถึงเป้า 10%
                         if p <= s['sl'] or curr_pnl >= 10.0:
                             if self.place_order("sell", s_id, p, s['units']):
                                 self.notify(f"📤 <b>SELL CLOSE SLOT {s_id}</b>\nPrice: {p:,.2f} | PnL: {curr_pnl:+.2f}%")
@@ -182,7 +188,7 @@ class TitanHybridV15_Final:
 
                 # --- REPORTING ---
                 if time.time() - last_rep >= 600:
-                    self.get_btc_trend_optimized() # อัปเดตสถานะ BTC ก่อนส่งรายงาน
+                    self.get_btc_trend_optimized()
                     self._send_full_report(p, rsi, curr_equity, growth, thb or 0, coin or 0)
                     last_rep = time.time(); self.prev_rsi = rsi
             except Exception as e: 
@@ -191,7 +197,7 @@ class TitanHybridV15_Final:
 
     def _send_full_report(self, p, rsi, equity, growth, thb, coin):
         now = datetime.now(timezone(timedelta(hours=7)))
-        msg = (f"🛡️ <b>TITAN V.15.2.5 | {self.symbol}</b>\n"
+        msg = (f"🛡️ <b>TITAN V.15.2.6 | {self.symbol}</b>\n"
                f"Status: ONLINE & MONITORING\n"
                f"📅 {now.strftime('%d/%m/%Y')} | ⏰ {now.strftime('%H:%M:%S')}\n"
                f"━━━━━━━━━━━━━━━━━━\n"
