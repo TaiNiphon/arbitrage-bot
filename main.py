@@ -39,7 +39,7 @@ class TitanUltimate_V18:
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT)""")
                     
                     # Logic ย้ายข้อมูลจาก v15 (ถ้ามีข้อมูลค้างอยู่)
-                    cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'bot_state_v15'")
+                    cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'bot_state_v18'")
                     if cur.fetchone()[0] > 0:
                         cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) SELECT slot_id, price, units, sl FROM bot_state_v15 ON CONFLICT DO NOTHING")
                     conn.commit()
