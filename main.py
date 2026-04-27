@@ -23,23 +23,32 @@ class TitanUltimate_V18:
 
         self._init_db_v18() 
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18 ULTIMATE: ACTIVE</b>\n<i>System: Secure | Reporting: Professional</i>")
+        self.notify("🏛️ <b>TITAN V.18 ULTIMATE: ACTIVE</b>\n<i>System: Secure | Database: v18 Ready</i>")
 
     def _init_db_v18(self):
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
+                    # 1. สร้างตารางประวัติเทรด
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
                         id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
+                    
+                    # 2. สร้างตารางสถานะบอท v18
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT)""")
-                    # Migration Logic: ย้ายข้อมูลจาก V15 มา V18 (ถ้ามี)
+                    
+                    # 3. Migration Logic (แบบป้องกัน Error จากคอลัมน์ไม่ครบ)
                     cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'bot_state_v15'")
                     if cur.fetchone()[0] > 0:
-                        cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) SELECT slot_id, price, units, sl FROM bot_state_v15 ON CONFLICT DO NOTHING")
+                        try:
+                            # ย้ายข้อมูลเฉพาะถ้าโครงสร้างตรงกัน ถ้าไม่ตรงจะข้ามไปเลยเพื่อไม่ให้บอทพัง
+                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) SELECT slot_id, price, units, sl FROM bot_state_v15 ON CONFLICT DO NOTHING")
+                        except Exception as migration_err:
+                            print(f"Migration Note: Skipped due to structure mismatch: {migration_err}")
+                    
                     conn.commit()
-        except Exception as e: print(f"DB Init Error: {e}")
+        except Exception as e: print(f"DB Init Serious Error: {e}")
 
     def _load_state(self):
         try:
@@ -67,7 +76,7 @@ class TitanUltimate_V18:
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         trend = "🌕 BULLISH" if p > ema else "🌑 BEARISH"
         rsi_emoji = "🔥" if rsi >= 70 else "❄️" if rsi <= 30 else "📊"
-        now = datetime.now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+        now = datetime.now().strftime('%d/%m/%Y | ⏰ %H:%M:%S') # รายงานแบบ V.15
 
         msg = f"🛡️ <b>TITAN PRO-MAX: PORTFOLIO STATUS</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
@@ -100,23 +109,23 @@ class TitanUltimate_V18:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            sl = price - (atr * 2.5)
+                            sl = price - (atr * 2.5) # ATR Risk Management
                             cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, price, amt_units/price, sl))
                             msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\n---------------------------------\nSlot: {slot_id} | Price: {price:,.2f}\nUnits: {amt_units/price:,.4f}\n🛡️ SL: {sl:,.2f}"
                             self.notify(msg)
                         else:
                             s = self.slots[slot_id]
                             gross_pnl = ((price - s['price']) / s['price']) * 100
-                            fee_thb = (price * amt_units * self.fee_rate) + (s['price'] * amt_units * self.fee_rate)
-                            net_pnl_thb = (price * amt_units * (1-self.fee_rate)) - (s['price'] * amt_units * (1+self.fee_rate))
+                            fee_thb = (price * (s['units'] if side=='sell' else amt_units/price) * self.fee_rate) + (s['price'] * (s['units'] if side=='sell' else amt_units/price) * self.fee_rate)
+                            net_pnl_thb = (price * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
                             msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl_thb > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\n---------------------------------\n"
                             msg += f"SELL {self.symbol} | Price: {price:,.2f}\nGross: {gross_pnl:+.2f}% | Fee: -{fee_thb:,.2f} THB\n<b>NET PROFIT: {net_pnl_thb:,.2f} THB</b> {'✅' if net_pnl_thb > 0 else '❌'}"
                             self.notify(msg)
-                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (price, amt_units, net_pnl_thb, 'WIN' if net_pnl_thb > 0 else 'LOSS'))
+                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (price, s['units'], net_pnl_thb, 'WIN' if net_pnl_thb > 0 else 'LOSS'))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                         conn.commit()
                 return True
-        except: pass
+        except Exception as e: print(f"Trade Execution Error: {e}")
         return False
 
     def send_monthly_report(self):
@@ -139,25 +148,35 @@ class TitanUltimate_V18:
             try:
                 d = self.get_market_data()
                 if not d: time.sleep(20); continue
+                
+                # Update Balance
                 ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
+                
+                # รายงาน Dashboard ทุก 1 ชม.
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(d, thb, coin); last_dash = time.time()
+                
                 now = datetime.now()
                 if now.day == 1 and now.hour == 8 and now.minute == 0: self.send_monthly_report()
+                
+                # Logic การซื้อ (Entry)
                 active_count = sum(1 for s in self.slots.values() if s['active'])
                 if active_count < 2 and d['rsi'] <= self.rsi_buy_max and d['p'] > d['ema']:
-                    buy_amt = (thb + (coin * d['p'])) * 0.45
+                    buy_amt = (thb + (coin * d['p'])) * 0.45 # บริหารเงินไม้ละ 45%
                     if thb >= buy_amt:
                         s_id = 1 if not self.slots[1]['active'] else 2
                         if self.execute_trade('buy', s_id, d['p'], buy_amt, d['atr']): self._load_state()
+                
+                # Logic การขาย (Exit)
                 for i, s in self.slots.items():
                     if s['active']:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = d['p'] * (1 - self.fee_rate)
+                        # ขายเมื่อถึงเป้า 10% หรือโดน SL
                         if ((x_rev - e_cost) / e_cost) * 100 >= self.target_profit or d['p'] <= s['sl']:
                             if self.execute_trade('sell', i, d['p'], s['units'], d['atr']): self.slots[i]['active'] = False
-            except Exception as e: print(f"Error: {e}")
+            except Exception as e: print(f"Main Loop Error: {e}")
             time.sleep(20)
 
     def notify(self, m):
