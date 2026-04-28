@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta
 
-class TitanUltimate_V18_Full_Stable:
+class TitanUltimate_V18_Masterpiece:
     def __init__(self):
         # --- CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -12,10 +12,9 @@ class TitanUltimate_V18_Full_Stable:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- STRATEGY SETTINGS ---
-        raw_eq = os.getenv("INITIAL_EQUITY", "7500") # ปรับตามยอดล่าสุดของคุณ
-        self.initial_equity = float(str(raw_eq).replace(',', ''))
-        self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "35.0"))
-        self.target_profit = float(os.getenv("TARGET_PROFIT", "10.0"))
+        self.initial_equity = 7500.0  # ยอดเงินเริ่มต้นจริง
+        self.rsi_buy_max = 35.0
+        self.target_profit = 10.0
         self.fee_rate = 0.0025 
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
@@ -23,7 +22,7 @@ class TitanUltimate_V18_Full_Stable:
 
         self._init_db_v18() 
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18: MILLIONAIRE EDITION ACTIVE</b>\n<i>Status: BTC-Guard | Thai Time | Robust Data Fetching</i>")
+        self.notify("🏛️ <b>TITAN V.18: MASTERPIECE ACTIVE</b>\n<i>Status: BTC-Guard | RSI-200 | All Reports Enabled</i>")
 
     def get_thai_now(self):
         return datetime.utcnow() + timedelta(hours=7)
@@ -50,47 +49,45 @@ class TitanUltimate_V18_Full_Stable:
         except: pass
 
     def get_indicator(self, symbol, period=200):
-        # --- เพิ่มระบบ RETRY 3 รอบ เพื่อความเสถียรสำหรับพอร์ตใหญ่ ---
-        for i in range(3):
+        for i in range(3): # ระบบ Retry 3 รอบ
             try:
                 res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=15).json()
                 c = np.array(res['c'], dtype=float)
-                
                 def calc_rsi(prices, p_len):
-                    diff = np.diff(prices)
-                    up = diff.clip(min=0); down = -diff.clip(max=0)
+                    diff = np.diff(prices); up = diff.clip(min=0); down = -diff.clip(max=0)
                     return 100 - (100 / (1 + (np.mean(up[-p_len:]) / (np.mean(down[-p_len:]) + 1e-9))))
-
                 ema = np.mean(c[-period:])
                 tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
-                return {"p": c[-1], "rsi14": calc_rsi(c, 14), "ema": ema, "atr": np.mean(tr[-14:])}
-            except Exception as e:
-                print(f"Fetch Error ({symbol}) trial {i+1}: {e}")
-                time.sleep(2) # รอ 2 วินาทีก่อนลองใหม่
+                return {"p": c[-1], "r14": calc_rsi(c, 14), "r200": calc_rsi(c, 200), "ema": ema, "atr": np.mean(tr[-14:])}
+            except: time.sleep(2)
         return None
 
     def send_dashboard(self, data_xrp, data_btc, thb, coin):
-        p, rsi14, ema = data_xrp['p'], data_xrp['rsi14'], data_xrp['ema']
+        p, r14, r200, ema = data_xrp['p'], data_xrp['r14'], data_xrp['r200'], data_xrp['ema']
         equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        xrp_trend = "🌕 BULLISH" if p > ema else "🌑 BEARISH"
-        btc_trend = "🌕 BULLISH" if data_btc['p'] > data_btc['ema'] else "🌑 BEARISH"
+        x_trend = "🌕 BULLISH" if p > ema else "🌑 BEARISH"
+        b_trend = "🌕 BULLISH" if data_btc['p'] > data_btc['ema'] else "🌑 BEARISH"
+        r14_emoji = "❄️" if r14 <= 30 else "🔥" if r14 >= 70 else "📊"
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
-        msg = f"📊 <b>TITAN STATUS (Hourly)</b>\n📅 <code>{now}</code>\n"
+        msg = f"🛡️ <b>TITAN PRO-MAX: STATUS</b>\n📅 <code>{now}</code>\n\n"
+        msg += f"📈 Market: <b>{self.symbol}</b> | Trend: {x_trend}\n"
+        msg += f"💰 Price : {p:,.2f} THB | {r14_emoji} RSI: {r14:.2f}\n"
+        msg += f"📊 BTC Trend: {b_trend} | RSI 200: {r200:.2f}\n"
         msg += f"---------------------------------\n"
-        msg += f"🔸 <b>{self.symbol}</b>: {p:,.2f} | {xrp_trend}\n"
-        msg += f"🔸 <b>BTC_THB</b>: {data_btc['p']:,.0f} | {btc_trend}\n"
-        msg += f"📊 RSI 14: {rsi14:.2f} | Equity: {equity:,.2f}\n"
-        msg += f"📈 Growth: {growth:+.2f}% | Cash: {thb:,.2f}\n"
-        msg += f"---------------------------------\n"
+        msg += f"💰 <b>ASSET SUMMARY</b>\n"
+        msg += f"Net Equity : <b>{equity:,.2f} THB</b>\n"
+        msg += f"Total Growth: {growth:+.2f}% (From {self.initial_equity:,.0f})\n"
+        msg += f"Available  : {thb:,.2f} THB\n"
+        msg += "---------------------------------\n"
         for i, s in self.slots.items():
             if s['active']:
                 e_cost = s['price'] * (1 + self.fee_rate); x_rev = p * (1 - self.fee_rate)
                 pnl = ((x_rev - e_cost) / e_cost) * 100
                 msg += f"🟢 SLOT {i}: IN TRADE ({pnl:+.2f}%)\n"
             else:
-                msg += f"⚪ SLOT {i}: WAITING\n"
+                msg += f"⚪ SLOT {i}: WAITING (RSI ≤ {self.rsi_buy_max})\n"
         self.notify(msg)
 
     def execute_trade(self, side, slot_id, price, amt_units, atr):
@@ -107,19 +104,17 @@ class TitanUltimate_V18_Full_Stable:
                         if side == 'buy':
                             sl = price - (atr * 2.5) 
                             cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, price, amt_units/price, sl))
-                            msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\nSlot: {slot_id} | Price: {price:,.2f} | 🛡️ SL: {sl:,.2f}"
+                            msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\n---------------------------------\nSlot: {slot_id} | Price: {price:,.2f}\n🛡️ SL: {sl:,.2f}"
                         else:
                             s = self.slots[slot_id]
                             net_pnl_thb = (price * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
                             msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl_thb > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\n"
-                            msg += f"Net PnL: <b>{net_pnl_thb:,.2f} THB</b> {'✅' if net_pnl_thb > 0 else '❌'}"
+                            msg += f"NET PROFIT: <b>{net_pnl_thb:,.2f} THB</b> {'✅' if net_pnl_thb > 0 else '❌'}"
                             cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (price, s['units'], net_pnl_thb, 'WIN' if net_pnl_thb > 0 else 'LOSS'))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
-                        conn.commit()
-                        self.notify(msg)
+                        conn.commit(); self.notify(msg)
                 return True
-            else:
-                self.notify(f"⚠️ <b>Trade Execution Failed:</b> {res.get('error')}")
+            else: self.notify(f"⚠️ <b>Trade Failed:</b> {res.get('error')}")
         except Exception as e: print(f"Trade Error: {e}")
         return False
 
@@ -149,28 +144,24 @@ class TitanUltimate_V18_Full_Stable:
                 d_xrp = self.get_indicator(self.symbol)
                 d_btc = self.get_indicator("BTC_THB")
                 
-                if not d_xrp or not d_btc: 
-                    print("Data missing, retrying in 20s..."); time.sleep(20); continue
+                if not d_xrp or not d_btc: time.sleep(20); continue
                 
+                # Wallet Check
                 ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
                 
-                # รายงาน Dashboard (ส่งทุกชั่วโมง)
+                # Reporting
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(d_xrp, d_btc, thb, coin); last_dash = time.time()
-                
-                # รายงาน Daily/Monthly
                 if thai_now.day != last_day and thai_now.hour == 8:
                     self.send_periodic_report(1, "DAILY"); last_day = thai_now.day
                 if thai_now.day == 1 and thai_now.hour == 8 and thai_now.minute < 5:
                     self.send_periodic_report(30, "MONTHLY")
 
-                # --- กลยุทธ์การเทรด ---
+                # Trade Strategy
                 active_count = sum(1 for s in self.slots.values() if s['active'])
-                btc_is_safe = d_btc['p'] > d_btc['ema']
-                
-                if active_count < 2 and d_xrp['rsi14'] <= self.rsi_buy_max and d_xrp['p'] > d_xrp['ema'] and btc_is_safe:
+                if active_count < 2 and d_xrp['r14'] <= self.rsi_buy_max and d_xrp['p'] > d_xrp['ema'] and d_btc['p'] > d_btc['ema']:
                     buy_amt = (thb + (coin * d_xrp['p'])) * 0.45 
                     if thb >= buy_amt:
                         s_id = 1 if not self.slots[1]['active'] else 2
@@ -181,8 +172,8 @@ class TitanUltimate_V18_Full_Stable:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = d_xrp['p'] * (1 - self.fee_rate)
                         if ((x_rev - e_cost) / e_cost) * 100 >= self.target_profit or d_xrp['p'] <= s['sl']:
                             if self.execute_trade('sell', i, d_xrp['p'], s['units'], d_xrp['atr']): self.slots[i]['active'] = False
-            except Exception as e: print(f"Main Loop Error: {e}")
+            except Exception as e: print(f"Error: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanUltimate_V18_Full_Stable().run()
+    TitanUltimate_V18_Masterpiece().run()
