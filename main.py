@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta
 
-class TitanUltimate_V18:
+class TitanUltimate_V18_Full:
     def __init__(self):
         # --- CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -16,39 +16,26 @@ class TitanUltimate_V18:
         self.initial_equity = float(str(raw_eq).replace(',', ''))
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", "35.0"))
         self.target_profit = float(os.getenv("TARGET_PROFIT", "10.0"))
-        self.fee_rate = float(os.getenv("FEE_RATE", "0.0025")) # 0.25% ต่อขา
+        self.fee_rate = float(os.getenv("FEE_RATE", "0.0025")) 
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0}}
 
         self._init_db_v18() 
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18 ULTIMATE: ACTIVE</b>\n<i>System: Secure | Database: v18 Ready</i>")
+        self.notify("🏛️ <b>TITAN V.18 ULTIMATE + RSI 200</b>\n<i>System: Fully Integrated | Ready</i>")
 
     def _init_db_v18(self):
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    # 1. สร้างตารางประวัติเทรด
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
                         id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
-                    
-                    # 2. สร้างตารางสถานะบอท v18
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT)""")
-                    
-                    # 3. Migration Logic (แบบป้องกัน Error จากคอลัมน์ไม่ครบ)
-                    cur.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'bot_state_v15'")
-                    if cur.fetchone()[0] > 0:
-                        try:
-                            # ย้ายข้อมูลเฉพาะถ้าโครงสร้างตรงกัน ถ้าไม่ตรงจะข้ามไปเลยเพื่อไม่ให้บอทพัง
-                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) SELECT slot_id, price, units, sl FROM bot_state_v15 ON CONFLICT DO NOTHING")
-                        except Exception as migration_err:
-                            print(f"Migration Note: Skipped due to structure mismatch: {migration_err}")
-                    
                     conn.commit()
-        except Exception as e: print(f"DB Init Serious Error: {e}")
+        except Exception as e: print(f"DB Init Error: {e}")
 
     def _load_state(self):
         try:
@@ -61,27 +48,36 @@ class TitanUltimate_V18:
 
     def get_market_data(self):
         try:
-            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-172800}&to={int(time.time())}", timeout=10).json()
+            # ดึงข้อมูลย้อนหลัง 5 วัน (432,000 วินาที) เพื่อให้พอคำนวณ RSI 200
+            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={self.symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=10).json()
             c = np.array(res['c'], dtype=float)
-            diff = np.diff(c); up = diff.clip(min=0); down = -diff.clip(max=0)
-            rsi = 100 - (100 / (1 + (np.mean(up[-14:]) / (np.mean(down[-14:]) + 1e-9))))
+            
+            def calc_rsi(prices, period):
+                diff = np.diff(prices)
+                up = diff.clip(min=0); down = -diff.clip(max=0)
+                return 100 - (100 / (1 + (np.mean(up[-period:]) / (np.mean(down[-period:]) + 1e-9))))
+
+            rsi14 = calc_rsi(c, 14)
+            rsi200 = calc_rsi(c, 200) 
             ema200 = np.mean(c[-200:])
             tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
-            return {"p": c[-1], "rsi": rsi, "ema": ema200, "atr": np.mean(tr[-14:])}
+            return {"p": c[-1], "rsi14": rsi14, "rsi200": rsi200, "ema": ema200, "atr": np.mean(tr[-14:])}
         except: return None
 
     def send_dashboard(self, data, thb, coin):
-        p, rsi, ema = data['p'], data['rsi'], data['ema']
+        p, rsi14, rsi200, ema = data['p'], data['rsi14'], data['rsi200'], data['ema']
         equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         trend = "🌕 BULLISH" if p > ema else "🌑 BEARISH"
-        rsi_emoji = "🔥" if rsi >= 70 else "❄️" if rsi <= 30 else "📊"
-        now = datetime.now().strftime('%d/%m/%Y | ⏰ %H:%M:%S') # รายงานแบบ V.15
+        r14_emoji = "🔥" if rsi14 >= 70 else "❄️" if rsi14 <= 30 else "📊"
+        r200_emoji = "✅" if rsi200 >= 50 else "⚠️"
+        now = datetime.now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
-        msg = f"🛡️ <b>TITAN PRO-MAX: PORTFOLIO STATUS</b>\n📅 <code>{now}</code>\n"
+        msg = f"🛡️ <b>TITAN PRO-MAX: STATUS</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 Market: {self.symbol} | Trend: {trend}\n"
-        msg += f"💰 Price : {p:,.2f} THB | {rsi_emoji} RSI: {rsi:.2f}\n"
+        msg += f"💰 Price : {p:,.2f} THB\n"
+        msg += f"{r14_emoji} RSI 14 : {rsi14:.2f} | {r200_emoji} RSI 200: {rsi200:.2f}\n"
         msg += "---------------------------------\n"
         msg += f"💰 <b>ASSET SUMMARY</b>\n"
         msg += f"Net Equity : <b>{equity:,.2f} THB</b>\n"
@@ -109,14 +105,14 @@ class TitanUltimate_V18:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            sl = price - (atr * 2.5) # ATR Risk Management
+                            sl = price - (atr * 2.5) 
                             cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, price, amt_units/price, sl))
                             msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\n---------------------------------\nSlot: {slot_id} | Price: {price:,.2f}\nUnits: {amt_units/price:,.4f}\n🛡️ SL: {sl:,.2f}"
                             self.notify(msg)
                         else:
                             s = self.slots[slot_id]
                             gross_pnl = ((price - s['price']) / s['price']) * 100
-                            fee_thb = (price * (s['units'] if side=='sell' else amt_units/price) * self.fee_rate) + (s['price'] * (s['units'] if side=='sell' else amt_units/price) * self.fee_rate)
+                            fee_thb = (price * s['units'] * self.fee_rate) + (s['price'] * s['units'] * self.fee_rate)
                             net_pnl_thb = (price * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
                             msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl_thb > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\n---------------------------------\n"
                             msg += f"SELL {self.symbol} | Price: {price:,.2f}\nGross: {gross_pnl:+.2f}% | Fee: -{fee_thb:,.2f} THB\n<b>NET PROFIT: {net_pnl_thb:,.2f} THB</b> {'✅' if net_pnl_thb > 0 else '❌'}"
@@ -125,7 +121,7 @@ class TitanUltimate_V18:
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                         conn.commit()
                 return True
-        except Exception as e: print(f"Trade Execution Error: {e}")
+        except Exception as e: print(f"Trade Error: {e}")
         return False
 
     def send_monthly_report(self):
@@ -142,6 +138,10 @@ class TitanUltimate_V18:
             self.notify(msg)
         except: pass
 
+    def notify(self, m):
+        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
+        except: pass
+
     def run(self):
         last_dash = 0
         while True:
@@ -149,39 +149,32 @@ class TitanUltimate_V18:
                 d = self.get_market_data()
                 if not d: time.sleep(20); continue
                 
-                # Update Balance
                 ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
                 
-                # รายงาน Dashboard ทุก 1 ชม.
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(d, thb, coin); last_dash = time.time()
                 
                 now = datetime.now()
                 if now.day == 1 and now.hour == 8 and now.minute == 0: self.send_monthly_report()
                 
-                # Logic การซื้อ (Entry)
+                # Logic การซื้อ
                 active_count = sum(1 for s in self.slots.values() if s['active'])
-                if active_count < 2 and d['rsi'] <= self.rsi_buy_max and d['p'] > d['ema']:
-                    buy_amt = (thb + (coin * d['p'])) * 0.45 # บริหารเงินไม้ละ 45%
+                if active_count < 2 and d['rsi14'] <= self.rsi_buy_max and d['p'] > d['ema']:
+                    buy_amt = (thb + (coin * d['p'])) * 0.45 
                     if thb >= buy_amt:
                         s_id = 1 if not self.slots[1]['active'] else 2
                         if self.execute_trade('buy', s_id, d['p'], buy_amt, d['atr']): self._load_state()
                 
-                # Logic การขาย (Exit)
+                # Logic การขาย
                 for i, s in self.slots.items():
                     if s['active']:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = d['p'] * (1 - self.fee_rate)
-                        # ขายเมื่อถึงเป้า 10% หรือโดน SL
                         if ((x_rev - e_cost) / e_cost) * 100 >= self.target_profit or d['p'] <= s['sl']:
                             if self.execute_trade('sell', i, d['p'], s['units'], d['atr']): self.slots[i]['active'] = False
             except Exception as e: print(f"Main Loop Error: {e}")
             time.sleep(20)
 
-    def notify(self, m):
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
-        except: pass
-
 if __name__ == "__main__":
-    TitanUltimate_V18().run()
+    TitanUltimate_V18_Full().run()
