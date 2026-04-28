@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta
 
-class TitanUltimate_V18_Masterpiece:
+class TitanUltimate_V18_ProUltimate:
     def __init__(self):
-        # --- CONFIGURATION ---
+        # --- CONFIGURATION (Environment Variables) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -12,7 +12,7 @@ class TitanUltimate_V18_Masterpiece:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- STRATEGY SETTINGS ---
-        self.initial_equity = 7500.0  # ยอดเงินเริ่มต้นจริง
+        self.initial_equity = 7500.0  # ล็อกฐานเงินทุนล่าสุดของคุณ
         self.rsi_buy_max = 35.0
         self.target_profit = 10.0
         self.fee_rate = 0.0025 
@@ -22,12 +22,14 @@ class TitanUltimate_V18_Masterpiece:
 
         self._init_db_v18() 
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18: MASTERPIECE ACTIVE</b>\n<i>Status: BTC-Guard | RSI-200 | All Reports Enabled</i>")
+        self.notify("🏛️ <b>TITAN V.18: PRO-ULTIMATE ACTIVE</b>\n<i>Status: BTC-Guard | RSI-200 | Polished UI</i>")
 
     def get_thai_now(self):
+        """จัดการเวลาไทย (ICT) เสมอ"""
         return datetime.utcnow() + timedelta(hours=7)
 
     def _init_db_v18(self):
+        """สร้างระบบจัดเก็บข้อมูลประวัติและการกู้คืนสถานะ"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -40,6 +42,7 @@ class TitanUltimate_V18_Masterpiece:
         except Exception as e: print(f"DB Init Error: {e}")
 
     def _load_state(self):
+        """กู้คืนสถานะการเทรดจาก Database"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -49,7 +52,8 @@ class TitanUltimate_V18_Masterpiece:
         except: pass
 
     def get_indicator(self, symbol, period=200):
-        for i in range(3): # ระบบ Retry 3 รอบ
+        """ดึงข้อมูลเทคนิคอลพร้อมระบบ Retry 3 รอบเพื่อความนิ่งของข้อมูล"""
+        for i in range(3):
             try:
                 res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=15).json()
                 c = np.array(res['c'], dtype=float)
@@ -63,18 +67,27 @@ class TitanUltimate_V18_Masterpiece:
         return None
 
     def send_dashboard(self, data_xrp, data_btc, thb, coin):
+        """หน้าตารายงานเวอร์ชันปรับปรุงใหม่: คลีน ไม่ซ้ำซ้อน แยกสัดส่วนชัดเจน"""
         p, r14, r200, ema = data_xrp['p'], data_xrp['r14'], data_xrp['r200'], data_xrp['ema']
         equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
+        
         x_trend = "🌕 BULLISH" if p > ema else "🌑 BEARISH"
         b_trend = "🌕 BULLISH" if data_btc['p'] > data_btc['ema'] else "🌑 BEARISH"
         r14_emoji = "❄️" if r14 <= 30 else "🔥" if r14 >= 70 else "📊"
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
-        msg = f"🛡️ <b>TITAN PRO-MAX: STATUS</b>\n📅 <code>{now}</code>\n\n"
-        msg += f"📈 Market: <b>{self.symbol}</b> | Trend: {x_trend}\n"
-        msg += f"💰 Price : {p:,.2f} THB | {r14_emoji} RSI: {r14:.2f}\n"
-        msg += f"📊 BTC Trend: {b_trend} | RSI 200: {r200:.2f}\n"
+        msg = f"🏛️ <b>TITAN PRO-MAX: STATUS</b>\n"
+        msg += f"📅 <code>{now}</code>\n"
+        msg += f"---------------------------------\n"
+        msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
+        msg += f"💰 Price : {p:,.2f} THB\n"
+        msg += f"📊 Trend : {x_trend}\n"
+        msg += f"📉 RSI 14: {r14:.2f} {r14_emoji} | RSI 200: {r200:.2f}\n"
+        msg += f"---------------------------------\n"
+        msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
+        msg += f"📊 Trend : {b_trend}\n"
+        msg += f"💰 BTC P.: {data_btc['p']:,.0f} THB\n"
         msg += f"---------------------------------\n"
         msg += f"💰 <b>ASSET SUMMARY</b>\n"
         msg += f"Net Equity : <b>{equity:,.2f} THB</b>\n"
@@ -91,6 +104,7 @@ class TitanUltimate_V18_Masterpiece:
         self.notify(msg)
 
     def execute_trade(self, side, slot_id, price, amt_units, atr):
+        """ระบบส่งคำสั่งซื้อขายผ่าน Bitkub API พร้อมบันทึกประวัติ"""
         ts = str(int(time.time() * 1000)); path = f"/api/v3/market/place-{'bid' if side=='buy' else 'ask'}"
         payload = {"sym": self.symbol.lower(), "amt": amt_units, "rat": price, "typ": "limit"}
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
@@ -102,7 +116,7 @@ class TitanUltimate_V18_Masterpiece:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            sl = price - (atr * 2.5) 
+                            sl = price - (atr * 2.5) # ATR Trailing Stop
                             cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, price, amt_units/price, sl))
                             msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\n---------------------------------\nSlot: {slot_id} | Price: {price:,.2f}\n🛡️ SL: {sl:,.2f}"
                         else:
@@ -119,6 +133,7 @@ class TitanUltimate_V18_Masterpiece:
         return False
 
     def send_periodic_report(self, days, title):
+        """ระบบรายงาน Daily/Monthly อัตโนมัติ"""
         start_date = self.get_thai_now() - timedelta(days=days)
         try:
             with psycopg2.connect(self.db_url) as conn:
@@ -146,12 +161,12 @@ class TitanUltimate_V18_Masterpiece:
                 
                 if not d_xrp or not d_btc: time.sleep(20); continue
                 
-                # Wallet Check
+                # Check Wallet
                 ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
                 
-                # Reporting
+                # Handling Reports
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(d_xrp, d_btc, thb, coin); last_dash = time.time()
                 if thai_now.day != last_day and thai_now.hour == 8:
@@ -159,10 +174,10 @@ class TitanUltimate_V18_Masterpiece:
                 if thai_now.day == 1 and thai_now.hour == 8 and thai_now.minute < 5:
                     self.send_periodic_report(30, "MONTHLY")
 
-                # Trade Strategy
+                # Core Logic: BTC-Guard
                 active_count = sum(1 for s in self.slots.values() if s['active'])
                 if active_count < 2 and d_xrp['r14'] <= self.rsi_buy_max and d_xrp['p'] > d_xrp['ema'] and d_btc['p'] > d_btc['ema']:
-                    buy_amt = (thb + (coin * d_xrp['p'])) * 0.45 
+                    buy_amt = (thb + (coin * d_xrp['p'])) * 0.45 # Money Management
                     if thb >= buy_amt:
                         s_id = 1 if not self.slots[1]['active'] else 2
                         if self.execute_trade('buy', s_id, d_xrp['p'], buy_amt, d_xrp['atr']): self._load_state()
@@ -172,8 +187,8 @@ class TitanUltimate_V18_Masterpiece:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = d_xrp['p'] * (1 - self.fee_rate)
                         if ((x_rev - e_cost) / e_cost) * 100 >= self.target_profit or d_xrp['p'] <= s['sl']:
                             if self.execute_trade('sell', i, d_xrp['p'], s['units'], d_xrp['atr']): self.slots[i]['active'] = False
-            except Exception as e: print(f"Error: {e}")
+            except Exception as e: print(f"Main Error: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanUltimate_V18_Masterpiece().run()
+    TitanUltimate_V18_ProUltimate().run()
