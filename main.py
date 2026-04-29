@@ -1,5 +1,5 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 class TitanUltimate_V18_ProUltimate:
     def __init__(self):
@@ -12,11 +12,11 @@ class TitanUltimate_V18_ProUltimate:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- STRATEGY SETTINGS ---
-        self.initial_equity = 7500.0  # ล็อกฐานเงินทุนล่าสุดของคุณ
+        self.initial_equity = 7500.0  # ล็อกฐานเงินทุน
         self.rsi_buy_max = 35.0
         self.target_profit = 10.0
         self.fee_rate = 0.0025 
-        self.circuit_breaker_active = False # ระบบหยุดการเทรดอัตโนมัติ
+        self.circuit_breaker_active = False 
         self.last_alive_check = -1
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
@@ -24,11 +24,12 @@ class TitanUltimate_V18_ProUltimate:
 
         self._init_db_v18() 
         self._load_state()
-        # แจ้งเตือนเมื่อเริ่มรัน (MILLENNIUM EDITION)
-        self.notify("🏛️ <b>TITAN V.18: MILLENNIUM ACTIVE</b>\n<i>Status: BTC-Guard | Safety Circuit | Connection Heartbeat</i>")
+        # แจ้งเตือนเมื่อเริ่มรัน (Precision Edition)
+        self.notify("🏛️ <b>TITAN V.18.2: ULTIMATE ACTIVE</b>\n<i>Status: Smart Precision | BTC-Guard | Zero Error 10</i>")
 
     def get_thai_now(self):
-        return datetime.utcnow() + timedelta(hours=7)
+        # แก้ไข DeprecationWarning ให้ใช้ timezone-aware
+        return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
 
     def _init_db_v18(self):
         try:
@@ -66,7 +67,6 @@ class TitanUltimate_V18_ProUltimate:
         return None
 
     def send_dashboard(self, data_xrp, data_btc, thb, coin):
-        # รักษารูปแบบรายงานที่คุณแก้ไขล่าสุดไว้อย่างเคร่งครัด
         p, r14, r200, ema = data_xrp['p'], data_xrp['r14'], data_xrp['r200'], data_xrp['ema']
         equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
@@ -76,23 +76,10 @@ class TitanUltimate_V18_ProUltimate:
         r14_emoji = "❄️" if r14 <= 30 else "🔥" if r14 >= 70 else "📊"
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
-        msg = f"🏛️ <b>TITAN PRO-MAX: STATUS</b>\n"
-        msg += f"📅 <code>{now}</code>\n"
-        msg += f"---------------------------------\n"
-        msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
-        msg += f"💰 Price : {p:,.2f} THB\n"
-        msg += f"📊 Trend : {x_trend}\n"
-        msg += f"📉 RSI 14: {r14:.2f} {r14_emoji} | RSI 200: {r200:.2f}\n"
-        msg += f"---------------------------------\n"
-        msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
-        msg += f"📊 Trend : {b_trend}\n"
-        msg += f"💰 BTC P.: {data_btc['p']:,.0f} THB\n"
-        msg += f"---------------------------------\n"
-        msg += f"💰 <b>ASSET SUMMARY</b>\n"
-        msg += f"Net Equity : <b>{equity:,.2f} THB</b>\n"
-        msg += f"Total Growth: {growth:+.2f}% (From {self.initial_equity:,.0f})\n"
-        msg += f"Available  : {thb:,.2f} THB\n"
-        msg += "---------------------------------\n"
+        msg = f"🏛️ <b>TITAN PRO-MAX: STATUS</b>\n📅 <code>{now}</code>\n---------------------------------\n"
+        msg += f"📈 <b>MARKET: {self.symbol}</b>\n💰 Price : {p:,.2f} THB\n📊 Trend : {x_trend}\n📉 RSI 14: {r14:.2f} {r14_emoji} | RSI 200: {r200:.2f}\n"
+        msg += f"---------------------------------\n🛡️ <b>BTC-GUARD STATUS</b>\n📊 Trend : {b_trend}\n💰 BTC P.: {data_btc['p']:,.0f} THB\n"
+        msg += f"---------------------------------\n💰 <b>ASSET SUMMARY</b>\nNet Equity : <b>{equity:,.2f} THB</b>\nTotal Growth: {growth:+.2f}% (From {self.initial_equity:,.0f})\nAvailable  : {thb:,.2f} THB\n---------------------------------\n"
         for i, s in self.slots.items():
             if s['active']:
                 e_cost = s['price'] * (1 + self.fee_rate); x_rev = p * (1 - self.fee_rate)
@@ -100,16 +87,18 @@ class TitanUltimate_V18_ProUltimate:
                 msg += f"🟢 SLOT {i}: IN TRADE ({pnl:+.2f}%)\n"
             else:
                 msg += f"⚪ SLOT {i}: WAITING (RSI ≤ {self.rsi_buy_max})\n"
-        
-        # เพิ่มแจ้งเตือนถ้าตัวตัดไฟทำงาน
-        if self.circuit_breaker_active:
-            msg += "\n🛑 <b>CIRCUIT BREAKER: PAUSED</b>"
-            
+        if self.circuit_breaker_active: msg += "\n🛑 <b>CIRCUIT BREAKER: PAUSED</b>"
         self.notify(msg)
 
     def execute_trade(self, side, slot_id, price, amt_units, atr):
         ts = str(int(time.time() * 1000)); path = f"/api/v3/market/place-{'bid' if side=='buy' else 'ask'}"
-        payload = {"sym": self.symbol.lower(), "amt": amt_units, "rat": price, "typ": "limit"}
+        
+        # --- [ULTIMATE PRECISION] แก้ไข Error 10 ทั้งขาซื้อและขาขาย ---
+        clean_price = round(float(price), 2)
+        # ซื้อ (Side=buy) ส่งเป็นเงินบาท ปัด 2 ตำแหน่ง | ขาย (Side=sell) ส่งเป็นเหรียญ ปัด 4 ตำแหน่งสำหรับ XRP
+        clean_amt = round(float(amt_units), 2) if side == 'buy' else round(float(amt_units), 4)
+            
+        payload = {"sym": self.symbol.lower(), "amt": clean_amt, "rat": clean_price, "typ": "limit"}
         sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
@@ -119,25 +108,22 @@ class TitanUltimate_V18_ProUltimate:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            sl = price - (atr * 2.5) 
-                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, price, amt_units/price, sl))
-                            msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\n---------------------------------\nSlot: {slot_id} | Price: {price:,.2f}\n🛡️ SL: {sl:,.2f}"
+                            actual_units = round(clean_amt / clean_price, 4) # ปัดทศนิยมเหรียญให้ตรงกับ Bitkub
+                            sl = round(clean_price - (atr * 2.5), 2) 
+                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, clean_price, actual_units, sl))
+                            msg = f"📥 <b>BUY COMPLETED</b>\n📅 <code>{now_str}</code>\n---------------------------------\nSlot: {slot_id} | Price: {clean_price:,.2f}\n🛡️ SL: {sl:,.2f}"
                         else:
                             s = self.slots[slot_id]
-                            net_pnl_thb = (price * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
+                            net_pnl_thb = (clean_price * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
                             msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl_thb > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\n"
                             msg += f"NET PROFIT: <b>{net_pnl_thb:,.2f} THB</b> {'✅' if net_pnl_thb > 0 else '❌'}"
-                            
-                            # ระบบ Circuit Breaker: ถ้าขาดทุนไม้เดียวเกิน 10% ของเงินต้น
-                            if net_pnl_thb < -(self.initial_equity * 0.10):
-                                self.circuit_breaker_active = True
-                                msg += "\n🚫 <b>SYSTEM: CIRCUIT BREAKER TRIGGERED</b> (Paused for safety)"
-                                
-                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (price, s['units'], net_pnl_thb, 'WIN' if net_pnl_thb > 0 else 'LOSS'))
+                            if net_pnl_thb < -(self.initial_equity * 0.10): self.circuit_breaker_active = True
+                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (clean_price, s['units'], net_pnl_thb, 'WIN' if net_pnl_thb > 0 else 'LOSS'))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                         conn.commit(); self.notify(msg)
                 return True
-            else: self.notify(f"⚠️ <b>Trade Failed:</b> {res.get('error')}")
+            else: 
+                self.notify(f"⚠️ <b>Trade Failed: {res.get('error')}</b>\nSide: {side} | Amt: {clean_amt} @ {clean_price}")
         except Exception as e: print(f"Trade Error: {e}")
         return False
 
@@ -150,8 +136,7 @@ class TitanUltimate_V18_ProUltimate:
                     rows = cur.fetchall()
                     total_pnl = sum(r[0] for r in rows); trades = len(rows)
                     wins = sum(1 for r in rows if r[1] == 'WIN'); win_rate = (wins/trades*100) if trades > 0 else 0
-            msg = f"📅 <b>{title} SUMMARY</b>\n---------------------------------\n"
-            msg += f"Trades: {trades} | Win Rate: {win_rate:.0f}%\n<b>Net: {total_pnl:,.2f} THB</b>"
+            msg = f"📅 <b>{title} SUMMARY</b>\n---------------------------------\nTrades: {trades} | Win Rate: {win_rate:.0f}%\n<b>Net: {total_pnl:,.2f} THB</b>"
             self.notify(msg)
         except: pass
 
@@ -166,39 +151,35 @@ class TitanUltimate_V18_ProUltimate:
                 thai_now = self.get_thai_now()
                 d_xrp = self.get_indicator(self.symbol)
                 d_btc = self.get_indicator("BTC_THB")
-                
                 if not d_xrp or not d_btc: time.sleep(20); continue
                 
-                # Check Wallet
                 ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
                 
-                # [SECURITY] Connection Alive Check (ทุก 6 ชม.)
+                # รายงาน Heartbeat ทุก 6 ชม.
                 if thai_now.hour in [0, 6, 12, 18] and thai_now.hour != self.last_alive_check:
                     self.notify(f"📡 <b>TITAN CONNECTION ALIVE</b>\n📅 {thai_now.strftime('%H:%M')} | Status: OK ✅")
                     self.last_alive_check = thai_now.hour
 
-                # [SECURITY] Low Cash Alert (แจ้งเตือนถ้าเงินสด < 1,000)
-                if thb < 1000 and last_dash == 0: 
-                    self.notify("⚠️ <b>LOW BALANCE ALERT:</b> THB below 1,000. Prepare to top up for next slots.")
-
-                # Handling Reports
+                # Dashboard รายชั่วโมง
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(d_xrp, d_btc, thb, coin); last_dash = time.time()
+                # สรุปประจำวัน (08:00)
                 if thai_now.day != last_day and thai_now.hour == 8:
                     self.send_periodic_report(1, "DAILY"); last_day = thai_now.day
-                    self.circuit_breaker_active = False # รีเซ็ตตัวตัดไฟอัตโนมัติทุกเช้า
+                    self.circuit_breaker_active = False 
+                # สรุปประจำเดือน (วันที่ 1)
                 if thai_now.day == 1 and thai_now.hour == 8 and thai_now.minute < 5:
                     self.send_periodic_report(30, "MONTHLY")
 
-                # Core Logic: BTC-Guard
                 active_count = sum(1 for s in self.slots.values() if s['active'])
-                # ต้องไม่อยู่ในภาวะ Circuit Breaker ถึงจะซื้อได้
                 if not self.circuit_breaker_active:
                     if active_count < 2 and d_xrp['r14'] <= self.rsi_buy_max and d_xrp['p'] > d_xrp['ema'] and d_btc['p'] > d_btc['ema']:
-                        buy_amt = (thb + (coin * d_xrp['p'])) * 0.45 
-                        if thb >= buy_amt:
+                        # [SMART BUY] คำนวณยอดซื้อไม่ให้เกินเงินสดที่มีจริง
+                        raw_buy = (thb + (coin * d_xrp['p'])) * 0.45
+                        buy_amt = round(min(raw_buy, thb * 0.98), 2)
+                        if buy_amt >= 10:
                             s_id = 1 if not self.slots[1]['active'] else 2
                             if self.execute_trade('buy', s_id, d_xrp['p'], buy_amt, d_xrp['atr']): self._load_state()
                 
