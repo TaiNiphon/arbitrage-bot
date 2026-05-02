@@ -1,9 +1,9 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_Final_Elite:
+class TitanV18_ProUltimate_Final:
     def __init__(self):
-        # --- [1] CONFIGURATION: ครบถ้วนตามเดิม ---
+        # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,7 +11,7 @@ class TitanV18_Final_Elite:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- [2] STRATEGY: RSI 35, Profit 10%, ATR SL 2.5 (ตามที่คุณตั้งไว้) ---
+        # --- [2] STRATEGY SETTINGS ---
         self.initial_equity = 7500.0  
         self.rsi_buy_max = 35.0
         self.target_profit = 10.0
@@ -24,7 +24,7 @@ class TitanV18_Final_Elite:
 
         self._init_db() 
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.4: FINAL ELITE</b>\n<i>Status: Line-by-Line Verified | Zero Error 10</i>")
+        self.notify("🏛️ <b>TITAN V.18.10: PRO-ULTIMATE</b>\n<i>Status: Integer-Mode Enabled | BTC-Guard Active</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -68,43 +68,54 @@ class TitanV18_Final_Elite:
         ts = str(int(time.time() * 1000))
         path = f"/api/v3/market/place-{'bid' if side=='buy' else 'ask'}"
         
-        # --- [CRITICAL FIX: PRECISION] บังคับทศนิยมตามกฎ Bitkub ---
-        f_price = round(float(price), 2)
         if side == 'buy':
-            # ขาซื้อ: ใช้ยอดเงิน THB ต้องเป็นทศนิยม 2 ตำแหน่ง
-            f_amt = round(float(amt_units), 2)
+            # --- [STRATEGY: ซื้อบาทถ้วน] ตัดเศษทศนิยมทิ้งเป็น Integer เพื่อล้าง Error 10 ---
+            final_amt = int(float(amt_units)) 
+            final_rat = round(float(price), 2)
         else:
-            # ขาขาย: ใช้จำนวนเหรียญ XRP ต้องเป็นทศนิยม 4 ตำแหน่ง
-            f_amt = round(float(amt_units), 4)
+            # --- [STRATEGY: ขายเหรียญหมด] ใช้ทศนิยม 4 ตำแหน่งตามเหรียญที่ถืออยู่จริง ---
+            final_amt = round(float(amt_units), 4)
+            final_rat = round(float(price), 2)
             
-        payload = {"sym": self.symbol.lower(), "amt": f_amt, "rat": f_price, "typ": "limit"}
-        sig = hmac.new(self.api_secret.encode(), (ts+"POST"+path+json.dumps(payload)).encode(), hashlib.sha256).hexdigest()
+        payload = {
+            "sym": self.symbol.lower(),
+            "amt": final_amt, # ส่งค่าที่ปัดเป็น Integer (ขาซื้อ) หรือ 4 ตำแหน่ง (ขาขาย)
+            "rat": final_rat,
+            "typ": "limit"
+        }
+        
+        payload_json = json.dumps(payload, separators=(',', ':'))
+        sig = hmac.new(self.api_secret.encode(), (ts + "POST" + path + payload_json).encode(), hashlib.sha256).hexdigest()
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
         try:
-            res = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, data=json.dumps(payload), timeout=15).json()
+            res = requests.post(
+                f"https://api.bitkub.com{path}", 
+                headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig, 'Content-Type': 'application/json'}, 
+                data=payload_json, 
+                timeout=15
+            ).json()
+
             if res.get('error') == 0:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            actual_units = round(f_amt / f_price, 4)
-                            sl = round(f_price - (atr * 2.5), 2)
-                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, f_price, actual_units, sl))
-                            msg = f"📥 <b>BUY COMPLETED (Slot {slot_id})</b>\n📅 <code>{now_str}</code>\n---------------------------------\nPrice: {f_price:,.2f} | Amount: {f_amt:,.2f} THB\n🛡️ SL: {sl:,.2f}"
+                            actual_units = round(final_amt / final_rat, 4)
+                            sl = round(final_rat - (atr * 2.5), 2)
+                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, final_rat, actual_units, sl))
+                            msg = f"📥 <b>BUY COMPLETED (Slot {slot_id})</b>\n📅 <code>{now_str}</code>\n---------------------------------\nPrice: {final_rat:,.2f} | Amount: {final_amt:,} THB\n🛡️ SL: {sl:,.2f}"
                         else:
                             s = self.slots[slot_id]
-                            # คำนวณกำไรสุทธิหักค่าธรรมเนียมทั้งเข้าและออก
-                            net_pnl = (f_price * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
+                            net_pnl = (final_rat * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
                             msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\n"
                             msg += f"NET PROFIT: <b>{net_pnl:,.2f} THB</b> {'✅' if net_pnl > 0 else '❌'}"
                             if net_pnl < -(self.initial_equity * 0.10): self.circuit_breaker_active = True
-                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (f_price, s['units'], net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
+                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (final_rat, s['units'], net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                         conn.commit(); self.notify(msg)
                 return True
             else: 
-                # แจ้งเตือน Error พร้อมรายละเอียดเพื่อวิเคราะห์
-                self.notify(f"⚠️ <b>Trade Failed: {res.get('error')}</b>\nSide: {side}\nAmt: {f_amt} | Rat: {f_price}")
+                self.notify(f"❌ <b>Trade Error: {res.get('error')}</b>\nPayload: {payload_json}")
         except Exception as e: print(f"Trade Error: {e}")
         return False
 
@@ -128,6 +139,7 @@ class TitanV18_Final_Elite:
                 msg += f"🟢 SLOT {i}: IN TRADE ({pnl:+.2f}%)\n"
             else:
                 msg += f"⚪ SLOT {i}: WAITING (RSI ≤ {self.rsi_buy_max})\n"
+        if self.circuit_breaker_active: msg += "\n🛑 <b>CIRCUIT BREAKER: PAUSED</b>"
         self.notify(msg)
 
     def send_periodic_report(self, days, title):
@@ -159,7 +171,6 @@ class TitanV18_Final_Elite:
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
                 
-                # --- REPORTING LOGIC: รายงาน Heartbeat, Hourly, Daily, Monthly ---
                 if thai_now.hour in [0, 6, 12, 18] and thai_now.hour != self.last_alive_check:
                     self.notify(f"📡 <b>TITAN ALIVE</b>\n📅 {thai_now.strftime('%H:%M')} | Status: OK ✅"); self.last_alive_check = thai_now.hour
                 if time.time() - last_dash > 3600:
@@ -169,25 +180,22 @@ class TitanV18_Final_Elite:
                 if thai_now.day == 1 and thai_now.hour == 8 and thai_now.minute < 5:
                     self.send_periodic_report(30, "MONTHLY")
 
-                # --- BUY LOGIC: RSI + BTC GUARD + EMA 200 ---
                 active_count = sum(1 for s in self.slots.values() if s['active'])
                 if not self.circuit_breaker_active:
                     if active_count < 2 and d_xrp['r14'] <= self.rsi_buy_max and d_xrp['p'] > d_xrp['ema'] and d_btc['p'] > d_btc['ema']:
-                        # คำนวณเงินซื้อ (Slot ละ 45% ของ Equity) ตามแบบ V15
-                        buy_amt = round(min((thb + (coin * d_xrp['p'])) * 0.45, thb * 0.98), 2)
-                        if buy_amt >= 10:
+                        # คำนวณเงินซื้อ (Slot ละ 45% ของ Equity) ปัดเศษลงเพื่อไม่ให้เงินขาด
+                        buy_amt = int((thb + (coin * d_xrp['p'])) * 0.45)
+                        if thb >= buy_amt and buy_amt >= 10:
                             s_id = 1 if not self.slots[1]['active'] else 2
                             if self.execute_trade('buy', s_id, d_xrp['p'], buy_amt, d_xrp['atr']): self._load_state()
                 
-                # --- SELL LOGIC: Take Profit 10% หรือ ATR Stop Loss ---
                 for i, s in self.slots.items():
                     if s['active']:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = d_xrp['p'] * (1 - self.fee_rate)
-                        pnl_pct = ((x_rev - e_cost) / e_cost) * 100
-                        if pnl_pct >= self.target_profit or d_xrp['p'] <= s['sl']:
+                        if ((x_rev - e_cost) / e_cost) * 100 >= self.target_profit or d_xrp['p'] <= s['sl']:
                             if self.execute_trade('sell', i, d_xrp['p'], s['units'], d_xrp['atr']): self.slots[i]['active'] = False
             except Exception as e: print(f"Main Error: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanV18_Final_Elite().run()
+    TitanV18_ProUltimate_Final().run()
