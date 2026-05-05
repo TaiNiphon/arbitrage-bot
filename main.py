@@ -14,7 +14,7 @@ class TitanV18_ProUltimate_Final:
         # --- [2] STRATEGY SETTINGS ---
         self.initial_equity = 1000.0  # ตรวจสอบแล้ว: ใช้ทุน 1000 ตรงตามจริง
         self.rsi_buy_max = 35.0
-        self.target_profit = 10.0
+        self.target_profit = 3.0
         self.fee_rate = 0.0025 
         self.circuit_breaker_active = False 
         self.last_alive_check = -1
