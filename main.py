@@ -12,7 +12,7 @@ class TitanV18_ProUltimate_Final:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- [2] STRATEGY SETTINGS ---
-        self.initial_equity = 5500.0  # ตรวจสอบแล้ว: ใช้ทุน 1000 ตรงตามจริง
+        self.initial_equity = 10000.0  # ตรวจสอบแล้ว: ใช้ทุน 1000 ตรงตามจริง
         self.rsi_buy_max = 35.0
         self.target_profit = 3.0
         self.fee_rate = 0.0025 
