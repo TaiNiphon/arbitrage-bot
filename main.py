@@ -15,7 +15,7 @@ class TitanV18_15_OmniFlow:
         self.initial_equity = 10000.28 # ทุนเริ่มต้นจากรายงานล่าสุดของคุณ
         self.fee_rate = 0.0025 
         self.last_alive_check = -1
-        self.current_tp = 1.0       
+        self.current_tp = 3.0       
         self.current_rsi_buy = 40.0 
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
@@ -155,7 +155,7 @@ class TitanV18_15_OmniFlow:
 
                 # --- OMNI-FLOW DYNAMIC ADJUSTMENT ---
                 if dx['r200'] >= 48: 
-                    self.current_tp = 3.0 if dx['r200'] < 60 else 10.0
+                    self.current_tp = 1.0 if dx['r200'] < 60 else 10.0
                     self.current_rsi_buy = 40.0 if dx['r200'] < 60 else 35.0
                 else: 
                     self.current_tp = 2.0; self.current_rsi_buy = 25.0
