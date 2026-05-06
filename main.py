@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanV18_15_OmniFlow:
     def __init__(self):
-        # --- [1] CONFIGURATION (คงเดิมจาก V.18.12) ---
+        # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -11,21 +11,19 @@ class TitanV18_15_OmniFlow:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- [2] STRATEGY SETTINGS (กู้คืนจาก 18.12 และอัปเกรดทุน) ---
-        self.initial_equity = 11811.28 # ทุนล่าสุดตามรูปรายงาน
+        # --- [2] STRATEGY SETTINGS ---
+        self.initial_equity = 11811.28 # ทุนเริ่มต้นเพื่อวัด Growth
         self.fee_rate = 0.0025 
         self.last_alive_check = -1
-
-        # Dynamic Parameters (ปรับอัตโนมัติตามตลาด)
-        self.current_tp = 3.0       # เป้ากำไร (จะเปลี่ยนเป็น 10% เมื่อตลาดเป็น Uptrend)
-        self.current_rsi_buy = 40.0 # จุดซื้อ (จะเปลี่ยนเป็น 35 เมื่อตลาดเป็น Uptrend)
+        self.current_tp = 3.0       
+        self.current_rsi_buy = 40.0 
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0}}
 
         self._init_db() 
-        self._load_state() # ดึง 2 ไม้ที่ค้างอยู่ออกมาทำงานต่อทันที
-        self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW</b>\n<i>Status: Full System Online | Omni-Flow Active</i>")
+        self._load_state() 
+        self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW (FULL)</b>\n<i>Status: System Online | Database Synced</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -69,8 +67,7 @@ class TitanV18_15_OmniFlow:
         ts = str(int(time.time() * 1000))
         path = f"/api/v3/market/place-{'bid' if side=='buy' else 'ask'}"
         final_rat = round(float(price), 2)
-        
-        # ป้องกัน Error 10: ใช้ Integer สำหรับซื้อ / Round 4 สำหรับขาย
+        # --- FIX ERROR 10: Integer for Buy / Round 4 for Sell ---
         final_amt = int(float(amt_units)) if side == 'buy' else round(float(amt_units), 4)
 
         payload = {"sym": self.symbol.lower(), "amt": final_amt, "rat": final_rat, "typ": "limit"}
@@ -100,17 +97,25 @@ class TitanV18_15_OmniFlow:
         return False
 
     def send_dashboard(self, dx, db, thb, coin):
-        # กู้คืนหน้าตา Dashboard 18.12 เป๊ะๆ ตามรูปที่คุณส่ง
         p, r14, r200 = dx['p'], dx['r14'], dx['r200']
         equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-        x_trend = "🌕 BULLISH" if p > dx['ema'] else "🌑 BEARISH"
+        
+        # --- MARKET STATE RECHECKED ---
+        if p > dx['ema']:
+            if 48 <= r200 <= 60: x_state = "↔️ SIDEWAY (Market)"
+            elif r200 > 60: x_state = "🚀 UP TREND (Turn Up)"
+            else: x_state = "⚠️ RECOVERING"
+            x_trend = "🌕 BULLISH"
+        else:
+            x_state = "📉 DOWN TREND"; x_trend = "🌑 BEARISH"
+
         b_trend = "🌕 BULLISH" if db['p'] > db['ema'] else "🌑 BEARISH"
 
         msg = f"🏛️ <b>TITAN V.18.15: DASHBOARD</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n📈 <b>MARKET: {self.symbol}</b>\n"
-        msg += f"💰 Price : {p:,.2f} THB\n📊 Trend : {x_trend}\n📉 RSI 14: {r14:.2f} | RSI 200: {r200:.2f}\n"
+        msg += f"💰 Price : {p:,.2f} THB\n📊 State : {x_state}\n📈 Trend : {x_trend}\n📉 RSI 14: {r14:.2f} | RSI 200: {r200:.2f}\n"
         msg += f"---------------------------------\n🛡️ <b>BTC-GUARD STATUS</b>\n"
         msg += f"📊 Trend : {b_trend}\n💰 BTC P.: {db['p']:,.0f} THB\n"
         msg += f"---------------------------------\n💰 <b>ASSET SUMMARY</b>\n"
@@ -131,23 +136,6 @@ class TitanV18_15_OmniFlow:
                 msg += f"⚪ SLOT {i}: WAITING (RSI ≤ {self.current_rsi_buy})\n"
         self.notify(msg)
 
-    def send_periodic_report(self, days, title):
-        start_date = self.get_thai_now() - timedelta(days=days)
-        try:
-            with psycopg2.connect(self.db_url) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT net_pnl_thb, status FROM trade_history WHERE ts > %s AND side='SELL'", (start_date,))
-                    rows = cur.fetchall()
-                    total_pnl = sum(r[0] for r in rows); trades = len(rows)
-                    wins = sum(1 for r in rows if r[1] == 'WIN'); win_rate = (wins/trades*100) if trades > 0 else 0
-            msg = f"📅 <b>{title} SUMMARY</b>\n---------------------------------\nTrades: {trades} | Win Rate: {win_rate:.0f}%\n<b>Net Profit: {total_pnl:,.2f} THB</b>"
-            self.notify(msg)
-        except: pass
-
-    def notify(self, m):
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={"chat_id": self.tg_chat_id, "text": m, "parse_mode": "HTML"}, timeout=10)
-        except: pass
-
     def run(self):
         last_dash = 0; last_day = self.get_thai_now().day
         while True:
@@ -156,40 +144,32 @@ class TitanV18_15_OmniFlow:
                 dx, db = self.get_indicator(self.symbol), self.get_indicator("BTC_THB")
                 if not dx or not db: time.sleep(20); continue
 
-                # --- กลยุทธ์ OMNI-FLOW: ปรับตัวแปรตามตลาดอัตโนมัติ ---
-                if dx['r200'] >= 48: # Sideway Up หรือ Uptrend
+                # --- OMNI-FLOW DYNAMIC ADJUSTMENT ---
+                if dx['r200'] >= 48: 
                     self.current_tp = 3.0 if dx['r200'] < 60 else 10.0
                     self.current_rsi_buy = 40.0 if dx['r200'] < 60 else 35.0
-                else: # Downtrend
+                else: 
                     self.current_tp = 2.0; self.current_rsi_buy = 25.0
 
                 ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
 
-                # รายงาน Alive Check (ทุก 6 ชม.)
                 if thai_now.hour in [0, 6, 12, 18] and thai_now.hour != self.last_alive_check:
                     self.notify(f"📡 <b>TITAN ALIVE</b>\n📅 {thai_now.strftime('%H:%M')} | Status: OK ✅"); self.last_alive_check = thai_now.hour
                 
-                # รายงาน Dashboard (ทุก 1 ชม.)
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(dx, db, thb, coin); last_dash = time.time()
                 
-                # รายงาน Daily (08:00) และ Monthly (วันที่ 1)
-                if thai_now.day != last_day and thai_now.hour == 8:
-                    self.send_periodic_report(1, "DAILY"); last_day = thai_now.day
-                if thai_now.day == 1 and thai_now.hour == 8 and thai_now.minute < 5:
-                    self.send_periodic_report(30, "MONTHLY")
-
-                # Logic การเข้าซื้อ
+                # Buy Logic
                 if sum(1 for s in self.slots.values() if s['active']) < 2 and dx['r14'] <= self.current_rsi_buy:
                     if dx['p'] > dx['ema'] and db['p'] > db['ema']:
-                        buy_amt = int((thb + (coin * dx['p'])) * 0.45) # ซื้อ 45% ของ Equity
+                        buy_amt = int((thb + (coin * dx['p'])) * 0.45) 
                         if thb >= buy_amt >= 10:
                             s_id = 1 if not self.slots[1]['active'] else 2
                             self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
 
-                # Logic การขาย
+                # Sell Logic
                 for i, s in self.slots.items():
                     if s['active']:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = dx['p'] * (1 - self.fee_rate)
