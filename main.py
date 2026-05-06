@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_15_OmniFlow_Fixed:
+class TitanV18_15_OmniFlow_Strategic:
     def __init__(self):
         # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -11,19 +11,19 @@ class TitanV18_15_OmniFlow_Fixed:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- [2] STRATEGY SETTINGS (รักษาค่าเดิม 100%) ---
+        # --- [2] STRATEGY SETTINGS ---
         self.initial_equity = 11811.28 
         self.fee_rate = 0.0025 
         self.last_alive_check = -1
         self.current_tp = 3.0       
-        self.current_rsi_buy = 40.0 
+        self.current_rsi_buy = 35.0 # ปรับลดลงจาก 40 เพื่อความปลอดภัย
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0}}
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW (DB FIXED)</b>\n<i>Status: Online | Sync Issues Resolved</i>")
+        self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW (STRATEGIC)</b>\n<i>Status: Online | RSI 35 & Step-Buy Active</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -41,9 +41,7 @@ class TitanV18_15_OmniFlow_Fixed:
         except: pass
 
     def _load_state(self):
-        """แก้ไข: โหลดสถานะใหม่ทุกครั้งที่มีการซื้อหรือขายเพื่อความแม่นยำ"""
         try:
-            # รีเซ็ตค่าใน Memory ก่อนโหลดใหม่
             temp_slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
                           2: {"active": False, "price": 0, "units": 0, "sl": 0}}
             with psycopg2.connect(self.db_url) as conn:
@@ -94,7 +92,6 @@ class TitanV18_15_OmniFlow_Fixed:
                         if side == 'buy':
                             actual_units = round(final_amt / final_rat, 4)
                             sl = round(final_rat - (atr * 2.5), 2)
-                            # แก้ไข: ใช้ ON CONFLICT เพื่อให้ Database อัปเดตสถานะทันที
                             cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, final_rat, actual_units, sl))
                             msg = f"📥 <b>BUY COMPLETED (Slot {slot_id})</b>\n📅 <code>{now_str}</code>\nPrice: {final_rat:,.2f} | Amount: {final_amt:,} THB\n🛡️ SL: {sl:,.2f}"
                         else:
@@ -102,24 +99,20 @@ class TitanV18_15_OmniFlow_Fixed:
                             net_pnl = (final_rat * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
                             msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\nNET PROFIT: <b>{net_pnl:,.2f} THB</b> {'✅' if net_pnl > 0 else '❌'}"
                             cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (final_rat, s['units'], net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
-                            # แก้ไข: ลบไม้ที่ขายออกทันทีเพื่อไม่ให้ Dashboard โชว์ค้าง
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
-                        conn.commit()
-                        self._load_state() # แก้ไข: โหลดข้อมูลใหม่เข้า Memory ทันทีหลัง Commit DB
-                        self.notify(msg)
+                        conn.commit(); self._load_state(); self.notify(msg)
                 return True
         except: pass
         return False
 
     def sync_check(self, coin_in_wallet):
-        """ฟีเจอร์ป้องกัน: ตรวจสอบความถูกต้องระหว่างเหรียญจริงกับฐานข้อมูล"""
         active_in_db = sum(1 for s in self.slots.values() if s['active'])
         if coin_in_wallet < 0.5 and active_in_db > 0:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur: cur.execute("DELETE FROM bot_state_v18")
                 conn.commit()
             self._load_state()
-            self.notify("🔄 <b>Sync Fix:</b> ตรวจพบเหรียญหมดแต่ DB ค้าง ทำการล้างสถานะให้ตรงกันแล้ว")
+            self.notify("🔄 <b>Sync Fix:</b> เหรียญหมดแต่ DB ค้าง ทำการล้างข้อมูลให้ตรงกันแล้ว")
 
     def send_dashboard(self, dx, db, thb, coin):
         p, r14, r200 = dx['p'], dx['r14'], dx['r200']
@@ -135,13 +128,12 @@ class TitanV18_15_OmniFlow_Fixed:
         else:
             x_state = "📉 DOWN TREND"; x_trend = "🌑 BEARISH"
 
-        b_trend = "🌕 BULLISH" if db['p'] > db['ema'] else "🌑 BEARISH"
-
         msg = f"🏛️ <b>TITAN V.18.15: DASHBOARD</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n📈 <b>MARKET: {self.symbol}</b>\n"
         msg += f"💰 Price : {p:,.2f} THB\n📊 State : {x_state}\n📈 Trend : {x_trend}\n📉 RSI 14: {r14:.2f} | RSI 200: {r200:.2f}\n"
         msg += f"---------------------------------\n🛡️ <b>BTC-GUARD STATUS</b>\n"
-        msg += f"📊 Trend : {b_trend}\n💰 BTC P.: {db['p']:,.0f} THB\n"
+        msg += f"📊 Trend : {'🌕 BULLISH' if db['p'] > db['ema'] else '🌑 BEARISH'}\n"
+        msg += f"💰 BTC P.: {db['p']:,.0f} THB\n"
         msg += f"---------------------------------\n💰 <b>ASSET SUMMARY</b>\n"
         msg += f"✨ Net Equity : <b>{equity:,.2f} THB</b>\n"
         msg += f"💵 Cash (THB) : {thb:,.2f} THB\n"
@@ -153,9 +145,8 @@ class TitanV18_15_OmniFlow_Fixed:
         for i, s in self.slots.items():
             if s['active']:
                 pnl = (((p*(1-self.fee_rate)) - (s['price']*(1+self.fee_rate))) / (s['price']*(1+self.fee_rate))) * 100
-                tp_p = round(s['price'] * (1 + (self.current_tp / 100)), 2)
                 msg += f"🟢 SLOT {i}: {s['units']:.4f} XRP ({pnl:+.2f}%)\n"
-                msg += f"🎯 <b>TP:</b> {tp_p:,.2f} | 🛡️ <b>SL:</b> {s['sl']:,.2f}\n"
+                msg += f"🎯 <b>TP:</b> {round(s['price']*(1+(self.current_tp/100)), 2):,.2f} | 🛡️ <b>SL:</b> {s['sl']:,.2f}\n"
             else:
                 msg += f"⚪ SLOT {i}: WAITING (RSI ≤ {self.current_rsi_buy})\n"
         self.notify(msg)
@@ -171,7 +162,7 @@ class TitanV18_15_OmniFlow_Fixed:
                 # --- OMNI-FLOW DYNAMIC ADJUSTMENT ---
                 if dx['r200'] >= 48: 
                     self.current_tp = 3.0 if dx['r200'] < 60 else 10.0
-                    self.current_rsi_buy = 40.0 if dx['r200'] < 60 else 35.0
+                    self.current_rsi_buy = 35.0 if dx['r200'] < 60 else 30.0
                 else: 
                     self.current_tp = 2.0; self.current_rsi_buy = 25.0
 
@@ -179,7 +170,6 @@ class TitanV18_15_OmniFlow_Fixed:
                 wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
                 thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
 
-                # แก้ไข: เพิ่มการเช็ค Sync ทุกรอบเพื่อความมั่นใจ
                 self.sync_check(coin)
 
                 if thai_now.hour in [0, 6, 12, 18] and thai_now.hour != self.last_alive_check:
@@ -188,13 +178,23 @@ class TitanV18_15_OmniFlow_Fixed:
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(dx, db, thb, coin); last_dash = time.time()
                 
-                # Buy Logic
-                if sum(1 for s in self.slots.values() if s['active']) < 2 and dx['r14'] <= self.current_rsi_buy:
+                # --- STRATEGIC BUY LOGIC (STEP BUY) ---
+                active_count = sum(1 for s in self.slots.values() if s['active'])
+                if active_count < 2 and dx['r14'] <= self.current_rsi_buy:
                     if dx['p'] > dx['ema'] and db['p'] > db['ema']:
-                        buy_amt = int((thb + (coin * dx['p'])) * 0.45) 
-                        if thb >= buy_amt >= 10:
-                            s_id = 1 if not self.slots[1]['active'] else 2
-                            self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
+                        
+                        can_buy = True
+                        # ถ้ามีไม้แรกอยู่แล้ว ไม้ 2 ต้องราคาถูกกว่าไม้แรกอย่างน้อย 1.5% ถึงจะซื้อ
+                        if active_count == 1:
+                            first_price = next(s['price'] for s in self.slots.values() if s['active'])
+                            if ((dx['p'] - first_price) / first_price) * 100 > -1.5:
+                                can_buy = False
+
+                        if can_buy:
+                            buy_amt = int((thb + (coin * dx['p'])) * 0.45) 
+                            if thb >= buy_amt >= 10:
+                                s_id = 1 if not self.slots[1]['active'] else 2
+                                self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
 
                 # Sell Logic
                 for i, s in self.slots.items():
@@ -206,4 +206,4 @@ class TitanV18_15_OmniFlow_Fixed:
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanV18_15_OmniFlow_Fixed().run()
+    TitanV18_15_OmniFlow_Strategic().run()
