@@ -155,7 +155,7 @@ class TitanV18_15_OmniFlow:
 
                 # --- OMNI-FLOW DYNAMIC ADJUSTMENT ---
                 if dx['r200'] >= 48: 
-                    self.current_tp = 1.0 if dx['r200'] < 60 else 10.0
+                    self.current_tp = 0.1 if dx['r200'] < 60 else 10.0
                     self.current_rsi_buy = 40.0 if dx['r200'] < 60 else 35.0
                 else: 
                     self.current_tp = 2.0; self.current_rsi_buy = 25.0
