@@ -12,7 +12,7 @@ class TitanV18_15_OmniFlow:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- [2] STRATEGY SETTINGS ---
-        self.initial_equity = 11811.28 # ทุนเริ่มต้นเพื่อวัด Growth
+        self.initial_equity = 11811.28 # ทุนเริ่มต้นจากรายงานล่าสุดของคุณ
         self.fee_rate = 0.0025 
         self.last_alive_check = -1
         self.current_tp = 3.0       
@@ -22,8 +22,17 @@ class TitanV18_15_OmniFlow:
                       2: {"active": False, "price": 0, "units": 0, "sl": 0}}
 
         self._init_db() 
-        self._load_state() 
+        self._load_state() # ดึงไม้ค้างจากฐานข้อมูล Postgres ทันที
         self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW (FULL)</b>\n<i>Status: System Online | Database Synced</i>")
+
+    def notify(self, message):
+        """แก้ไข Error: เพิ่มฟังก์ชัน notify เพื่อส่ง Telegram"""
+        try:
+            url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+            payload = {'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print(f"Telegram Notify Error: {e}")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -41,6 +50,7 @@ class TitanV18_15_OmniFlow:
         except: pass
 
     def _load_state(self):
+        """โหลดสถานะไม้ค้างจากตาราง bot_state_v18"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -67,7 +77,6 @@ class TitanV18_15_OmniFlow:
         ts = str(int(time.time() * 1000))
         path = f"/api/v3/market/place-{'bid' if side=='buy' else 'ask'}"
         final_rat = round(float(price), 2)
-        # --- FIX ERROR 10: Integer for Buy / Round 4 for Sell ---
         final_amt = int(float(amt_units)) if side == 'buy' else round(float(amt_units), 4)
 
         payload = {"sym": self.symbol.lower(), "amt": final_amt, "rat": final_rat, "typ": "limit"}
@@ -102,7 +111,7 @@ class TitanV18_15_OmniFlow:
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         
-        # --- MARKET STATE RECHECKED ---
+        # --- MARKET STATE (แก้ความสับสนเรื่อง RSI 200) ---
         if p > dx['ema']:
             if 48 <= r200 <= 60: x_state = "↔️ SIDEWAY (Market)"
             elif r200 > 60: x_state = "🚀 UP TREND (Turn Up)"
@@ -137,7 +146,7 @@ class TitanV18_15_OmniFlow:
         self.notify(msg)
 
     def run(self):
-        last_dash = 0; last_day = self.get_thai_now().day
+        last_dash = 0
         while True:
             try:
                 thai_now = self.get_thai_now()
@@ -158,10 +167,11 @@ class TitanV18_15_OmniFlow:
                 if thai_now.hour in [0, 6, 12, 18] and thai_now.hour != self.last_alive_check:
                     self.notify(f"📡 <b>TITAN ALIVE</b>\n📅 {thai_now.strftime('%H:%M')} | Status: OK ✅"); self.last_alive_check = thai_now.hour
                 
+                # ส่ง Dashboard ทุกชั่วโมง หรือตอนเริ่มรันครั้งแรก
                 if time.time() - last_dash > 3600:
                     self.send_dashboard(dx, db, thb, coin); last_dash = time.time()
                 
-                # Buy Logic
+                # Buy Logic (45% per slot)
                 if sum(1 for s in self.slots.values() if s['active']) < 2 and dx['r14'] <= self.current_rsi_buy:
                     if dx['p'] > dx['ema'] and db['p'] > db['ema']:
                         buy_amt = int((thb + (coin * dx['p'])) * 0.45) 
@@ -169,13 +179,14 @@ class TitanV18_15_OmniFlow:
                             s_id = 1 if not self.slots[1]['active'] else 2
                             self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
 
-                # Sell Logic
+                # Sell Logic (TP/SL)
                 for i, s in self.slots.items():
                     if s['active']:
                         e_cost = s['price'] * (1 + self.fee_rate); x_rev = dx['p'] * (1 - self.fee_rate)
                         if ((x_rev - e_cost) / e_cost) * 100 >= self.current_tp or dx['p'] <= s['sl']:
                             self.execute_trade('sell', i, dx['p'], s['units'], dx['atr'])
-            except: pass
+            except Exception as e:
+                print(f"Loop Error: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
