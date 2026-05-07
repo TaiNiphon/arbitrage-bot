@@ -12,7 +12,7 @@ class TitanV18_15_OmniFlow_Strategic:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- [2] STRATEGY SETTINGS ---
-        self.initial_equity = 11811.28 
+        self.initial_equity = 10000.28 
         self.fee_rate = 0.0025 
         self.last_alive_check = -1
         self.current_tp = 3.0       
