@@ -16,14 +16,14 @@ class TitanV18_15_OmniFlow_Strategic:
         self.fee_rate = 0.0025 
         self.last_alive_check = -1
         self.current_tp = 3.0       
-        self.current_rsi_buy = 35.0 # ปรับลดลงจาก 40 เพื่อความปลอดภัย
+        self.current_rsi_buy = 35.0
 
         self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
                       2: {"active": False, "price": 0, "units": 0, "sl": 0}}
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW (STRATEGIC)</b>\n<i>Status: Online | RSI 35 & Step-Buy Active</i>")
+        self.notify("🏛️ <b>TITAN V.18.15: OMNI-FLOW (STRATEGIC)</b>\n<i>Status: Online | DB Resilience Active</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -38,7 +38,8 @@ class TitanV18_15_OmniFlow_Strategic:
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT)""")
                     conn.commit()
-        except: pass
+        except Exception as e:
+            print(f"DB Init Error: {e}")
 
     def _load_state(self):
         try:
@@ -50,7 +51,8 @@ class TitanV18_15_OmniFlow_Strategic:
                     for r in cur.fetchall():
                         temp_slots[r[0]] = {"active": True, "price": r[1], "units": r[2], "sl": r[3]}
             self.slots = temp_slots
-        except: pass
+        except Exception as e:
+            self.notify(f"⚠️ <b>Load State Error:</b> {e}")
 
     def notify(self, message):
         try:
@@ -85,48 +87,69 @@ class TitanV18_15_OmniFlow_Strategic:
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
         try:
-            res = requests.post(f"https://api.bitkub.com{path}", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig, 'Content-Type': 'application/json'}, data=payload_json, timeout=15).json()
+            res = requests.post(f"https://api.bitkub.com{path}", 
+                                headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig, 'Content-Type': 'application/json'}, 
+                                data=payload_json, timeout=15).json()
+            
             if res.get('error') == 0:
-                with psycopg2.connect(self.db_url) as conn:
-                    with conn.cursor() as cur:
-                        if side == 'buy':
-                            actual_units = round(final_amt / final_rat, 4)
-                            sl = round(final_rat - (atr * 2.5), 2)
-                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s) ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, final_rat, actual_units, sl))
-                            msg = f"📥 <b>BUY COMPLETED (Slot {slot_id})</b>\n📅 <code>{now_str}</code>\nPrice: {final_rat:,.2f} | Amount: {final_amt:,} THB\n🛡️ SL: {sl:,.2f}"
-                        else:
-                            s = self.slots[slot_id]
-                            net_pnl = (final_rat * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
-                            msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\nNET PROFIT: <b>{net_pnl:,.2f} THB</b> {'✅' if net_pnl > 0 else '❌'}"
-                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (final_rat, s['units'], net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
-                            cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
-                        conn.commit(); self._load_state(); self.notify(msg)
+                # --- DB WRITE WITH RETRY LOGIC ---
+                db_success = False
+                for attempt in range(3):
+                    try:
+                        with psycopg2.connect(self.db_url) as conn:
+                            with conn.cursor() as cur:
+                                if side == 'buy':
+                                    actual_units = round(final_amt / final_rat, 4)
+                                    sl = round(final_rat - (atr * 2.5), 2)
+                                    cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl) 
+                                                   VALUES (%s, %s, %s, %s) 
+                                                   ON CONFLICT (slot_id) DO UPDATE 
+                                                   SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl""", 
+                                                (slot_id, final_rat, actual_units, sl))
+                                    msg = f"📥 <b>BUY COMPLETED (Slot {slot_id})</b>\n📅 <code>{now_str}</code>\nPrice: {final_rat:,.2f} | Amt: {final_amt:,} THB\n🛡️ SL: {sl:,.2f}"
+                                else:
+                                    s = self.slots[slot_id]
+                                    net_pnl = (final_rat * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
+                                    msg = f"⚡ <b>TRADE COMPLETED ({'PROFIT' if net_pnl > 0 else 'LOSS'})</b>\n📅 <code>{now_str}</code>\nNET PROFIT: <b>{net_pnl:,.2f} THB</b> {'✅' if net_pnl > 0 else '❌'}"
+                                    cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (final_rat, s['units'], net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
+                                    cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
+                                conn.commit()
+                                db_success = True
+                                break 
+                    except Exception as db_err:
+                        time.sleep(2)
+                        if attempt == 2:
+                            self.notify(f"🔴 <b>DB CRITICAL:</b> {side.upper()} Done but DB Fail!\nError: {db_err}")
+                
+                if db_success:
+                    self._load_state()
+                    self.notify(msg)
                 return True
-        except: pass
+            else:
+                self.notify(f"❌ <b>API ERROR:</b> {res.get('error')} during {side}")
+        except Exception as e:
+            self.notify(f"⚠️ <b>SYSTEM ERROR:</b> {e}")
         return False
 
     def sync_check(self, coin_in_wallet):
         active_in_db = sum(1 for s in self.slots.values() if s['active'])
         if coin_in_wallet < 0.5 and active_in_db > 0:
-            with psycopg2.connect(self.db_url) as conn:
-                with conn.cursor() as cur: cur.execute("DELETE FROM bot_state_v18")
-                conn.commit()
-            self._load_state()
-            self.notify("🔄 <b>Sync Fix:</b> เหรียญหมดแต่ DB ค้าง ทำการล้างข้อมูลให้ตรงกันแล้ว")
+            try:
+                with psycopg2.connect(self.db_url) as conn:
+                    with conn.cursor() as cur: cur.execute("DELETE FROM bot_state_v18")
+                    conn.commit()
+                self._load_state()
+                self.notify("🔄 <b>Sync Fix:</b> Database cleared to match wallet.")
+            except: pass
 
     def send_dashboard(self, dx, db, thb, coin):
         p, r14, r200 = dx['p'], dx['r14'], dx['r200']
         equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-        
-        if p > dx['ema']:
-            if 48 <= r200 <= 60: x_state = "↔️ SIDEWAY (Market)"
-            elif r200 > 60: x_state = "🚀 UP TREND (Turn Up)"
-            else: x_state = "⚠️ RECOVERING"
-            x_trend = "🌕 BULLISH"
-        else:
-            x_state = "📉 DOWN TREND"; x_trend = "🌑 BEARISH"
+
+        x_state = "📉 DOWN TREND" if p <= dx['ema'] else ("↔️ SIDEWAY" if 48 <= r200 <= 60 else "🚀 UP TREND")
+        x_trend = "🌕 BULLISH" if p > dx['ema'] else "🌑 BEARISH"
 
         msg = f"🏛️ <b>TITAN V.18.15: DASHBOARD</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n📈 <b>MARKET: {self.symbol}</b>\n"
@@ -141,7 +164,7 @@ class TitanV18_15_OmniFlow_Strategic:
         msg += f"📦 Total Coins: {coin:.4f} XRP\n"
         msg += f"📈 Total Growth: {growth:+.2f}%\n"
         msg += f"---------------------------------\n"
-        
+
         for i, s in self.slots.items():
             if s['active']:
                 pnl = (((p*(1-self.fee_rate)) - (s['price']*(1+self.fee_rate))) / (s['price']*(1+self.fee_rate))) * 100
@@ -157,34 +180,37 @@ class TitanV18_15_OmniFlow_Strategic:
             try:
                 thai_now = self.get_thai_now()
                 dx, db = self.get_indicator(self.symbol), self.get_indicator("BTC_THB")
-                if not dx or not db: time.sleep(20); continue
+                if not dx or not db: 
+                    time.sleep(20); continue
 
-                # --- OMNI-FLOW DYNAMIC ADJUSTMENT ---
                 if dx['r200'] >= 48: 
                     self.current_tp = 3.0 if dx['r200'] < 60 else 10.0
                     self.current_rsi_buy = 35.0 if dx['r200'] < 60 else 30.0
                 else: 
                     self.current_tp = 2.0; self.current_rsi_buy = 25.0
 
-                ts = str(int(time.time() * 1000)); sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
-                wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
-                thb = float(wallet['result'].get('THB', 0)); coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
+                ts = str(int(time.time() * 1000))
+                sig = hmac.new(self.api_secret.encode(), (ts + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
+                wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
+                                     headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}, timeout=10).json()
+                
+                thb = float(wallet['result'].get('THB', 0))
+                coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
 
                 self.sync_check(coin)
 
                 if thai_now.hour in [0, 6, 12, 18] and thai_now.hour != self.last_alive_check:
-                    self.notify(f"📡 <b>TITAN ALIVE</b>\n📅 {thai_now.strftime('%H:%M')} | Status: OK ✅"); self.last_alive_check = thai_now.hour
-                
+                    self.notify(f"📡 <b>TITAN ALIVE</b>\n📅 {thai_now.strftime('%H:%M')} | Status: OK ✅")
+                    self.last_alive_check = thai_now.hour
+
                 if time.time() - last_dash > 3600:
-                    self.send_dashboard(dx, db, thb, coin); last_dash = time.time()
-                
-                # --- STRATEGIC BUY LOGIC (STEP BUY) ---
+                    self.send_dashboard(dx, db, thb, coin)
+                    last_dash = time.time()
+
                 active_count = sum(1 for s in self.slots.values() if s['active'])
                 if active_count < 2 and dx['r14'] <= self.current_rsi_buy:
                     if dx['p'] > dx['ema'] and db['p'] > db['ema']:
-                        
                         can_buy = True
-                        # ถ้ามีไม้แรกอยู่แล้ว ไม้ 2 ต้องราคาถูกกว่าไม้แรกอย่างน้อย 1.5% ถึงจะซื้อ
                         if active_count == 1:
                             first_price = next(s['price'] for s in self.slots.values() if s['active'])
                             if ((dx['p'] - first_price) / first_price) * 100 > -1.5:
@@ -196,13 +222,14 @@ class TitanV18_15_OmniFlow_Strategic:
                                 s_id = 1 if not self.slots[1]['active'] else 2
                                 self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
 
-                # Sell Logic
                 for i, s in self.slots.items():
                     if s['active']:
-                        e_cost = s['price'] * (1 + self.fee_rate); x_rev = dx['p'] * (1 - self.fee_rate)
+                        e_cost = s['price'] * (1 + self.fee_rate)
+                        x_rev = dx['p'] * (1 - self.fee_rate)
                         if ((x_rev - e_cost) / e_cost) * 100 >= self.current_tp or dx['p'] <= s['sl']:
                             self.execute_trade('sell', i, dx['p'], s['units'], dx['atr'])
-            except: pass
+            except Exception as e:
+                print(f"Main Loop Error: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
