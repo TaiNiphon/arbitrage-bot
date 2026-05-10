@@ -1,7 +1,7 @@
-import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
+import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2, sys
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_Final_Stable:
+class TitanV18_Emergency_Pro:
     def __init__(self):
         # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -23,7 +23,7 @@ class TitanV18_Final_Stable:
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.15.4: FINAL STABLE</b>\n<i>Status: ระบบแก้ไข Numpy Error และความเสถียร DB เสร็จสมบูรณ์</i>")
+        self.notify("🏛️ <b>TITAN V.18.15.5: EMERGENCY READY</b>\n<i>Status: ระบบเฝ้าระวังปุ่มฉุกเฉินเปิดใช้งานแล้ว พิมพ์ /PANIC เพื่อขายล้างพอร์ตทันที</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -59,6 +59,26 @@ class TitanV18_Final_Stable:
             requests.post(url, json=payload, timeout=15)
         except: pass
 
+    # --- [NEW] EMERGENCY CHECKER ---
+    def check_emergency(self):
+        try:
+            url = f"https://api.telegram.org/bot{self.tg_token}/getUpdates?offset=-1"
+            res = requests.get(url, timeout=10).json()
+            if res.get('result'):
+                last_msg = res['result'][0].get('message', {}).get('text', '')
+                if last_msg in ['/PANIC', '/STOP', '/panic', '/stop']:
+                    self.notify("⚠️ <b>EMERGENCY ACTIVATED!</b>\nกำลังสั่งขายล้างพอร์ตทุกไม้และหยุดการทำงาน...")
+                    self.panic_sell()
+                    sys.exit() # หยุดการทำงานของบอททันที
+        except Exception as e: print(f"Emergency Checker Error: {e}")
+
+    def panic_sell(self):
+        for s_id, s in self.slots.items():
+            if s['active']:
+                # ใช้คำสั่ง Market Sell (ไม่ระบุราคา) เพื่อความเร็วสูงสุด
+                self.execute_trade('sell', s_id, 0, s['units'], 0, market=True)
+        self.notify("💵 <b>PANIC SELL COMPLETE</b>\nพอร์ตของคุณถูกเปลี่ยนเป็นเงินสดทั้งหมดแล้ว บอทหยุดทำงานเพื่อความปลอดภัย")
+
     def get_indicator(self, symbol):
         for i in range(3):
             try:
@@ -73,13 +93,16 @@ class TitanV18_Final_Stable:
             except: time.sleep(2)
         return None
 
-    def execute_trade(self, side, slot_id, price, amt_units, atr):
+    def execute_trade(self, side, slot_id, price, amt_units, atr, market=False):
         ts = str(int(time.time() * 1000))
         path = f"/api/v3/market/place-{'bid' if side=='buy' else 'ask'}"
-        final_rat = round(float(price), 2)
+        
+        # ปรับเป็น Market Order หากเป็นกรณีฉุกเฉิน
+        typ = "market" if market else "limit"
+        final_rat = 0 if typ == "market" else round(float(price), 2)
         final_amt = int(float(amt_units)) if side == 'buy' else round(float(amt_units), 4)
 
-        payload = {"sym": self.symbol.lower(), "amt": final_amt, "rat": final_rat, "typ": "limit"}
+        payload = {"sym": self.symbol.lower(), "amt": final_amt, "rat": final_rat, "typ": typ}
         payload_json = json.dumps(payload, separators=(',', ':'))
         sig = hmac.new(self.api_secret.encode(), (ts + "POST" + path + payload_json).encode(), hashlib.sha256).hexdigest()
 
@@ -92,29 +115,26 @@ class TitanV18_Final_Stable:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            actual_units = round(float(final_amt) / float(final_rat), 4)
-                            sl_val = round(float(final_rat) - (float(atr) * 2.5), 2)
-                            # [CRITICAL FIX] บังคับ float() ทุกค่าก่อนเข้า DB
+                            actual_units = round(float(final_amt) / float(price), 4)
+                            sl_val = round(float(price) - (float(atr) * 2.5), 2)
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s)
                                            ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl""", 
-                                        (int(slot_id), float(final_rat), float(actual_units), float(sl_val)))
-                            msg = f"📥 <b>BUY SUCCESS (Slot {slot_id})</b>\nPrice: {final_rat:,.2f} | SL: {sl_val:,.2f}"
+                                        (int(slot_id), float(price), float(actual_units), float(sl_val)))
+                            msg = f"📥 <b>BUY SUCCESS (Slot {slot_id})</b>"
                         else:
                             s = self.slots[slot_id]
-                            net_pnl = (float(final_rat) * float(s['units']) * (1-self.fee_rate)) - (float(s['price']) * float(s['units']) * (1+self.fee_rate))
+                            # ใช้ราคาตลาดปัจจุบันถ้าเป็น Panic Sell
+                            sell_p = float(res['result'].get('rat', price)) if typ == "market" else float(price)
+                            net_pnl = (sell_p * float(s['units']) * (1-self.fee_rate)) - (float(s['price']) * float(s['units']) * (1+self.fee_rate))
                             cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", 
-                                        (float(final_rat), float(s['units']), float(net_pnl), 'WIN' if net_pnl > 0 else 'LOSS'))
+                                        (float(sell_p), float(s['units']), float(net_pnl), 'EMERGENCY' if market else ('WIN' if net_pnl > 0 else 'LOSS')))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (int(slot_id),))
-                            msg = f"⚡ <b>SELL SUCCESS (Slot {slot_id})</b>\nNET: <b>{net_pnl:,.2f} THB</b>"
+                            msg = f"⚡ <b>SELL SUCCESS (Slot {slot_id})</b>"
                         conn.commit()
                 self._load_state()
                 self.notify(msg)
                 return True
-            else:
-                self.notify(f"❌ <b>API ERROR:</b> {res.get('error')} | {side} Slot {slot_id}")
-        except Exception as e: 
-            self.notify(f"⚠️ <b>DB/STABILITY ERROR:</b> {e}")
-            if side == 'sell': self.slots[slot_id]['active'] = False
+        except Exception as e: self.notify(f"⚠️ <b>Trade Execution Error:</b> {e}")
         return False
 
     def send_dashboard(self, dx, db, thb, coin):
@@ -123,12 +143,11 @@ class TitanV18_Final_Stable:
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
-        # --- รายงานแบบดั้งเดิม (ไม่มีการลดทอน) ---
-        msg = f"🏛️ <b>TITAN V.18.15.4: DASHBOARD</b>\n📅 <code>{now}</code>\n"
+        msg = f"🏛️ <b>TITAN V.18.15.5: DASHBOARD</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
         msg += f"💰 Price : {p:,.2f} THB\n"
-        msg += f"📊 State : {'↔️ SIDEWAY (Market)' if abs(dx['r14']-50) < 15 else '📉 TREND'}\n"
+        msg += f"📊 State : {'↔️ SIDEWAY' if abs(dx['r14']-50) < 15 else '📉 TREND'}\n"
         msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
         msg += f"📉 RSI 14: {dx['r14']:.2f} | RSI 200: {dx['r200']:.2f}\n"
         msg += f"---------------------------------\n"
@@ -157,6 +176,8 @@ class TitanV18_Final_Stable:
         last_dash = 0
         while True:
             try:
+                self.check_emergency() # เช็คปุ่มฉุกเฉินทุกรอบลูป
+                
                 dx, db = self.get_indicator(self.symbol), self.get_indicator("BTC_THB")
                 if not dx or not db: time.sleep(20); continue
 
@@ -177,11 +198,9 @@ class TitanV18_Final_Stable:
                     can_buy = True
                     if active_count == 1:
                         m1_p = next(s['price'] for s in self.slots.values() if s['active'])
-                        dist = ((dx['p'] - m1_p) / m1_p) * 100
-                        if dist > -self.buy_distance: can_buy = False 
+                        if ((dx['p'] - m1_p) / m1_p) * 100 > -self.buy_distance: can_buy = False 
 
                     if can_buy and dx['p'] > dx['ema'] and db['p'] > db['ema']:
-                        # ปรับยอดซื้อให้รองรับเงินที่เหลือน้อยของคุณขณะทดสอบ
                         buy_amt = int(thb * 0.95) if thb < 500 else int((thb + (coin * dx['p'])) * 0.45)
                         if thb >= buy_amt >= 10:
                             s_id = 1 if not self.slots[1]['active'] else 2
@@ -197,4 +216,4 @@ class TitanV18_Final_Stable:
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanV18_Final_Stable().run()
+    TitanV18_Emergency_Pro().run()
