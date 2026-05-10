@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2, sys
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_Cash_Optimizer:
+class TitanV18_Final_Fixed:
     def __init__(self):
         # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -17,14 +17,14 @@ class TitanV18_Cash_Optimizer:
         self.current_tp = 3.0       
         self.current_rsi_buy = 35.0
         self.buy_distance = 1.5      
-        self.cancel_timeout = 300 # 5 นาที
+        self.cancel_timeout = 300 
 
         self.slots = {1: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0, "ts": 0}, 
                       2: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0, "ts": 0}}
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.15.7: CASH OPTIMIZER</b>\n<i>Status: ระบบกวาดเงิน 95% และ Sync Order สมบูรณ์แล้ว</i>")
+        self.notify("🏛️ <b>TITAN V.18.15.8: REPAIR COMPLETE</b>\n<i>Status: ซ่อมฐานข้อมูลและกู้คืนรายงานฉบับสมบูรณ์แล้ว</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -37,7 +37,9 @@ class TitanV18_Cash_Optimizer:
                         id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
-                        slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, open_ts BIGINT)""")
+                        slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT)""")
+                    # --- AUTO MIGRATION: เพิ่มคอลัมน์ที่ขาด ---
+                    cur.execute("ALTER TABLE bot_state_v18 ADD COLUMN IF NOT EXISTS open_ts BIGINT DEFAULT 0")
                     conn.commit()
         except Exception as e: print(f"DB Init Error: {e}")
 
@@ -47,11 +49,11 @@ class TitanV18_Cash_Optimizer:
                           2: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0, "ts": 0}}
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT slot_id, price, units, sl, COALESCE(open_ts, 0) FROM bot_state_v18")
+                    cur.execute("SELECT slot_id, price, units, sl, open_ts FROM bot_state_v18")
                     for r in cur.fetchall():
                         temp_slots[r[0]] = {"active": True, "price": float(r[1]), "units": float(r[2]), "sl": float(r[3]), "ts": int(r[4])}
             self.slots = temp_slots
-        except Exception as e: self.notify(f"⚠️ <b>Load State Error:</b> {e}")
+        except Exception as e: self.notify(f"⚠️ <b>Load Error:</b> {e}")
 
     def notify(self, message):
         try:
@@ -82,25 +84,6 @@ class TitanV18_Cash_Optimizer:
             return True
         except: return False
 
-    def check_emergency(self):
-        try:
-            url = f"https://api.telegram.org/bot{self.tg_token}/getUpdates?offset=-1"
-            res = requests.get(url, timeout=10).json()
-            if res.get('result'):
-                last_msg = res['result'][0].get('message', {}).get('text', '')
-                if last_msg in ['/PANIC', '/STOP', '/panic', '/stop']:
-                    self.notify("⚠️ <b>EMERGENCY ACTIVATED!</b>")
-                    self.panic_sell()
-                    sys.exit()
-        except: pass
-
-    def panic_sell(self):
-        orders = self.get_open_orders()
-        for o in orders: self.cancel_order(o['id'], o['sd'])
-        for s_id, s in self.slots.items():
-            if s['active']: self.execute_trade('sell', s_id, 0, s['units'], 0, market=True)
-        self.notify("💵 <b>PANIC SELL COMPLETE</b>")
-
     def get_indicator(self, symbol):
         for i in range(3):
             try:
@@ -111,7 +94,7 @@ class TitanV18_Cash_Optimizer:
                     return 100 - (100 / (1 + (np.mean(up[-p_len:]) / (np.mean(down[-p_len:]) + 1e-9))))
                 ema = np.mean(c[-200:])
                 tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
-                return {"p": float(c[-1]), "r14": float(calc_rsi(c, 14)), "r200": float(calc_rsi(c, 200)), "ema": float(ema), "atr": float(np.mean(tr[-14:]))}
+                return {"p": float(c[-1]), "r14": float(calc_rsi(c, 14)), "ema": float(ema), "atr": float(np.mean(tr[-14:]))}
             except: time.sleep(2)
         return None
 
@@ -130,7 +113,6 @@ class TitanV18_Cash_Optimizer:
             res = requests.post(f"https://api.bitkub.com{path}", 
                                 headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig, 'Content-Type': 'application/json'}, 
                                 data=payload_json, timeout=15).json()
-            
             if res.get('error') == 0:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
@@ -140,18 +122,15 @@ class TitanV18_Cash_Optimizer:
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, open_ts) VALUES (%s, %s, %s, %s, %s)
                                            ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl, open_ts=EXCLUDED.open_ts""", 
                                         (int(slot_id), float(price), float(actual_units), float(sl_val), int(time.time())))
-                            msg = f"📥 <b>BUY SENT (Slot {slot_id})</b>"
                         else:
                             s = self.slots[slot_id]
                             sell_p = float(res['result'].get('rat', price)) if typ == "market" else float(price)
                             net_pnl = (sell_p * float(s['units']) * (1-self.fee_rate)) - (float(s['price']) * float(s['units']) * (1+self.fee_rate))
-                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", 
-                                        (float(sell_p), float(s['units']), float(net_pnl), 'WIN' if net_pnl > 0 else 'LOSS'))
+                            cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", (float(sell_p), float(s['units']), float(net_pnl), 'WIN' if net_pnl > 0 else 'LOSS'))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (int(slot_id),))
-                            msg = f"⚡ <b>SELL SUCCESS (Slot {slot_id})</b>"
                         conn.commit()
                 self._load_state()
-                self.notify(msg)
+                self.notify(f"⚡ <b>{'BUY' if side=='buy' else 'SELL'} SUCCESS (Slot {slot_id})</b>")
                 return True
         except: pass
         return False
@@ -162,12 +141,16 @@ class TitanV18_Cash_Optimizer:
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         orders = self.get_open_orders()
 
-        msg = f"🏛️ <b>TITAN V.18.15.7: DASHBOARD</b>\n"
+        msg = f"🏛️ <b>TITAN V.18.15.8: DASHBOARD</b>\n"
         msg += f"📅 <code>{self.get_thai_now().strftime('%d/%m/%Y | %H:%M:%S')}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET: {p:,.2f} THB</b>\n"
         msg += f"📉 RSI: {dx['r14']:.2f} | EMA: {dx['ema']:,.2f}\n"
-        msg += f"💰 <b>ASSET: {equity:,.2f} THB</b> ({growth:+.2f}%)\n"
+        msg += f"🛡️ <b>BTC-GUARD:</b> {'🌕 BULL' if db['p'] > db['ema'] else '🌑 BEAR'}\n"
+        msg += f"---------------------------------\n"
+        msg += f"💰 <b>ASSET SUMMARY</b>\n"
+        msg += f"✨ Net Equity: {equity:,.2f} THB\n"
+        msg += f"💵 Cash: {thb:,.2f} | Growth: {growth:+.2f}%\n"
         msg += f"---------------------------------\n"
         
         for i, s in self.slots.items():
@@ -177,7 +160,7 @@ class TitanV18_Cash_Optimizer:
                     msg += f"🟡 SLOT {i}: (WAIT MATCH) @ {s['price']:,.2f}\n"
                 else:
                     pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
-                    msg += f"🟢 SLOT {i}: (HOLDING) {pnl:+.2f}%\n"
+                    msg += f"🟢 SLOT {i}: {s['units']} XRP ({pnl:+.2f}%)\n"
                     msg += f"🎯 TP: {s['price']*1.03:,.2f} | 🛡️ SL: {s['sl']:,.2f}\n"
             else:
                 msg += f"⚪ SLOT {i}: WAITING (RSI ≤ 35)\n"
@@ -187,50 +170,36 @@ class TitanV18_Cash_Optimizer:
         last_dash = 0
         while True:
             try:
-                self.check_emergency()
                 dx, db = self.get_indicator(self.symbol), self.get_indicator("BTC_THB")
                 if not dx or not db: time.sleep(20); continue
 
                 ts_btk = str(int(time.time() * 1000))
                 sig = hmac.new(self.api_secret.encode(), (ts_btk + "POST" + "/api/v3/market/wallet").encode(), hashlib.sha256).hexdigest()
-                wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", 
-                                     headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts_btk, 'X-BTK-SIGN': sig}, timeout=15).json()
-                
+                wallet = requests.post("https://api.bitkub.com/api/v3/market/wallet", headers={'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts_btk, 'X-BTK-SIGN': sig}, timeout=15).json()
                 thb = float(wallet['result'].get('THB', 0))
                 coin = float(wallet['result'].get(self.symbol.split('_')[0], 0))
 
                 if time.time() - last_dash > 3600:
-                    self.send_dashboard(dx, db, thb, coin)
-                    last_dash = time.time()
+                    self.send_dashboard(dx, db, thb, coin); last_dash = time.time()
 
-                # --- AUTO CANCEL & REAL-TIME SYNC ---
+                # --- AUTO CANCEL LOGIC ---
                 orders = self.get_open_orders()
                 for i, s in self.slots.items():
                     if s['active'] and s['ts'] > 0 and (time.time() - s['ts']) > self.cancel_timeout:
-                        match_order = next((o for o in orders if abs(float(o['rat']) - s['price']) < 0.01), None)
-                        if match_order:
-                            self.cancel_order(match_order['id'], 'buy')
+                        m_order = next((o for o in orders if abs(float(o['rat']) - s['price']) < 0.01), None)
+                        if m_order:
+                            self.cancel_order(m_order['id'], 'buy')
                             with psycopg2.connect(self.db_url) as conn:
                                 with conn.cursor() as cur:
                                     cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (i,))
                                     conn.commit()
                             self._load_state()
-                            self.notify(f"⏱️ <b>CANCELLED (Slot {i})</b>: ราคาไม่ Match ใน 5 นาที")
+                            self.notify(f"⏱️ <b>CANCELLED (Slot {i})</b>: ไม่ Match ใน 5 นาที")
 
                 active_count = sum(1 for s in self.slots.values() if s['active'])
                 if active_count < 2 and dx['r14'] <= self.current_rsi_buy:
-                    can_buy = True
-                    if active_count == 1:
-                        m_active = next(s['price'] for s in self.slots.values() if s['active'])
-                        if ((dx['p'] - m_active) / m_active) * 100 > -self.buy_distance: can_buy = False 
-
-                    if can_buy and dx['p'] > dx['ema'] and db['p'] > db['ema']:
-                        # --- [LOGIC แก้เงินจม] ---
-                        if active_count == 0:
-                            buy_amt = int((thb + (coin * dx['p'])) * 0.45)
-                        else:
-                            buy_amt = int(thb * 0.95) # กวาดเงินสดที่เหลือทั้งหมดมาลงไม้ 2
-                        
+                    if dx['p'] > dx['ema'] and db['p'] > db['ema']:
+                        buy_amt = int((thb + (coin * dx['p'])) * 0.45) if active_count == 0 else int(thb * 0.95)
                         if thb >= buy_amt >= 10:
                             s_id = 1 if not self.slots[1]['active'] else 2
                             self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
@@ -241,10 +210,9 @@ class TitanV18_Cash_Optimizer:
                         if not is_pending:
                             profit = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
                             if profit >= self.current_tp or dx['p'] <= s['sl']:
-                                self.execute_trade('sell', i, dx['p'], s['units'], dx['atr'])
-
+                                self.execute_trade('sell', i, dx['p'], s['units'], 0)
             except Exception as e: print(f"Loop Error: {e}")
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanV18_Cash_Optimizer().run()
+    TitanV18_Final_Fixed().run()
