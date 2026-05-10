@@ -199,4 +199,4 @@ class TitanV18_Full_Strategic:
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanV18_Full_Strategic().run()
+    TitanV18_Full_Strategic().run(
