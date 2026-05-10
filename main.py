@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_Full_Strategic:
+class TitanV18_Final_Stable:
     def __init__(self):
         # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -16,14 +16,14 @@ class TitanV18_Full_Strategic:
         self.fee_rate = 0.0025 
         self.current_tp = 3.0       
         self.current_rsi_buy = 35.0
-        self.buy_distance = 1.5      # ระยะห่างขั้นต่ำ 1.5% ระหว่างไม้
+        self.buy_distance = 1.5      
 
-        self.slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
-                      2: {"active": False, "price": 0, "units": 0, "sl": 0}}
+        self.slots = {1: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0}, 
+                      2: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0}}
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.15.3: FULL ONLINE</b>\n<i>Status: ระบบทำงานสมบูรณ์ แก้ไขปัญหา DB & แบ่งไม้เรียบร้อย</i>")
+        self.notify("🏛️ <b>TITAN V.18.15.4: FINAL STABLE</b>\n<i>Status: ระบบแก้ไข Numpy Error และความเสถียร DB เสร็จสมบูรณ์</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -42,13 +42,13 @@ class TitanV18_Full_Strategic:
 
     def _load_state(self):
         try:
-            temp_slots = {1: {"active": False, "price": 0, "units": 0, "sl": 0}, 
-                          2: {"active": False, "price": 0, "units": 0, "sl": 0}}
+            temp_slots = {1: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0}, 
+                          2: {"active": False, "price": 0.0, "units": 0.0, "sl": 0.0}}
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT slot_id, price, units, sl FROM bot_state_v18")
                     for r in cur.fetchall():
-                        temp_slots[r[0]] = {"active": True, "price": r[1], "units": r[2], "sl": r[3]}
+                        temp_slots[r[0]] = {"active": True, "price": float(r[1]), "units": float(r[2]), "sl": float(r[3])}
             self.slots = temp_slots
         except Exception as e: self.notify(f"⚠️ <b>Load State Error:</b> {e}")
 
@@ -69,7 +69,7 @@ class TitanV18_Full_Strategic:
                     return 100 - (100 / (1 + (np.mean(up[-p_len:]) / (np.mean(down[-p_len:]) + 1e-9))))
                 ema = np.mean(c[-200:])
                 tr = np.maximum(np.array(res['h'][1:]) - np.array(res['l'][1:]), abs(np.array(res['h'][1:]) - c[:-1]))
-                return {"p": c[-1], "r14": calc_rsi(c, 14), "r200": calc_rsi(c, 200), "ema": ema, "atr": np.mean(tr[-14:])}
+                return {"p": float(c[-1]), "r14": float(calc_rsi(c, 14)), "r200": float(calc_rsi(c, 200)), "ema": float(ema), "atr": float(np.mean(tr[-14:]))}
             except: time.sleep(2)
         return None
 
@@ -92,19 +92,19 @@ class TitanV18_Full_Strategic:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            actual_units = round(final_amt / final_rat, 4)
-                            sl = round(final_rat - (atr * 2.5), 2)
+                            actual_units = round(float(final_amt) / float(final_rat), 4)
+                            sl_val = round(float(final_rat) - (float(atr) * 2.5), 2)
+                            # [CRITICAL FIX] บังคับ float() ทุกค่าก่อนเข้า DB
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl) VALUES (%s, %s, %s, %s)
                                            ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl""", 
-                                        (slot_id, final_rat, actual_units, sl))
-                            msg = f"📥 <b>BUY SUCCESS (Slot {slot_id})</b>\nPrice: {final_rat:,.2f} | SL: {sl:,.2f}"
+                                        (int(slot_id), float(final_rat), float(actual_units), float(sl_val)))
+                            msg = f"📥 <b>BUY SUCCESS (Slot {slot_id})</b>\nPrice: {final_rat:,.2f} | SL: {sl_val:,.2f}"
                         else:
                             s = self.slots[slot_id]
-                            net_pnl = (final_rat * s['units'] * (1-self.fee_rate)) - (s['price'] * s['units'] * (1+self.fee_rate))
-                            # แก้ไขชื่อคอลัมน์ 'ts' และ 'net_pnl_thb' ตามภาพ DB จริง
+                            net_pnl = (float(final_rat) * float(s['units']) * (1-self.fee_rate)) - (float(s['price']) * float(s['units']) * (1+self.fee_rate))
                             cur.execute("INSERT INTO trade_history (ts, side, price, units, net_pnl_thb, status) VALUES (NOW(), 'SELL', %s, %s, %s, %s)", 
-                                        (final_rat, s['units'], net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
-                            cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
+                                        (float(final_rat), float(s['units']), float(net_pnl), 'WIN' if net_pnl > 0 else 'LOSS'))
+                            cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (int(slot_id),))
                             msg = f"⚡ <b>SELL SUCCESS (Slot {slot_id})</b>\nNET: <b>{net_pnl:,.2f} THB</b>"
                         conn.commit()
                 self._load_state()
@@ -113,8 +113,7 @@ class TitanV18_Full_Strategic:
             else:
                 self.notify(f"❌ <b>API ERROR:</b> {res.get('error')} | {side} Slot {slot_id}")
         except Exception as e: 
-            self.notify(f"⚠️ <b>DB/API ERROR:</b> {e}")
-            # กรณี Error DB หลังจากขายแล้ว ให้พยายามล้างสถานะในตัวแปรเพื่อไม่ให้บอทค้างวนลูปขายซ้ำ
+            self.notify(f"⚠️ <b>DB/STABILITY ERROR:</b> {e}")
             if side == 'sell': self.slots[slot_id]['active'] = False
         return False
 
@@ -124,8 +123,8 @@ class TitanV18_Full_Strategic:
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
-        # --- รายงานแบบดั้งเดิมที่ครบถ้วน (ตามที่คุณต้องการ) ---
-        msg = f"🏛️ <b>TITAN V.18.15.3: DASHBOARD</b>\n📅 <code>{now}</code>\n"
+        # --- รายงานแบบดั้งเดิม (ไม่มีการลดทอน) ---
+        msg = f"🏛️ <b>TITAN V.18.15.4: DASHBOARD</b>\n📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
         msg += f"💰 Price : {p:,.2f} THB\n"
@@ -173,22 +172,21 @@ class TitanV18_Full_Strategic:
                     self.send_dashboard(dx, db, thb, coin)
                     last_dash = time.time()
 
-                # --- BUY LOGIC (ปิดปัญหา All-in ด้วยระยะห่าง 1.5%) ---
                 active_count = sum(1 for s in self.slots.values() if s['active'])
                 if active_count < 2 and dx['r14'] <= self.current_rsi_buy:
                     can_buy = True
                     if active_count == 1:
                         m1_p = next(s['price'] for s in self.slots.values() if s['active'])
                         dist = ((dx['p'] - m1_p) / m1_p) * 100
-                        if dist > -self.buy_distance: can_buy = False # ต้องลงมาต่ำกว่าไม้ 1 อย่างน้อย 1.5%
+                        if dist > -self.buy_distance: can_buy = False 
 
                     if can_buy and dx['p'] > dx['ema'] and db['p'] > db['ema']:
-                        buy_amt = int((thb + (coin * dx['p'])) * 0.45)
+                        # ปรับยอดซื้อให้รองรับเงินที่เหลือน้อยของคุณขณะทดสอบ
+                        buy_amt = int(thb * 0.95) if thb < 500 else int((thb + (coin * dx['p'])) * 0.45)
                         if thb >= buy_amt >= 10:
                             s_id = 1 if not self.slots[1]['active'] else 2
                             self.execute_trade('buy', s_id, dx['p'], buy_amt, dx['atr'])
 
-                # --- SELL LOGIC ---
                 for i, s in self.slots.items():
                     if s['active']:
                         profit = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
@@ -199,4 +197,4 @@ class TitanV18_Full_Strategic:
             time.sleep(20)
 
 if __name__ == "__main__":
-    TitanV18_Full_Strategic().run(
+    TitanV18_Final_Stable().run()
