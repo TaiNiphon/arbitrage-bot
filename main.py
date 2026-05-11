@@ -22,7 +22,7 @@ class TitanV18_The_Master:
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.25: MASTER READY</b>\n<i>ตัวเต็มฉบับสมบูรณ์ (Fix DB & Full Report) พร้อมรบ!</i>")
+        self.notify("🏛️ <b>TITAN V.18.25: MASTER READY</b>\n<i>ตัวเต็ม (Fix DB / 95% Logic / 5-State Report) พร้อมรบ!</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -31,11 +31,11 @@ class TitanV18_The_Master:
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    # สร้างตารางพร้อมตรวจสอบ Column order_id ป้องกัน Error
+                    # สร้างตารางพร้อมตรวจสอบ Column order_id ป้องกัน Error (โครงสร้างที่คุณรันอยู่)
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, 
                         order_id TEXT, open_ts BIGINT, status TEXT)""")
-                    
+
                     cur.execute("""DO $$ BEGIN 
                         BEGIN ALTER TABLE bot_state_v18 ADD COLUMN order_id TEXT; EXCEPTION WHEN others THEN NULL; END;
                     END $$;""")
@@ -43,7 +43,7 @@ class TitanV18_The_Master:
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
                         id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
-                    
+
                     cur.execute("""CREATE TABLE IF NOT EXISTS hourly_equity (
                         ts TIMESTAMP PRIMARY KEY, equity FLOAT)""")
                     conn.commit()
@@ -96,7 +96,7 @@ class TitanV18_The_Master:
                     self.clear_slot_db(i)
                     self.notify(f"⏳ <b>TIMEOUT (Slot {i})</b>\nยกเลิกออเดอร์ค้าง 5 นาที เพื่อความปลอดภัย")
                     continue
-                
+
                 info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": s['oid'], "sd": "buy"})
                 if info and info.get('result', {}).get('status') == 'filled':
                     self.update_to_matched(i, float(info['result']['amt']))
@@ -119,12 +119,12 @@ class TitanV18_The_Master:
         typ = "bid" if side == "buy" else "ask"
         payload = {"sym": self.symbol.lower(), "amt": int(amt_thb) if side == 'buy' else amt_thb, "rat": 0, "typ": "market"}
         res = self.bt_auth("POST", f"/api/v3/market/place-{typ}", payload)
-        
+
         if res and res.get('error') == 0:
             result = res['result']
             real_p = float(result.get('rat', price))
             real_u = float(result.get('amt'))
-            
+
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     if side == 'buy':
@@ -146,21 +146,36 @@ class TitanV18_The_Master:
             return True
         return False
 
-    # --- [5] PERFORMANCE REPORTS (ฉบับสมบูรณ์ 100%) ---
+    # --- [5] PERFORMANCE REPORTS (เวอร์ชันอัปเกรดสถานะละเอียด) ---
     def send_full_dashboard(self, dx, db, thb, coin, mode="DASHBOARD"):
         p = dx['p']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         coin_sym = self.symbol.split('_')[0]
-        
+
+        # --- NEW Logic: 5-State Market Analyzer ---
+        rsi_val = dx['r14']
+        if abs(rsi_val - 50) < 5:
+            state_msg = "↔️ SIDEWAY"
+        elif rsi_val <= 20:
+            state_msg = "🔥 EXTREME DOWNTREND (OVERSOLD)"
+        elif rsi_val <= 45:
+            state_msg = "🔻 DOWNTREND"
+        elif rsi_val >= 80:
+            state_msg = "⚠️ EXTREME UPTREND (OVERBOUGHT)"
+        elif rsi_val >= 55:
+            state_msg = "🚀 UPTREND"
+        else:
+            state_msg = "📈 TRENDING"
+
         msg = f"🏛️ <b>TITAN V.18.25: {mode}</b>\n"
         msg += f"📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
         msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
-        msg += f"📊 State : {'↔️ SIDEWAY' if abs(dx['r14'] - 50) < 5 else '🚀 TRENDING'}\n"
+        msg += f"📊 State : <b>{state_msg}</b>\n" # ใช้สถานะใหม่ที่ละเอียดขึ้น
         msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
-        msg += f"📉 RSI 14: {dx['r14']:.2f} | RSI 200: {dx['r200']:.2f}\n"
+        msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
         msg += f"---------------------------------\n"
         msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
         msg += f"📈 Trend : {'🌕 BULLISH' if db['p'] > db['ema'] else '🌑 BEARISH'}\n"
@@ -173,7 +188,7 @@ class TitanV18_The_Master:
         msg += f"📦 Total Coins: {coin:.4f} {coin_sym}\n"
         msg += f"📈 Total Growth: <b>{growth:+.2f}%</b>\n"
         msg += f"---------------------------------\n"
-        
+
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
                 pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
@@ -183,10 +198,10 @@ class TitanV18_The_Master:
                 msg += f"🟡 <b>SLOT {i}: WAITING (Syncing...)</b>\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ {self.current_rsi_buy})</b>\n\n"
-        
+
         self.notify(msg)
 
-    # --- [6] MAIN RUN ---
+    # --- [6] MAIN RUN (Logic 45/95% ที่คุณรันอยู่) ---
     def run(self):
         last_h = -1
         while True:
@@ -205,8 +220,8 @@ class TitanV18_The_Master:
                 waiting = sum(1 for s in self.slots.values() if s['status'] == 'WAITING')
                 total = matched + waiting
 
+                # --- 45/95% Logic ครบถ้วนตามของเดิม ---
                 if total < 2 and dx['r14'] <= self.current_rsi_buy:
-                    # Logic 45/95%
                     buy_amt = int(thb * 0.95) if (thb < 500 or total == 1) else int((thb + (coin * dx['p'])) * 0.45)
                     if thb >= buy_amt >= 10 and dx['p'] > dx['ema'] and db['p'] > db['ema']:
                         s_id = 1 if self.slots[1]['status'] == 'FREE' else 2
