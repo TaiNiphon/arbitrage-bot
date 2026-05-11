@@ -22,7 +22,7 @@ class TitanV18_The_Master:
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.25: MASTER READY</b>\n<i>ตัวเต็มฉบับสมบูรณ์ พร้อม Logic 45/95% และรายงาน Full-Scale</i>")
+        self.notify("🏛️ <b>TITAN V.18.25: MASTER READY</b>\n<i>ตัวเต็มฉบับสมบูรณ์ (Fix DB & Full Report) พร้อมรบ!</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -31,9 +31,21 @@ class TitanV18_The_Master:
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("CREATE TABLE IF NOT EXISTS trade_history (id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)")
-                    cur.execute("CREATE TABLE IF NOT EXISTS bot_state_v18 (slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, order_id TEXT, open_ts BIGINT, status TEXT)")
-                    cur.execute("CREATE TABLE IF NOT EXISTS hourly_equity (ts TIMESTAMP PRIMARY KEY, equity FLOAT)")
+                    # สร้างตารางพร้อมตรวจสอบ Column order_id ป้องกัน Error
+                    cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
+                        slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, 
+                        order_id TEXT, open_ts BIGINT, status TEXT)""")
+                    
+                    cur.execute("""DO $$ BEGIN 
+                        BEGIN ALTER TABLE bot_state_v18 ADD COLUMN order_id TEXT; EXCEPTION WHEN others THEN NULL; END;
+                    END $$;""")
+
+                    cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
+                        id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
+                        price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
+                    
+                    cur.execute("""CREATE TABLE IF NOT EXISTS hourly_equity (
+                        ts TIMESTAMP PRIMARY KEY, equity FLOAT)""")
                     conn.commit()
         except Exception as e: print(f"DB Init Error: {e}")
 
@@ -46,13 +58,16 @@ class TitanV18_The_Master:
                     self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "ts": 0}, 
                                   2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "ts": 0}}
                     for r in rows:
-                        self.slots[r[0]] = {"status": r[6], "price": float(r[1]), "units": float(r[2]), "sl": float(r[3]), "oid": r[4], "ts": int(r[5])}
-        except: pass
+                        self.slots[r[0]] = {
+                            "status": r[6], "price": float(r[1]), "units": float(r[2]), 
+                            "sl": float(r[3]), "oid": r[4], "ts": int(r[5])
+                        }
+        except Exception as e: print(f"Load State Error: {e}")
 
     def notify(self, message):
         try:
-            requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
-                          json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, timeout=15)
+            url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+            requests.post(url, json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, timeout=15)
         except: pass
 
     # --- [3] BITKUB ENGINE ---
@@ -67,7 +82,9 @@ class TitanV18_The_Master:
     def get_wallet(self):
         res = self.bt_auth("POST", "/api/v3/market/wallet")
         if res and 'result' in res:
-            return float(res['result'].get('THB', 0)), float(res['result'].get(self.symbol.split('_')[0], 0))
+            thb = float(res['result'].get('THB', 0))
+            coin = float(res['result'].get(self.symbol.split('_')[0], 0))
+            return thb, coin
         return 0.0, 0.0
 
     # --- [4] CORE LOGIC & SYNC ---
@@ -100,7 +117,6 @@ class TitanV18_The_Master:
 
     def execute_trade(self, side, slot_id, price, amt_thb, atr):
         typ = "bid" if side == "buy" else "ask"
-        # Market Order เพื่อให้ราคาแมตช์จริง
         payload = {"sym": self.symbol.lower(), "amt": int(amt_thb) if side == 'buy' else amt_thb, "rat": 0, "typ": "market"}
         res = self.bt_auth("POST", f"/api/v3/market/place-{typ}", payload)
         
@@ -113,7 +129,9 @@ class TitanV18_The_Master:
                 with conn.cursor() as cur:
                     if side == 'buy':
                         sl_val = round(real_p - (atr * 2.5), 2)
-                        cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl, order_id, open_ts, status) VALUES (%s, %s, %s, %s, %s, %s, 'MATCHED')",
+                        cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, order_id, open_ts, status) 
+                                       VALUES (%s, %s, %s, %s, %s, %s, 'MATCHED') 
+                                       ON CONFLICT (slot_id) DO UPDATE SET status='MATCHED', price=EXCLUDED.price, units=EXCLUDED.units""",
                                     (slot_id, real_p, real_u, sl_val, str(result['id']), int(time.time())))
                         self.notify(f"📥 <b>BUY SUCCESS (Slot {slot_id})</b>\nPrice: {real_p:,.4f}")
                     else:
@@ -128,32 +146,44 @@ class TitanV18_The_Master:
             return True
         return False
 
-    # --- [5] PERFORMANCE REPORTS ---
+    # --- [5] PERFORMANCE REPORTS (ฉบับสมบูรณ์ 100%) ---
     def send_full_dashboard(self, dx, db, thb, coin, mode="DASHBOARD"):
         p = dx['p']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+        coin_sym = self.symbol.split('_')[0]
         
-        msg = f"🏛️ <b>TITAN V.18.25: {mode}</b>\n📅 <code>{now}</code>\n"
+        msg = f"🏛️ <b>TITAN V.18.25: {mode}</b>\n"
+        msg += f"📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
         msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
-        msg += f"📉 RSI14 : {dx['r14']:.2f} | RSI200: {dx['r200']:.2f}\n"
-        msg += f"🛡️ BTC-G : {'🌕 BULL' if db['p'] > db['ema'] else '🌑 BEAR'} ({db['p']:,.0f})\n"
+        msg += f"📊 State : {'↔️ SIDEWAY' if abs(dx['r14'] - 50) < 5 else '🚀 TRENDING'}\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
+        msg += f"📉 RSI 14: {dx['r14']:.2f} | RSI 200: {dx['r200']:.2f}\n"
         msg += f"---------------------------------\n"
+        msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if db['p'] > db['ema'] else '🌑 BEARISH'}\n"
+        msg += f"💰 BTC P.: {db['p']:,.0f} THB\n"
+        msg += f"---------------------------------\n"
+        msg += f"💰 <b>ASSET SUMMARY</b>\n"
         msg += f"✨ Net Equity : <b>{equity:,.2f} THB</b>\n"
-        msg += f"📈 Growth     : <b>{growth:+.2f}%</b>\n"
         msg += f"💵 Cash (THB) : {thb:,.2f} THB\n"
+        msg += f"🪙 Coin Value : {(coin*p):,.2f} THB\n"
+        msg += f"📦 Total Coins: {coin:.4f} {coin_sym}\n"
+        msg += f"📈 Total Growth: <b>{growth:+.2f}%</b>\n"
         msg += f"---------------------------------\n"
         
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
-                cur_pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
-                msg += f"🟢 SLOT {i}: <b>{cur_pnl:+.2f}%</b>\nCost: {s['price']:,.4f} | Units: {s['units']:.2f}\n\n"
+                pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {coin_sym} ({pnl:+.2f}%)</b>\n"
+                msg += f"🎯 TP: {s['price']*1.03:,.4f} | 🛡️ SL: {s['sl']:,.4f}\n\n"
             elif s['status'] == 'WAITING':
-                msg += f"🟡 SLOT {i}: WAITING\n⏳ Syncing with Bitkub...\n\n"
+                msg += f"🟡 <b>SLOT {i}: WAITING (Syncing...)</b>\n\n"
             else:
-                msg += f"⚪ SLOT {i}: FREE\n\n"
+                msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ {self.current_rsi_buy})</b>\n\n"
+        
         self.notify(msg)
 
     # --- [6] MAIN RUN ---
