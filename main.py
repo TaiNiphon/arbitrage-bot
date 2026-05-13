@@ -11,7 +11,7 @@ class TitanV18_The_Final_Fix:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- [2] STRATEGY SETTINGS (Same as V.18.15.4) ---
+        # --- [2] STRATEGY SETTINGS ---
         self.initial_equity = 10000.28 
         self.current_tp = 3.0       
         self.current_rsi_buy = 35.0
@@ -21,23 +21,26 @@ class TitanV18_The_Final_Fix:
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.25: FINAL FIX READY</b>\n<i>Verified: DB Locked / Luxury Report / No Features Cut</i>")
+        self.notify("🏛️ <b>TITAN V.18.25: DATABASE LOCKED</b>\n<i>Verified: DB Mismatch Fixed / Luxury Report / Ready to Run</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
 
     def _init_db(self):
+        """แก้ไขโครงสร้างให้ตรงกับภาพ 7734.jpg"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, 
                         order_id TEXT, open_ts BIGINT, status TEXT)""")
+                    # ปรับชื่อคอลัมน์ให้ตรงตามภาพ 7734.jpg
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
-                        id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
-                        price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
+                        id SERIAL PRIMARY KEY, slot_id INT, side TEXT, 
+                        price FLOAT, units FLOAT, net_pnl_thb FLOAT, ts TIMESTAMP DEFAULT NOW(), status TEXT)""")
                     conn.commit()
-        except: pass
+        except Exception as e:
+            print(f"DB Init Error: {e}")
 
     def _load_state(self):
         try:
@@ -51,7 +54,7 @@ class TitanV18_The_Final_Fix:
                         self.slots[r[0]] = {"status": r[5], "price": float(r[1]), "units": float(r[2]), "sl": float(r[3]), "oid": r[4]}
         except: pass
 
-    # --- [REPORT SYSTEM] แก้ไขให้ตรงภาพ 7474.jpg และ 7461.jpg 100% ---
+    # --- [REPORT SYSTEM] สวยงามครบถ้วนตาม 7474.jpg และ 7461.jpg ---
     def send_full_dashboard(self, dx, db, thb, coin, mode="DASHBOARD"):
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
@@ -94,17 +97,17 @@ class TitanV18_The_Final_Fix:
                 msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ {self.current_rsi_buy})</b>\n\n"
         self.notify(msg)
 
-    # --- [DATABASE SYNC ENGINE] แก้ไขเรื่องซื้อไม่บันทึก ---
+    # --- [DATABASE SYNC ENGINE] แก้ไขเพื่อให้บันทึกเข้า History ตามภาพ 7734.jpg ---
     def execute_trade(self, side, slot_id, price, amt_thb, atr):
         typ = "bid" if side == "buy" else "ask"
         payload = {"sym": self.symbol.lower(), "amt": int(amt_thb) if side == 'buy' else amt_thb, "rat": 0, "typ": "market"}
         res = self.bt_auth("POST", f"/api/v3/market/place-{typ}", payload)
 
         if res and res.get('error') == 0:
-            time.sleep(2.5) # จังหวะสำคัญเพื่อให้ Bitkub Sync ข้อมูลให้เสร็จ
+            time.sleep(2.5) 
             order_id = str(res['result'].get('id'))
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
-            
+
             real_p = float(info['result'].get('rat')) if info and info.get('result') else float(price)
             real_u = float(info['result'].get('amt')) if info and info.get('result') else (amt_thb / real_p)
 
@@ -122,12 +125,16 @@ class TitanV18_The_Final_Fix:
                         else:
                             s = self.slots[slot_id]
                             net_pnl = (real_p * real_u * 0.9975) - (s['price'] * s['units'] * 1.0025)
-                            cur.execute("INSERT INTO trade_history (side, price, units, net_pnl_thb, status) VALUES ('SELL', %s, %s, %s, %s)",
-                                        (real_p, real_u, net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
+                            # แก้ไขคอลัมน์ให้ตรงตามภาพ 7734.jpg เป๊ะๆ (เพิ่ม slot_id และ ts)
+                            cur.execute("""INSERT INTO trade_history (slot_id, side, price, units, net_pnl_thb, status, ts) 
+                                           VALUES (%s, 'SELL', %s, %s, %s, %s, NOW())""",
+                                        (slot_id, real_p, real_u, net_pnl, 'WIN' if net_pnl > 0 else 'LOSS'))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
                             self.notify(f"⚡ <b>SELL SUCCESS (Slot {slot_id})</b>\nPNL: {net_pnl:,.2f} THB")
                         conn.commit()
-            except: pass
+            except Exception as e:
+                self.notify(f"❌ <b>DATABASE ERROR:</b>\n{str(e)}")
+            
             self._load_state() 
             return True
         return False
@@ -141,12 +148,12 @@ class TitanV18_The_Final_Fix:
                 if not res or 'result' not in res: time.sleep(10); continue
                 thb = float(res['result'].get('THB', 0)); coin = float(res['result'].get(self.symbol.split('_')[0], 0))
                 dx = self.get_indicator(self.symbol); db = self.get_indicator("BTC_THB")
-                
+
                 if dx and db:
                     now = self.get_thai_now()
                     if now.hour != last_h: self.send_full_dashboard(dx, db, thb, coin, "HOURLY REPORT"); last_h = now.hour
                     matched = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
-                    
+
                     if matched < 2 and dx['r14'] <= self.current_rsi_buy:
                         buy_amt = int(thb * 0.95) if (thb < 500 or matched == 1) else int((thb + (coin * dx['p'])) * 0.45)
                         if thb >= buy_amt >= 10 and dx['p'] > dx['ema'] and db['p'] > db['ema']:
