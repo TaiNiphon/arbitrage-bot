@@ -1,7 +1,7 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_The_Precision:
+class TitanV18_Millionaire:
     def __init__(self):
         # --- [1] CONFIGURATION ---
         self.api_key = os.getenv("BITKUB_KEY")
@@ -11,20 +11,17 @@ class TitanV18_The_Precision:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        self.initial_equity = 10000.28 
+        self.initial_equity = 10000.28  # แก้ไขเลขนี้เป็นทุนจริงเมื่ออัดฉีดเงินเพิ่ม
         self.current_rsi_buy = 35.0
-        
-        # --- [2] TRAILING SETTINGS (ระบบขยับ SL ตามกำไร) ---
-        self.tp_threshold = 1.5   # เริ่มขยับ SL เมื่อกำไร +1.5% ขึ้นไป
-        self.trail_distance = 1.5 # ระยะห่างจากราคาสูงสุด 0.7% (กันสะบัด)
+        self.tp_threshold = 1.5   # เริ่ม Trailing เมื่อกำไร +1.5%
+        self.trail_distance = 1.5 # ระยะสะบัด XRP 1.5% ตามสถิติ
 
-        # slots เพิ่ม max_p เพื่อเก็บราคาสูงสุดที่ไม้เคยทำได้
         self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}, 
                       2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}}
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.29: FULL RESTORED</b>\n<i>Status: Trailing SL & Precision History Enabled</i>")
+        self.notify("🏛️ <b>TITAN V.18.50: MILLIONAIRE EDITION</b>\n<i>Status: Ultra-Precision Monitoring Enabled</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -48,7 +45,6 @@ class TitanV18_The_Precision:
                 with conn.cursor() as cur:
                     cur.execute("SELECT slot_id, price, units, sl, order_id, status, max_p FROM bot_state_v18")
                     rows = cur.fetchall()
-                    # Reset default ก่อนโหลด
                     for i in [1, 2]: self.slots[i] = {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}
                     for r in rows:
                         self.slots[r[0]] = {
@@ -57,59 +53,20 @@ class TitanV18_The_Precision:
                         }
         except: pass
 
-    def send_full_dashboard(self, dx, db, thb, coin, mode="DASHBOARD"):
-        p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
-        growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-        coin_sym = self.symbol.split('_')[0]
-
-        if rsi_val <= 30: state_msg = "🔥 OVERSOLD"
-        elif rsi_val <= 45: state_msg = "🔻 DOWNTREND"
-        elif rsi_val >= 70: state_msg = "⚠️ OVERBOUGHT"
-        elif rsi_val >= 55: state_msg = "🚀 TRENDING"
-        else: state_msg = "↔️ SIDEWAY"
-
-        # --- [โครงสร้างรายงานเป๊ะตามภาพ 7762.jpg] ---
-        msg = f"🏛️ <b>TITAN V.18.29: {mode}</b>\n"
-        msg += f"📅 <code>{now}</code>\n"
-        msg += f"---------------------------------\n"
-        msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
-        msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
-        msg += f"📊 State : {state_msg}\n"
-        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
-        msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
-        msg += f"---------------------------------\n"
-        msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
-        msg += f"📈 Trend : {'🌕 BULLISH' if db['p'] > db['ema'] else '🌑 BEARISH'}\n"
-        msg += f"💰 BTC P.: {db['p']:,.0f} THB\n"
-        msg += f"---------------------------------\n"
-        msg += f"💰 <b>ASSET SUMMARY</b>\n"
-        msg += f"✨ Net Equity : <b>{equity:,.2f} THB</b>\n"
-        msg += f"💵 Cash (THB) : {thb:,.2f} THB\n"
-        msg += f"🪙 Coin Value : {(coin*p):,.2f} THB\n"
-        msg += f"📦 Total Coins: {coin:.4f} {coin_sym}\n"
-        msg += f"📈 Total Growth: <b>{growth:+.2f}%</b>\n"
-        msg += f"---------------------------------\n"
-
-        for i, s in self.slots.items():
-            if s['status'] == 'MATCHED':
-                pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {coin_sym} ({pnl:+.2f}%)</b>\n"
-                msg += f"🎯 T-SL: {s['sl']:,.4f} | 🔝 Max: {s['max_p']:,.4f}\n\n"
-            else:
-                msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ {self.current_rsi_buy})</b>\n\n"
-        self.notify(msg)
-
     def execute_trade(self, side, slot_id, price, amt_val, atr, buy_p=0):
         typ = "bid" if side == "buy" else "ask"
+        # ใช้ Market Order สำหรับพอร์ตใหญ่เพื่อเน้นความไวในการหนี SL
         payload = {"sym": self.symbol.lower(), "amt": amt_val, "rat": 0, "typ": "market"}
         res = self.bt_auth("POST", f"/api/v3/market/place-{typ}", payload)
+        
         if res and res.get('error') == 0:
-            time.sleep(3.5) 
+            time.sleep(5) # ให้เวลา Bitkub Match สำหรับ Order ขนาดใหญ่
             order_id = str(res['result'].get('id'))
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
+            
+            # บันทึกข้อมูลจริงจาก Bitkub 100%
             real_p = float(info['result'].get('rat', price)) if info and info.get('result') else price
-            real_u = float(info['result'].get('amt', 0)) if info and info.get('result') else 0.0
+            real_u = float(info['result'].get('amt', 0)) if info and info.get('result') else (amt_val / price if side == 'buy' else amt_val)
             
             try:
                 with psycopg2.connect(self.db_url) as conn:
@@ -120,16 +77,20 @@ class TitanV18_The_Precision:
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, 'MATCHED') 
                                 ON CONFLICT (slot_id) DO UPDATE SET status='MATCHED', price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl, max_p=EXCLUDED.max_p""", 
                                 (slot_id, real_p, real_u, sl_val, real_p, order_id, int(time.time())))
+                            self.notify(f"🟢 <b>[BUY EXECUTED]</b>\nSlot: {slot_id}\nPrice: {real_p:,.2f} THB\nUnits: {real_u:,.4f}\nSL Set: {sl_val:,.2f}")
                         else:
                             net_pnl = (real_p * real_u * 0.9975) - (buy_p * real_u * 1.0025)
                             cur.execute("INSERT INTO trade_history (slot_id, side, price, units, net_pnl_thb, status) VALUES (%s, %s, %s, %s, %s, 'CLOSED')", 
                                 (slot_id, 'SELL', real_p, real_u, net_pnl))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
+                            self.notify(f"🔴 <b>[SELL EXECUTED]</b>\nSlot: {slot_id}\nPrice: {real_p:,.2f} THB\nProfit: {net_pnl:+.2f} THB")
                         conn.commit()
-            except: pass
+            except Exception as e: self.notify(f"❌ <b>DB CRITICAL ERROR:</b> {e}")
             self._load_state() 
             return True
-        return False
+        else:
+            self.notify(f"⚠️ <b>ORDER FAILED:</b> {res.get('error') if res else 'Unknown API Error'}")
+            return False
 
     def run(self):
         last_h = -1
@@ -139,14 +100,17 @@ class TitanV18_The_Precision:
                 res = self.bt_auth("POST", "/api/v3/market/wallet")
                 if res and 'result' in res:
                     thb = float(res['result'].get('THB', 0))
-                    coin = float(res['result'].get(self.symbol.split('_')[0], 0))
+                    coin_sym = self.symbol.split('_')[0]
+                    coin = float(res['result'].get(coin_sym, 0))
                     
-                    # ✅ [แก้ปัญหาจุดเขียวค้าง]: เช็คจากยอดกระเป๋าจริง
-                    if coin < 0.0001:
+                    # --- [MILLIONAIRE SYNC: ระบบตรวจสอบยอดจริงทุกลูป] ---
+                    # ถ้า DB บอกว่ามีเหรียญ แต่กระเป๋าจริงว่างเปล่า (มีการขายมือ)
+                    if coin < 0.0001 and any(s['status'] == 'MATCHED' for s in self.slots.values()):
                         with psycopg2.connect(self.db_url) as conn:
                             with conn.cursor() as cur:
                                 cur.execute("DELETE FROM bot_state_v18")
                                 conn.commit()
+                        self.notify("🧹 <b>SYNC WARNING:</b> ตรวจพบการขายมือ บอทล้างข้อมูลสล็อตให้ตรงกับยอดจริงแล้ว")
                         self._load_state()
 
                     dx = self.get_indicator(self.symbol)
@@ -154,13 +118,13 @@ class TitanV18_The_Precision:
                     if dx and db:
                         now = self.get_thai_now()
                         if now.hour != last_h: 
-                            self.send_full_dashboard(dx, db, thb, coin, "HOURLY REPORT")
+                            self.send_full_dashboard(dx, db, thb, coin, "SYSTEM STATUS")
                             last_h = now.hour
                         
-                        # --- [Sell Logic: Trailing SL] ---
+                        # --- [Institutional Trailing SL Logic] ---
                         for i, s in self.slots.items():
                             if s['status'] == 'MATCHED' and s['units'] > 0:
-                                # 1. อัปเดตราคาสูงสุด (Max Price)
+                                # ปรับปรุงจุดสูงสุด (Max High)
                                 if dx['p'] > s['max_p']:
                                     s['max_p'] = dx['p']
                                     with psycopg2.connect(self.db_url) as conn:
@@ -168,7 +132,7 @@ class TitanV18_The_Precision:
                                             cur.execute("UPDATE bot_state_v18 SET max_p = %s WHERE slot_id = %s", (dx['p'], i))
                                             conn.commit()
 
-                                # 2. เช็คเงื่อนไข Trailing
+                                # คำนวณขยับ SL
                                 current_pnl = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
                                 if current_pnl >= self.tp_threshold:
                                     dynamic_sl = round(s['max_p'] * (1 - (self.trail_distance / 100)), 2)
@@ -179,19 +143,46 @@ class TitanV18_The_Precision:
                                                 cur.execute("UPDATE bot_state_v18 SET sl = %s WHERE slot_id = %s", (dynamic_sl, i))
                                                 conn.commit()
 
-                                # 3. ✅ [แก้ปัญหา SL ไม่ขาย]: เช็คราคาตลาดเทียบ SL ทุกลูป
+                                # เงื่อนไขการตัดขาย
                                 if dx['p'] <= s['sl']: 
                                     self.execute_trade('sell', i, dx['p'], s['units'], dx['atr'], buy_p=s['price'])
                         
                         # --- [Buy Logic] ---
                         matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                         if matched_count < 2 and dx['r14'] <= self.current_rsi_buy:
-                            buy_amt = int(thb * 0.95) if (thb < 500 or matched_count == 1) else int((thb + (coin * dx['p'])) * 0.45)
+                            # ปรับสัดส่วนไม้ตามทุนที่มีจริง
+                            total_asset = thb + (coin * dx['p'])
+                            buy_amt = int(total_asset * 0.48) # ลงไม้ละประมาณ 48% ของพอร์ต
                             if thb >= buy_amt >= 10 and dx['p'] > dx['ema'] and db['p'] > db['ema']:
                                 target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
                                 self.execute_trade('buy', target_slot, dx['p'], buy_amt, dx['atr'])
-            except Exception as e: print(f"Run Error: {e}"); time.sleep(10)
+            except Exception as e: 
+                print(f"Run Error: {e}")
+                time.sleep(10)
             time.sleep(25)
+
+    def send_full_dashboard(self, dx, db, thb, coin, mode="DASHBOARD"):
+        p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
+        growth = ((equity - self.initial_equity) / self.initial_equity) * 100
+        now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+        coin_sym = self.symbol.split('_')[0]
+        
+        msg = f"🏛️ <b>TITAN V.18.50: {mode}</b>\n"
+        msg += f"📅 <code>{now}</code>\n---------------------------------\n"
+        msg += f"📈 <b>MARKET: {self.symbol}</b>\n💰 Price : <b>{p:,.4f} THB</b>\n"
+        msg += f"📊 State : {'🔥 OVERSOLD' if rsi_val <= 30 else '🚀 TRENDING' if rsi_val >= 55 else '↔️ SIDEWAY'}\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
+        msg += f"📉 RSI 14: {rsi_val:.2f}\n---------------------------------\n"
+        msg += f"💰 <b>ASSET SUMMARY</b>\n✨ Net Equity : <b>{equity:,.2f} THB</b>\n"
+        msg += f"💵 Cash (THB) : {thb:,.2f}\n🪙 Coin Value : {(coin*p):,.2f}\n"
+        msg += f"📈 Total Growth: <b>{growth:+.2f}%</b>\n---------------------------------\n"
+        for i, s in self.slots.items():
+            if s['status'] == 'MATCHED':
+                pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
+                msg += f"🟢 <b>SLOT {i}: {pnl:+.2f}%</b>\n🎯 T-SL: {s['sl']:,.4f} | 🔝 Max: {s['max_p']:,.4f}\n\n"
+            else:
+                msg += f"⚪ <b>SLOT {i}: FREE</b> (RSI <= {self.current_rsi_buy})\n\n"
+        self.notify(msg)
 
     def get_indicator(self, symbol):
         try:
@@ -212,9 +203,5 @@ class TitanV18_The_Precision:
         try: return requests.request(method, f"https://api.bitkub.com{path}", headers=headers, data=payload_json, timeout=15).json()
         except: return None
 
-    def notify(self, message):
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, timeout=10)
-        except: pass
-
 if __name__ == "__main__":
-    TitanV18_The_Precision().run()
+    TitanV18_Millionaire().run()
