@@ -12,15 +12,19 @@ class TitanV18_The_Precision:
         self.db_url = os.getenv("DATABASE_URL")
 
         self.initial_equity = 10000.28 
-        self.current_tp = 3.0       
         self.current_rsi_buy = 35.0
+        
+        # --- [2] TRAILING SETTINGS (ระบบขยับ SL ตามกำไร) ---
+        self.tp_threshold = 1.5   # เริ่มขยับ SL เมื่อกำไร +1.5% ขึ้นไป
+        self.trail_distance = 0.7 # ระยะห่างจากราคาสูงสุด 0.7% (กันสะบัด)
 
-        self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None}, 
-                      2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None}}
+        # slots เพิ่ม max_p เพื่อเก็บราคาสูงสุดที่ไม้เคยทำได้
+        self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}, 
+                      2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}}
 
         self._init_db() 
         self._load_state() 
-        self.notify("🏛️ <b>TITAN V.18.29: FULL RESTORED</b>\n<i>Status: Database Sync & Full Report Enabled</i>")
+        self.notify("🏛️ <b>TITAN V.18.29: FULL RESTORED</b>\n<i>Status: Trailing SL & Precision History Enabled</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -31,7 +35,7 @@ class TitanV18_The_Precision:
                 with conn.cursor() as cur:
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, 
-                        order_id TEXT, open_ts BIGINT, status TEXT)""")
+                        order_id TEXT, open_ts BIGINT, status TEXT, max_p FLOAT)""")
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
                         id SERIAL PRIMARY KEY, slot_id INT, side TEXT, 
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, ts TIMESTAMP DEFAULT NOW(), status TEXT)""")
@@ -42,13 +46,15 @@ class TitanV18_The_Precision:
         try:
             with psycopg2.connect(self.db_url, connect_timeout=10) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT slot_id, price, units, sl, order_id, status FROM bot_state_v18")
+                    cur.execute("SELECT slot_id, price, units, sl, order_id, status, max_p FROM bot_state_v18")
                     rows = cur.fetchall()
-                    # Reset current slots status before loading
-                    self.slots[1] = {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None}
-                    self.slots[2] = {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None}
+                    # Reset default ก่อนโหลด
+                    for i in [1, 2]: self.slots[i] = {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}
                     for r in rows:
-                        self.slots[r[0]] = {"status": str(r[5]).upper(), "price": float(r[1]), "units": float(r[2]), "sl": float(r[3]), "oid": r[4]}
+                        self.slots[r[0]] = {
+                            "status": str(r[5]).upper(), "price": float(r[1]), "units": float(r[2]), 
+                            "sl": float(r[3]), "oid": r[4], "max_p": float(r[6] if r[6] else r[1])
+                        }
         except: pass
 
     def send_full_dashboard(self, dx, db, thb, coin, mode="DASHBOARD"):
@@ -63,7 +69,7 @@ class TitanV18_The_Precision:
         elif rsi_val >= 55: state_msg = "🚀 TRENDING"
         else: state_msg = "↔️ SIDEWAY"
 
-        # --- [โครงสร้างรายงานแบบ V.18.27 ที่คุณต้องการ] ---
+        # --- [โครงสร้างรายงานเป๊ะตามภาพ 7762.jpg] ---
         msg = f"🏛️ <b>TITAN V.18.29: {mode}</b>\n"
         msg += f"📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
@@ -89,12 +95,12 @@ class TitanV18_The_Precision:
             if s['status'] == 'MATCHED':
                 pnl = (((p*0.9975) - (s['price']*1.0025)) / (s['price']*1.0025)) * 100
                 msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {coin_sym} ({pnl:+.2f}%)</b>\n"
-                msg += f"🎯 TP: {s['price']*1.03:,.4f} | 🛡️ SL: {s['sl']:,.4f}\n\n"
+                msg += f"🎯 T-SL: {s['sl']:,.4f} | 🔝 Max: {s['max_p']:,.4f}\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ {self.current_rsi_buy})</b>\n\n"
         self.notify(msg)
 
-    def execute_trade(self, side, slot_id, price, amt_val, atr):
+    def execute_trade(self, side, slot_id, price, amt_val, atr, buy_p=0):
         typ = "bid" if side == "buy" else "ask"
         payload = {"sym": self.symbol.lower(), "amt": amt_val, "rat": 0, "typ": "market"}
         res = self.bt_auth("POST", f"/api/v3/market/place-{typ}", payload)
@@ -104,13 +110,20 @@ class TitanV18_The_Precision:
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
             real_p = float(info['result'].get('rat', price)) if info and info.get('result') else price
             real_u = float(info['result'].get('amt', 0)) if info and info.get('result') else 0.0
+            
             try:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
                             sl_val = round(real_p - (atr * 2.5), 2)
-                            cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl, order_id, open_ts, status) VALUES (%s, %s, %s, %s, %s, %s, 'MATCHED') ON CONFLICT (slot_id) DO UPDATE SET status='MATCHED', price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl", (slot_id, real_p, real_u, sl_val, order_id, int(time.time())))
+                            cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status) 
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, 'MATCHED') 
+                                ON CONFLICT (slot_id) DO UPDATE SET status='MATCHED', price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl, max_p=EXCLUDED.max_p""", 
+                                (slot_id, real_p, real_u, sl_val, real_p, order_id, int(time.time())))
                         else:
+                            net_pnl = (real_p * real_u * 0.9975) - (buy_p * real_u * 1.0025)
+                            cur.execute("INSERT INTO trade_history (slot_id, side, price, units, net_pnl_thb, status) VALUES (%s, %s, %s, %s, %s, 'CLOSED')", 
+                                (slot_id, 'SELL', real_p, real_u, net_pnl))
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
                         conn.commit()
             except: pass
@@ -128,11 +141,11 @@ class TitanV18_The_Precision:
                     thb = float(res['result'].get('THB', 0))
                     coin = float(res['result'].get(self.symbol.split('_')[0], 0))
                     
-                    # --- [Logic: ถ้าเหรียญหมดแต่ DB ยังค้าง ให้ลบ DB ทันที] ---
+                    # ✅ [แก้ปัญหาจุดเขียวค้าง]: เช็คจากยอดกระเป๋าจริง
                     if coin < 0.0001:
                         with psycopg2.connect(self.db_url) as conn:
                             with conn.cursor() as cur:
-                                cur.execute("DELETE FROM bot_state_v18 WHERE status='MATCHED'")
+                                cur.execute("DELETE FROM bot_state_v18")
                                 conn.commit()
                         self._load_state()
 
@@ -144,12 +157,31 @@ class TitanV18_The_Precision:
                             self.send_full_dashboard(dx, db, thb, coin, "HOURLY REPORT")
                             last_h = now.hour
                         
-                        # --- [Sell Logic: TP/SL] ---
+                        # --- [Sell Logic: Trailing SL] ---
                         for i, s in self.slots.items():
                             if s['status'] == 'MATCHED' and s['units'] > 0:
-                                profit = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
-                                if profit >= self.current_tp or dx['p'] <= s['sl']: 
-                                    self.execute_trade('sell', i, dx['p'], s['units'], dx['atr'])
+                                # 1. อัปเดตราคาสูงสุด (Max Price)
+                                if dx['p'] > s['max_p']:
+                                    s['max_p'] = dx['p']
+                                    with psycopg2.connect(self.db_url) as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute("UPDATE bot_state_v18 SET max_p = %s WHERE slot_id = %s", (dx['p'], i))
+                                            conn.commit()
+
+                                # 2. เช็คเงื่อนไข Trailing
+                                current_pnl = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
+                                if current_pnl >= self.tp_threshold:
+                                    dynamic_sl = round(s['max_p'] * (1 - (self.trail_distance / 100)), 2)
+                                    if dynamic_sl > s['sl']:
+                                        s['sl'] = dynamic_sl
+                                        with psycopg2.connect(self.db_url) as conn:
+                                            with conn.cursor() as cur:
+                                                cur.execute("UPDATE bot_state_v18 SET sl = %s WHERE slot_id = %s", (dynamic_sl, i))
+                                                conn.commit()
+
+                                # 3. ✅ [แก้ปัญหา SL ไม่ขาย]: เช็คราคาตลาดเทียบ SL ทุกลูป
+                                if dx['p'] <= s['sl']: 
+                                    self.execute_trade('sell', i, dx['p'], s['units'], dx['atr'], buy_p=s['price'])
                         
                         # --- [Buy Logic] ---
                         matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
