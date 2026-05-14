@@ -16,7 +16,7 @@ class TitanV18_The_Precision:
         
         # --- [2] TRAILING SETTINGS (ระบบขยับ SL ตามกำไร) ---
         self.tp_threshold = 1.5   # เริ่มขยับ SL เมื่อกำไร +1.5% ขึ้นไป
-        self.trail_distance = 0.7 # ระยะห่างจากราคาสูงสุด 0.7% (กันสะบัด)
+        self.trail_distance = 1.5 # ระยะห่างจากราคาสูงสุด 0.7% (กันสะบัด)
 
         # slots เพิ่ม max_p เพื่อเก็บราคาสูงสุดที่ไม้เคยทำได้
         self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "oid": None, "max_p": 0.0}, 
