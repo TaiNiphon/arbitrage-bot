@@ -15,7 +15,7 @@ class TitanV18_LuxuryPanicHunter:
         self.initial_equity = 10000.28 
         self.current_tp = 3.0       # เป้ากำไรหลัก
         self.buy_rsi_14 = 28.0      # จุดช้อนซื้อ Panic
-        self.buy_rsi_200 = 42.0     # คุมราคาโซนต่ำภาพใหญ่
+        self.buy_rsi_200 = 55.0     # คุมราคาโซนต่ำภาพใหญ่
         self.trail_dist = 1.5       # ระยะ Trailing Stop (%)
         
         self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0},
