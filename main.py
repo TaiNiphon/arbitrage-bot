@@ -174,7 +174,7 @@ class TitanV18_LuxuryPanicHunter:
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200:
                         total_equity = thb + (coin * dx['p'])
-                        buy_amount = int(total_equity * 0.45) # ปัดเศษทศนิยมทิ้ง ป้องกัน Error
+                        buy_amount = int(thb * 0.95) # ปัดเศษทศนิยมทิ้ง ป้องกัน Error
                         if thb >= buy_amount >= 10:
                             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
                             self.execute_trade('buy', target_slot, dx['p'], buy_amount)
