@@ -11,11 +11,11 @@ class TitanV18_LuxuryPanicHunter:
         self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
         self.db_url = os.getenv("DATABASE_URL")
 
-        # --- [2] STRATEGY CONFIG (Panic Hunter Logic) ---
+        # --- [2] STRATEGY CONFIG (คืนค่าเดิมที่อ่านง่าย) ---
         self.initial_equity = 10000.28 
         self.current_tp = 3.0       
-        self.buy_rsi_14 = 28.0      # ผ่านเงื่อนไข (ปัจจุบัน 14.10)
-        self.buy_rsi_200 = 55.0     # ผ่านเงื่อนไข (ปัจจุบัน 50.99)
+        self.buy_rsi_14 = 28.0      
+        self.buy_rsi_200 = 55.0     
         self.trail_dist = 1.5       
 
         self.slots = {1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0},
@@ -23,7 +23,7 @@ class TitanV18_LuxuryPanicHunter:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99: FINAL FORCE ONLINE</b>\n<i>Status: Money Logic Re-Engineered</i>")
+        self.notify("🏛️ <b>TITAN V.18.99: LUXURY PANIC HUNTER ONLINE</b>\n<i>Status: Full Integrated Engine Ready</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -39,10 +39,9 @@ class TitanV18_LuxuryPanicHunter:
                         id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, 
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT)""")
                     conn.commit()
-        except Exception as e: print(f"DB Init Error: {e}")
+        except: pass
 
     def _load_state(self):
-        """ซิงค์สถานะจาก Database ตลอดเวลา"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -54,26 +53,13 @@ class TitanV18_LuxuryPanicHunter:
                         self.slots[r[0]] = {"status": r[5], "price": r[1], "units": r[2], "sl": r[3], "max_p": r[4]}
         except: pass
 
-    def sync_manual_trade(self, real_coin_balance):
-        db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
-        if db_units > 0 and real_coin_balance < (db_units * 0.1): 
-            with psycopg2.connect(self.db_url) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM bot_state_v18")
-                    conn.commit()
-            self._load_state()
-            self.notify("🧹 <b>MANUAL SALE DETECTED</b>\n<i>Database Cleaned.</i>")
-
     def send_luxury_dashboard(self, dx, db_btc, thb, coin, mode="REPORT"):
-        """รายงานหน้าตาสวยงามเหมือนภาพ 7962.jpg และ 7969.jpg"""
+        """กู้คืนหน้าตารายงานแบบ Luxury 100% ตามภาพ 7962 และ 7969"""
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-        coin_sym = self.symbol.split('_')[0]
-
-        if rsi_val <= 28: state_msg = "🚨 EXTREME PANIC (BUY!)"
-        elif rsi_val <= 35: state_msg = "🔥 PANIC SALE"
-        else: state_msg = "↔️ SIDEWAY"
+        
+        state_msg = "🚨 EXTREME PANIC (BUY!)" if rsi_val <= 28 else "↔️ SIDEWAY"
 
         msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n"
         msg += f"📅 <code>{now}</code>\n"
@@ -83,6 +69,10 @@ class TitanV18_LuxuryPanicHunter:
         msg += f"📊 State : {state_msg}\n"
         msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
         msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
+        msg += f"---------------------------------\n"
+        msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n"
+        msg += f"💰 BTC P.: {db_btc['p']:,.0f} THB\n"
         msg += f"---------------------------------\n"
         msg += f"💰 <b>ASSET SUMMARY</b>\n"
         msg += f"✨ Net Equity : <b>{equity:,.2f} THB</b>\n"
@@ -94,7 +84,7 @@ class TitanV18_LuxuryPanicHunter:
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
                 pnl = ((p * 0.9975) / (s['price'] * 1.0025) - 1) * 100
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {coin_sym} ({pnl:+.2f}%)</b>\n"
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} XRP ({pnl:+.2f}%)</b>\n"
                 msg += f"🎯 TP: {s['price']*1.03:,.4f} | 🛡️ SL: {s['sl']:,.4f}\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ 28.0)</b>\n\n"
@@ -119,13 +109,14 @@ class TitanV18_LuxuryPanicHunter:
                         sl_val = round(real_p * 0.95, 4)
                         cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, status) 
                                        VALUES (%s,%s,%s,%s,%s,%s,'MATCHED')""", (slot_id, real_p, real_u, sl_val, real_p, order_id))
+                        self.notify(f"📥 <b>BUY SUCCESS</b>\nSlot: {slot_id} | Price: {real_p}")
                     else:
                         net_pnl = (real_p * real_u * 0.9975) - (buy_p * real_u * 1.0025)
                         cur.execute("INSERT INTO trade_history (side, price, units, net_pnl_thb, status) VALUES ('SELL', %s,%s,%s,%s)", (real_p, real_u, net_pnl, 'CLOSED'))
                         cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
+                        self.notify(f"⚡ <b>SELL SUCCESS</b>\nProfit: {net_pnl:,.2f} THB")
                     conn.commit()
             self._load_state()
-            self.notify(f"✅ <b>TRADE SUCCESS ({side.upper()})</b>\nPrice: {real_p:,.4f}\nSlot: {slot_id}")
             return True
         return False
 
@@ -133,25 +124,23 @@ class TitanV18_LuxuryPanicHunter:
         last_h = -1
         while True:
             try:
-                self._load_state()
                 res_w = self.bt_auth("POST", "/api/v3/market/wallet")
                 if not res_w: time.sleep(10); continue
-                thb = float(res_w['result'].get('THB', 0)); coin = float(res_w['result'].get(self.symbol.split('_')[0], 0))
+                thb = float(res_w['result'].get('THB', 0)); coin = float(res_w['result'].get('XRP', 0))
 
-                self.sync_manual_trade(coin)
                 dx = self.get_indicator(self.symbol); db_btc = self.get_indicator("BTC_THB")
-
                 if dx and db_btc:
                     now = self.get_thai_now()
                     if now.hour != last_h: self.send_luxury_dashboard(dx, db_btc, thb, coin, "HOURLY REPORT"); last_h = now.hour
 
+                    # Check Exit
                     for i, s in self.slots.items():
                         if s['status'] == 'MATCHED':
                             profit = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
                             if dx['p'] > s['max_p']:
-                                s['max_p'] = dx['p']; 
+                                s['max_p'] = dx['p']
                                 if profit >= 1.5:
-                                    new_sl = round(s['max_p'] * (1 - (self.trail_dist / 100)), 4)
+                                    new_sl = round(s['max_p'] * 0.985, 4)
                                     if new_sl > s['sl']:
                                         s['sl'] = new_sl
                                         with psycopg2.connect(self.db_url) as conn:
@@ -161,9 +150,9 @@ class TitanV18_LuxuryPanicHunter:
                             if profit >= self.current_tp or dx['p'] <= s['sl']:
                                 self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'])
 
-                    # --- [DYNAMIC FORCE BUY LOGIC] ---
-                    matched_slots = [i for i, s in self.slots.items() if s['status'] == 'MATCHED']
-                    if len(matched_slots) < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200:
+                    # --- [BUY LOGIC: แก้ให้ยิงทันที] ---
+                    matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
+                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200:
                         buy_amount = int(thb * 0.95) # ใช้เงินสด 95% ทันที
                         if buy_amount >= 10:
                             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
