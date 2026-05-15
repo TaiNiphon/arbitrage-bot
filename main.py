@@ -131,4 +131,4 @@ class TitanV18_UltimateLuxury:
         except: pass
 
 if __name__ == "__main__":
-    TitanV18_UltimateLuxury().run()
+    TitanV18_UltimateLuxury().run(
