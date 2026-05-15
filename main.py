@@ -1,9 +1,8 @@
 import os, requests, time, hmac, hashlib, json, numpy as np, psycopg2
 from datetime import datetime, timedelta, timezone
 
-class TitanV18_ProfitExecution:
+class TitanV18_FinalHope:
     def __init__(self):
-        # --- [1] CONFIG ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -13,12 +12,12 @@ class TitanV18_ProfitExecution:
 
         self.initial_equity = 10000.28 
         self.buy_rsi_14 = 28.0      
-        self.current_tp = 3.0 # เป้ากำไร 3% จากต้นทุน
+        self.target_profit_pct = 3.0 # TP 3%
         self.slots = {1: {"status": "FREE"}, 2: {"status": "FREE"}}
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN: PROFIT EXECUTION ONLINE</b>\n<i>Status: Zero-Failure Logic Enabled</i>")
+        self.notify("🏛️ <b>TITAN: LUXURY PANIC HUNTER ONLINE</b>\n<i>Status: BTC-Guard Overridden (Buying Enabled)</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone(timedelta(hours=7)))
@@ -38,7 +37,7 @@ class TitanV18_ProfitExecution:
                     self.slots[r[0]] = {"status": r[5], "price": r[1], "units": r[2], "sl": r[3], "max_p": r[4]}
 
     def send_luxury_dashboard(self, dx, db_btc, thb, coin):
-        """รายงานฉบับสมบูรณ์ แก้ไขจุดตกหล่นจากรูป 7971.jpg"""
+        """คืนค่าหน้าตา Luxury 100% ตามภาพ 7971.jpg"""
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -49,6 +48,7 @@ class TitanV18_ProfitExecution:
         msg += f"📈 <b>MARKET: {self.symbol}</b>\n"
         msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
         msg += f"📊 State : {'🚨 EXTREME PANIC (BUY!)' if rsi_val <= 28 else '↔️ SIDEWAY'}\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
         msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
         msg += f"---------------------------------\n"
         msg += f"🛡️ <b>BTC-GUARD STATUS</b>\n"
@@ -58,35 +58,35 @@ class TitanV18_ProfitExecution:
         msg += f"💰 <b>ASSET SUMMARY</b>\n"
         msg += f"✨ Net Equity : <b>{equity:,.2f} THB</b>\n"
         msg += f"💵 Cash (THB) : {thb:,.2f}\n"
+        msg += f"🪙 Coin Value : {coin*p:,.2f}\n"
         msg += f"📈 Total Growth: <b>{growth:+.2f}%</b>\n"
         msg += f"---------------------------------\n"
         for i, s in self.slots.items():
             if s.get('status') == 'MATCHED':
                 pnl = ((p * 0.9975) / (s['price'] * 1.0025) - 1) * 100
                 msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} XRP ({pnl:+.2f}%)</b>\n"
-                msg += f"🎯 TP: {s['price']*1.03:,.4f} | 🛡️ SL: {s['sl']:,.4f}\n"
+                msg += f"🎯 TP: {s['price']*1.03:,.4f} | 🛡️ SL: {s['sl']:,.4f}\n\n"
             else:
-                msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ 28.0)</b>\n"
-        msg += f"---------------------------------\n🔍 <i>Database Status: Verified & Locked</i>"
+                msg += f"⚪ <b>SLOT {i}: FREE (RSI ≤ 28.0)</b>\n\n"
+        msg += f"🔍 <i>Database Status: Verified & Locked</i>"
         self.notify(msg)
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0):
         path = f"/api/v3/market/place-{'bid' if side == 'buy' else 'ask'}"
         res = self.bt_auth("POST", path, {"sym":self.symbol.lower(), "amt":amt_val, "typ":"market"})
         if res and res.get('error') == 0:
-            time.sleep(2)
+            time.sleep(1) # รอ API Update
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     if side == 'buy':
                         cur.execute("INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, status) VALUES (%s,%s,%s,%s,%s,'MATCHED') ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, status='MATCHED'", (slot_id, price, (amt_val/price), (price*0.95), price))
-                        self.notify(f"📥 <b>BUY SUCCESS</b>\nPrice: {price} | Amt: {amt_val} THB")
                     else:
                         pnl = (price * amt_val * 0.9975) - (buy_p * amt_val * 1.0025)
                         cur.execute("INSERT INTO trade_history (side, price, units, net_pnl_thb) VALUES ('SELL', %s, %s, %s)", (price, amt_val, pnl))
                         cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
-                        self.notify(f"⚡ <b>SELL SUCCESS</b>\nProfit: {pnl:,.2f} THB")
                     conn.commit()
             self._load_state()
+            self.notify(f"✅ <b>{side.upper()} EXECUTED</b>\nPrice: {price} | Slot: {slot_id}")
             return True
         return False
 
@@ -98,23 +98,24 @@ class TitanV18_ProfitExecution:
                 thb = float(res_w['result'].get('THB', 0)); coin = float(res_w['result'].get('XRP', 0))
                 dx = self.get_indicator(self.symbol); db_btc = self.get_indicator("BTC_THB")
                 if dx and db_btc:
-                    if self.get_thai_now().hour != last_h: self.send_luxury_dashboard(dx, db_btc, thb, coin); last_h = self.get_thai_now().hour
+                    if self.get_thai_now().hour != last_h:
+                        self.send_luxury_dashboard(dx, db_btc, thb, coin)
+                        last_h = self.get_thai_now().hour
                     
-                    # --- EXIT LOGIC (ขายทำกำไร) ---
+                    # Logic ขาย
                     for i, s in self.slots.items():
                         if s.get('status') == 'MATCHED':
                             profit = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
-                            if profit >= self.current_tp or dx['p'] <= s['sl']:
+                            if profit >= self.target_profit_pct or dx['p'] <= s['sl']:
                                 self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'])
-
-                    # --- ENTRY LOGIC (ซื้อเมื่อ Panic) ---
+                    
+                    # Logic ซื้อ (ถอดเงื่อนไข BTC-Guard ออกแล้ว)
                     if sum(1 for s in self.slots.values() if s.get('status') == 'MATCHED') < 2:
                         if dx['r14'] <= self.buy_rsi_14 and thb >= 10:
                             target = 1 if self.slots[1].get('status') != 'MATCHED' else 2
-                            # ใช้เงิน 99% ของ Cash เพื่อป้องกัน Error เศษสตางค์
-                            self.execute_trade('buy', target, dx['p'], int(thb * 0.99))
+                            self.execute_trade('buy', target, dx['p'], int(thb * 0.98))
             except: pass
-            time.sleep(15) # เช็คทุก 15 วินาทีเพื่อให้ทันราคาดีที่สุด
+            time.sleep(15)
 
     def get_indicator(self, sym):
         try:
@@ -139,4 +140,4 @@ class TitanV18_ProfitExecution:
         except: pass
 
 if __name__ == "__main__":
-    TitanV18_ProfitExecution().run()
+    TitanV18_FinalHope().run()
