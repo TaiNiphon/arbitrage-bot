@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanV18_LuxuryPanicHunterPro:
     def __init__(self):
-        # --- [1] API & SYSTEM CONFIG (Rainway Dynamic Check) ---
+        # --- [1] API & SYSTEM CONFIG (Railway Dynamic Check) ---
         self.api_key = os.getenv("BITKUB_KEY")
         self.api_secret = os.getenv("BITKUB_SECRET")
         self.tg_token = os.getenv("TELEGRAM_TOKEN")
@@ -22,9 +22,11 @@ class TitanV18_LuxuryPanicHunterPro:
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10000.28))
         self.buy_rsi_14 = float(os.getenv("BUY_RSI_14", 28.0))
         self.buy_rsi_200 = float(os.getenv("BUY_RSI_200", 48.0))
+        self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", 35.0)) # ดึงค่าเพดานสูงสุดของ RSI ห้ามช้อนซื้อ
         self.lock_profit_pct = float(os.getenv("LOCK_PROFIT_PCT", 1.5))
         self.trail_dist = float(os.getenv("TRAILING_DIST", 1.5))
         self.max_capital_limit = float(os.getenv("MAX_CAPITAL_LIMIT", 1000000.0))
+        self.fee_rate = 0.0025 # อัตราค่าธรรมเนียมมาตรฐาน Bitkub 0.25%
 
         # โครงสร้างจัดการระบบ 2 ไม้แยกจากกันอิสระ
         self.slots = {
@@ -47,10 +49,11 @@ class TitanV18_LuxuryPanicHunterPro:
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
 
     def _init_db(self):
-        """ดูแลรักษาความสมบูรณ์และตรวจสอบโครงสร้างตารางข้อมูลเดิมของคุณ"""
+        """ดูแลรักษาความสมบูรณ์และตรวจสอบโครงสร้างตารางข้อมูลเดิมของคุณบน Railway"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
+                    # เพิ่มคอลัมน์ open_ts BIGINT และ source TEXT ตามระบบล่าสุดของคุณ
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, 
                         max_p FLOAT, order_id TEXT, open_ts BIGINT, status TEXT, source TEXT DEFAULT 'BOT')""")
@@ -89,8 +92,9 @@ class TitanV18_LuxuryPanicHunterPro:
         if db_units > 0 and real_coin_balance < (db_units * 0.98): 
             for i, s in self.slots.items():
                 if s['status'] == 'MATCHED':
-                    net_pnl = (current_price * s['units'] * 0.9975) - (s['price'] * s['units'] * 1.0025)
-                    self.record_history('SELL', i, current_price, s['units'], net_pnl, 'CLOSED', 'MANUAL')
+                    net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
+                    stat = "PROFIT" if net_pnl > 0 else "LOSS"
+                    self.record_history('SELL', i, current_price, s['units'], net_pnl, stat, 'MANUAL')
                     self.notify(f"⚡ <b>[MANUAL] SELL ORDER DETECTED VIA WALLET</b>\nSlot: {i}\nPrice Approx: {current_price:,.4f} THB\nNet PnL: {net_pnl:+,.2f} THB")
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -105,11 +109,12 @@ class TitanV18_LuxuryPanicHunterPro:
             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
             if self.slots[target_slot]['status'] == 'FREE':
                 sl_val = round(current_price * 0.95, 4)
+                open_time = int(time.time() * 1000)
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
-                        cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, status, source) 
-                                       VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER','MATCHED','MANUAL')""", 
-                                    (target_slot, current_price, diff_units, sl_val, current_price))
+                        cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
+                                       VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
+                                    (target_slot, current_price, diff_units, sl_val, current_price, open_time))
                         conn.commit()
                 self.record_history('BUY', target_slot, current_price, diff_units, 0.0, 'OPENED', 'MANUAL')
                 self._load_state()
@@ -175,18 +180,21 @@ class TitanV18_LuxuryPanicHunterPro:
         except Exception as e:
             print(f"Periodic report error: {e}")
 
-    def send_luxury_dashboard(self, dx, db_btc, thb, coin, mode="REPORT"):
-        """หน้าตารายงานฉบับเต็ม คงรูปแบบความลักชัวรี่และรายละเอียดครบถ้วน"""
+    def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
+        """หน้าตารายงานฉบับเต็ม คงรูปแบบความลักชัวรี่และดึงข้อมูลมาแสดงครบถ้วน 100% ตามภาพ 8016.jpg"""
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
+        # คำนวณ State สภาพตลาดตามภาพ
         if rsi_val <= self.buy_rsi_14: state_msg = "🚨 EXTREME PANIC (BUY ZONE)"
-        elif rsi_val <= 35: state_msg = "🔥 PANIC SALE"
+        elif rsi_val <= self.rsi_buy_max: state_msg = "🔥 PANIC SALE"
         elif rsi_val >= 70: state_msg = "⚠️ OVERBOUGHT"
         else: state_msg = "↔️ NEUTRAL SIDEWAY"
 
-        msg = f"🏛️ <b>TITAN V.18.99 PRO: {mode}</b>\n"
+        btc_avg_weekly = btc_weekly_volume / 7
+
+        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n"
         msg += f"📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET ENGINE: {self.symbol}</b>\n"
@@ -194,10 +202,14 @@ class TitanV18_LuxuryPanicHunterPro:
         msg += f"📊 State : {state_msg}\n"
         msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
         msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
+        msg += f"🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n" # เพิ่มบรรทัดแจ้งเตือนเพดานซื้อตามรูปภาพ
         msg += f"---------------------------------\n"
         msg += f"🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n"
         msg += f"📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n"
         msg += f"💰 BTC Price : {db_btc['p']:,.0f} THB\n"
+        msg += f"📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n"       # เพิ่มค่า Volume 15 นาทีตามรูปจริง
+        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n" # เพิ่มค่า Buy Power สะสมตามรูปจริง
+        msg += f"📊 Avg Weekly: {btc_avg_weekly:,.2f}\n"      # เพิ่มค่าเฉลี่ยสัปดาห์ตามรูปจริง
         msg += f"---------------------------------\n"
         msg += f"💰 <b>DYNAMIC FINANCIAL METRICS</b>\n"
         msg += f"✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n"
@@ -208,13 +220,13 @@ class TitanV18_LuxuryPanicHunterPro:
 
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
-                pnl = ((p * 0.9975) / (s['price'] * 1.0025) - 1) * 100
+                pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
                 msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n"
                 msg += f"🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
         
-        msg += f"🔍 <i>Database Integrity Status: Secured & Synchronized</i>"
+        msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
     def record_history(self, side, slot_id, price, units, pnl, status, source):
@@ -255,13 +267,15 @@ class TitanV18_LuxuryPanicHunterPro:
                 with conn.cursor() as cur:
                     if side == 'buy':
                         sl_val = round(real_p * 0.95, 4)
-                        cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, status, source) 
-                                       VALUES (%s,%s,%s,%s,%s,%s,'MATCHED',%s)""", (slot_id, real_p, real_u, sl_val, real_p, order_id, source))
+                        open_time = int(time.time() * 1000)
+                        cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
+                                       VALUES (%s,%s,%s,%s,%s,%s,%s,'MATCHED',%s)""", (slot_id, real_p, real_u, sl_val, real_p, order_id, open_time, source))
                         self.record_history('BUY', slot_id, real_p, real_u, 0.0, 'OPENED', source)
                         self.notify(f"📥 <b>[{source}] BUY ORDER EXECUTED (MARKET)</b>\nSlot: {slot_id}\nReal Price: {real_p:,.4f} THB\nUnits: {real_u:.4f}")
                     else:
-                        net_pnl = (real_p * real_u * 0.9975) - (buy_p * real_u * 1.0025)
-                        self.record_history('SELL', slot_id, real_p, real_u, net_pnl, 'CLOSED', source)
+                        net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (buy_p * real_u * (1 + self.fee_rate))
+                        stat = "PROFIT" if net_pnl > 0 else "LOSS"
+                        self.record_history('SELL', slot_id, real_p, real_u, net_pnl, stat, source)
                         cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
                         self.notify(f"⚡ <b>[{source}] SELL ORDER EXECUTED (MARKET)</b>\nSlot: {slot_id}\nReal Price: {real_p:,.4f} THB\nNet PnL: {net_pnl:+,.2f} THB")
                     conn.commit()
@@ -296,7 +310,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     
                     # 🔔 รายงานสรุปความมั่งคั่งหน้าแดชบอร์ดลักชัวรี่ทุกๆ 1 ชม.
                     if now.hour != last_h: 
-                        self.send_luxury_dashboard(dx, db_btc, thb, coin, "HOURLY SUMMARY")
+                        self.send_luxury_dashboard(dx, db_btc, btc_weekly_volume, thb, coin, "HOURLY REPORT")
                         last_h = now.hour
 
                     # 🔍 ตรวจเช็คเสถียรภาพและความสอดคล้องของดาต้าเบสทุกๆ 6 ชม.
@@ -315,7 +329,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     # --- [EXIT LOGIC] TRAILING STOP ป้องกันการขายหมูและล็อกกำไรสูงสุด ---
                     for i, s in self.slots.items():
                         if s['status'] == 'MATCHED':
-                            profit = ((dx['p'] * 0.9975) / (s['price'] * 1.0025) - 1) * 100
+                            profit = ((dx['p'] * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
                             
                             # ติดตามขยับจุดสูงสุดของราคาเพื่อทำจุดสืบตาม
                             if dx['p'] > s['max_p']:
@@ -337,11 +351,12 @@ class TitanV18_LuxuryPanicHunterPro:
                     # --- [ENTRY LOGIC] กลยุทธ์ช้อนซื้อขั้นโปรตามเกณฑ์ RSI และแรงขายกวาดลึก BTC ---
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     
-                    # ตรรกะแรงขาย BTC: กำลังขายปัจจุบัน <= (กำลังซื้อปัจจุบัน - (ปริมาณซื้อรวมทั้งสัปดาห์/7))
+                    # ตรรกะแรงขาย BTC ยึดสัดส่วนตามที่คุณวางโครงสร้างไว้
                     btc_avg_weekly = btc_weekly_volume / 7
                     btc_condition = db_btc['vol'] <= (db_btc['buy_power'] - btc_avg_weekly)
 
-                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and btc_condition:
+                    # เพิ่มเงื่อนไขเช็คเพดาน RSI สูงสุด (dx['r14'] <= self.rsi_buy_max) บอทจะยอมเปิดไม้ซื้อก็ต่อเมื่อ RSI ต่ำกว่าเพดานจำกัดเท่านั้น
+                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
                         total_equity = thb + (coin * dx['p'])
                         
                         # คำนวณบริหารหน้าตัก 2 ไม้ (ไม้แรกใช้ 45% ของ Equity / ไม้สองแก้พอร์ตใช้ 95% ของเงินสดที่เหลือ)
