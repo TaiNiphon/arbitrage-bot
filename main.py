@@ -93,9 +93,32 @@ class TitanV18_LuxuryPanicHunterPro:
             for i, s in self.slots.items():
                 if s['status'] == 'MATCHED':
                     net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
-                    stat = "PROFIT" if net_pnl > 0 else "LOSS"
-                    self.record_history('SELL', i, current_price, s['units'], net_pnl, stat, 'MANUAL')
-                    self.notify(f"⚡ <b>[MANUAL] SELL ORDER DETECTED VIA WALLET</b>\nSlot: {i}\nPrice Approx: {current_price:,.4f} THB\nNet PnL: {net_pnl:+,.2f} THB")
+                    
+                    # บันทึกประวัติและส่งรายงานความมั่งคั่งแบบจบบิลทันทีตรงตามดีไซน์รูป 8017.jpg
+                    self.record_history('SELL', i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', 'MANUAL')
+                    
+                    with psycopg2.connect(self.db_url) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
+                            accum_pnl = cur.fetchone()[0]
+                            if accum_pnl is None: accum_pnl = 0.0
+                    
+                    now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+                    msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
+                    msg += f"📅 <code>{now_str}</code>\n"
+                    msg += f"---------------------------------\n"
+                    msg += f"🟢 <b>[SLOT {i}]: [MANUAL] COMPLETE WORK</b>\n"
+                    msg += f"🪙 Closed Asset: {self.symbol}\n"
+                    msg += f"📥 Buy Price    : {s['price']:,.4f} THB\n"
+                    msg += f"⚡ Sell Price   : <b>{current_price:,.4f} THB</b>\n"
+                    msg += f"🪙 Units Traded : {s['units']:.4f} {self.coin_sym}\n"
+                    msg += f"💵 Net PnL (THB): <b>{net_pnl:+,.2f} THB</b>\n"
+                    msg += f"---------------------------------\n"
+                    msg += f"💰 <b>Total Net PnL Accum: {accum_pnl:+,.2f} THB</b>\n"
+                    msg += f"---------------------------------\n"
+                    msg += f"🔍 <i>Manual exit detected via wallet. Database ledger cleared.</i>"
+                    self.notify(msg)
+
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM bot_state_v18")
@@ -118,7 +141,19 @@ class TitanV18_LuxuryPanicHunterPro:
                         conn.commit()
                 self.record_history('BUY', target_slot, current_price, diff_units, 0.0, 'OPENED', 'MANUAL')
                 self._load_state()
-                self.notify(f"📥 <b>[MANUAL] BUY ORDER DETECTED VIA WALLET</b>\nSlot: {target_slot}\nPrice Approx: {current_price:,.4f} THB\nUnits: {diff_units:.4f}")
+                
+                now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+                msg = f"🏛️ <b>TITAN V.18.99: ENTRY REPORT</b>\n"
+                msg += f"📅 <code>{now_str}</code>\n"
+                msg += f"---------------------------------\n"
+                msg += f"📥 <b>[SLOT {target_slot}]: [MANUAL] ORDER EXECUTED</b>\n"
+                msg += f"🪙 Asset Symbol: {self.symbol}\n"
+                msg += f"💰 Entry Price : {current_price:,.4f} THB\n"
+                msg += f"📊 Filled Units: {diff_units:.4f} {self.coin_sym}\n"
+                msg += f"🛡️ Initial SL  : {sl_val:,.4f} THB\n"
+                msg += f"---------------------------------\n"
+                msg += f"🔍 <i>Manual positioning registered inside local ledger.</i>"
+                self.notify(msg)
 
     def check_database_integrity(self):
         """ระบบรายงานเช็คความพร้อมฐานข้อมูลทั้งหมดทุกๆ 6 ชม."""
@@ -202,14 +237,14 @@ class TitanV18_LuxuryPanicHunterPro:
         msg += f"📊 State : {state_msg}\n"
         msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
         msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
-        msg += f"🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n" # เพิ่มบรรทัดแจ้งเตือนเพดานซื้อตามรูปภาพ
+        msg += f"🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n"
         msg += f"---------------------------------\n"
         msg += f"🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n"
         msg += f"📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n"
         msg += f"💰 BTC Price : {db_btc['p']:,.0f} THB\n"
-        msg += f"📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n"       # เพิ่มค่า Volume 15 นาทีตามรูปจริง
-        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n" # เพิ่มค่า Buy Power สะสมตามรูปจริง
-        msg += f"📊 Avg Weekly: {btc_avg_weekly:,.2f}\n"      # เพิ่มค่าเฉลี่ยสัปดาห์ตามรูปจริง
+        msg += f"📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n"
+        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n"
+        msg += f"📊 Avg Weekly: {btc_avg_weekly:,.2f}\n"
         msg += f"---------------------------------\n"
         msg += f"💰 <b>DYNAMIC FINANCIAL METRICS</b>\n"
         msg += f"✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n"
@@ -240,45 +275,78 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"History logging failed: {e}")
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
-        """ระบบสั่งซื้อขายจริง Market Order พร้อมระบบคำนวณและปัดเศษทศนิยมตรงตามเงื่อนไข Bitkub เป๊ะๆ"""
+        """ระบบสั่งซื้อขายจริง Market Order พร้อมระบบรายงานแบบลักชัวรี่ตรงตามรูปแบบรูปภาพ 8017.jpg เป๊ะๆ"""
         if side == "buy":
-            # ปัดเศษเงินทุนที่จะใช้ซื้อให้เป็นจำนวนเต็ม (ป้องกันเศษทศนิยมของบาททำให้ยิงไม่ผ่าน)
             amt_val = float(int(amt_val))
             res = self.bt_auth("POST", "/api/v3/market/place-bid", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
         else:
-            # ปัดเศษจำนวนเหรียญให้มีความยาวทศนิยมตามที่ Bitkub กำหนดของแต่ละคู่เหรียญ ป้องกันการส่งคำสั่งติดขัด
             amt_val = round(float(amt_val), self.precision)
             res = self.bt_auth("POST", "/api/v3/market/place-ask", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
         
         if res and res.get('error') == 0:
-            time.sleep(3)  # เคลียร์เวลาเพื่อรอให้จับคู่สภาพคล่องตลาดเสร็จสิ้น
+            time.sleep(3)  # เคลียร์เวลารอจับคู่สภาพคล่อง
             order_id = str(res['result'].get('id'))
             
-            # ดึงประวัติคำสั่งซื้อขายจริงย้อนกลับ (Order Info) เพื่อเอาราคาเฉลี่ยที่แมตช์ได้จริงมาคำนวณป้องกันราคาคลาดเคลื่อน (Slippage)
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
             real_p = price
             real_u = (amt_val / price) if side == 'buy' else amt_val
             
             if info and info.get('result') and float(info['result'].get('rat', 0)) > 0:
-                real_p = float(info['result']['rat'])  # ราคาเฉลี่ยแท้จริงที่แมตช์ได้จากบิทคับ
-                real_u = float(info['result']['amt'])  # จำนวนหน่วยแท้จริงที่แมตช์ได้จากบิทคับ
+                real_p = float(info['result']['rat'])  
+                real_u = float(info['result']['amt'])  
             
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
+                    now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+                    
                     if side == 'buy':
                         sl_val = round(real_p * 0.95, 4)
                         open_time = int(time.time() * 1000)
                         cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
                                        VALUES (%s,%s,%s,%s,%s,%s,%s,'MATCHED',%s)""", (slot_id, real_p, real_u, sl_val, real_p, order_id, open_time, source))
                         self.record_history('BUY', slot_id, real_p, real_u, 0.0, 'OPENED', source)
-                        self.notify(f"📥 <b>[{source}] BUY ORDER EXECUTED (MARKET)</b>\nSlot: {slot_id}\nReal Price: {real_p:,.4f} THB\nUnits: {real_u:.4f}")
+                        
+                        # ✨ รายงานฝั่งเข้าซื้อลักชัวรี่สไตล์ (ENTRY REPORT)
+                        msg = f"🏛️ <b>TITAN V.18.99: ENTRY REPORT</b>\n"
+                        msg += f"📅 <code>{now_str}</code>\n"
+                        msg += f"---------------------------------\n"
+                        msg += f"📥 <b>[SLOT {slot_id}]: [{source}] ORDER EXECUTED</b>\n"
+                        msg += f"🪙 Asset Symbol: {self.symbol}\n"
+                        msg += f"💰 Entry Price : {real_p:,.4f} THB\n"
+                        msg += f"📊 Filled Units: {real_u:.4f} {self.coin_sym}\n"
+                        msg += f"🛡️ Initial SL  : {sl_val:,.4f} THB\n"
+                        msg += f"---------------------------------\n"
+                        msg += f"🔍 <i>Position secured in database ledger.</i>"
+                        self.notify(msg)
                     else:
                         net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (buy_p * real_u * (1 + self.fee_rate))
                         stat = "PROFIT" if net_pnl > 0 else "LOSS"
                         self.record_history('SELL', slot_id, real_p, real_u, net_pnl, stat, source)
+                        
+                        # ลบสถานะออกจากตารางค้างคลัง
                         cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
-                        self.notify(f"⚡ <b>[{source}] SELL ORDER EXECUTED (MARKET)</b>\nSlot: {slot_id}\nReal Price: {real_p:,.4f} THB\nNet PnL: {net_pnl:+,.2f} THB")
-                    conn.commit()
+                        conn.commit()
+                        
+                        # 💰 วิ่งไปคำนวณหากำไรสะสมสุทธิจากประวัติศาสตร์การปิดไม้จริงทั้งหมดมาโชว์บรรทัดล่างสุด
+                        cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
+                        accum_pnl = cur.fetchone()[0]
+                        if accum_pnl is None: accum_pnl = 0.0
+                        
+                        # 📊 หน้าตารายงาน PERFORMANCE REPORT ถอดแบบจากรูปภาพ 8017.jpg ของคุณเป๊ะๆ 100%
+                        msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
+                        msg += f"📅 <code>{now_str}</code>\n"
+                        msg += f"---------------------------------\n"
+                        msg += f"🟢 <b>[SLOT {slot_id}]: [{source}] COMPLETE WORK</b>\n"
+                        msg += f"🪙 Closed Asset: {self.symbol}\n"
+                        msg += f"📥 Buy Price    : {buy_p:,.4f} THB\n"
+                        msg += f"⚡ Sell Price   : <b>{real_p:,.4f} THB</b>\n"
+                        msg += f"🪙 Units Traded : {real_u:.4f} {self.coin_sym}\n"
+                        msg += f"💵 Net PnL (THB): <b>{net_pnl:+,.2f} THB</b>\n"
+                        msg += f"---------------------------------\n"
+                        msg += f"💰 <b>Total Net PnL Accum: {accum_pnl:+,.2f} THB</b>\n"
+                        msg += f"---------------------------------\n"
+                        msg += f"🔍 <i>Database freed. System returning to standby hunter mode.</i>"
+                        self.notify(msg)
             self._load_state()
             return True
         else:
