@@ -19,7 +19,8 @@ class TitanV18_LuxuryPanicHunterPro:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- [2] MONEY MANAGEMENT & CONFIG PARAMETERS ---
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 10000.28))
+        # แนะนำปรับตรงนี้บน Environment Variable ของ Railway ให้เป็น 1000000.0 ด้วยครับ
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1000000.0))
         self.buy_rsi_14 = float(os.getenv("BUY_RSI_14", 28.0))
         self.buy_rsi_200 = float(os.getenv("BUY_RSI_200", 48.0))
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", 35.0)) 
@@ -43,7 +44,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: LUXURY IRONCLAD ONLINE</b>\n<i>Status: Core Engines Optimized & Fixed!</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: LUXURY IRONCLAD ONLINE</b>\n<i>Status: Core Engines Optimized & Fixed for 1M Capital!</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -71,7 +72,6 @@ class TitanV18_LuxuryPanicHunterPro:
     def _load_state(self):
         """ดึงข้อมูลสถานะล่าสุดจากตารางดาต้าเบสเพื่อทำฟังก์ชันสืบต่อแบบไร้รอยต่อ"""
         try:
-            # รีเซ็ตโครงสร้างความจำก่อนโหลดเพื่อป้องกันข้อมูลเก่าค้าง
             self.slots = {
                 1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"},
                 2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"}
@@ -92,7 +92,6 @@ class TitanV18_LuxuryPanicHunterPro:
         """ระบบตรวจจับความเคลื่อนไหวอัจฉริยะแบบ Real-time แยกแยะสถิติบอทและคนเทรดมือ"""
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
         
-        # 👤 กรณีมีการ "ขายด้วยมือ" ผ่านแอป Bitkub ข้างนอก
         if db_units > 0 and real_coin_balance < (db_units * 0.98): 
             for i, s in self.slots.items():
                 if s['status'] == 'MATCHED':
@@ -127,7 +126,6 @@ class TitanV18_LuxuryPanicHunterPro:
                     conn.commit()
             self._load_state()
             
-        # 👤 กรณีมีการ "ซื้อด้วยมือ" ผ่านแอป Bitkub ข้างนอก
         elif real_coin_balance > (db_units * 1.02) and (real_coin_balance - db_units) * current_price >= 10:
             diff_units = round(real_coin_balance - db_units, self.precision)
             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
@@ -157,7 +155,6 @@ class TitanV18_LuxuryPanicHunterPro:
                 self.notify(msg)
 
     def check_database_integrity(self):
-        """ระบบรายงานเช็คความพร้อมฐานข้อมูลทั้งหมดทุกๆ 6 ชม."""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -181,7 +178,6 @@ class TitanV18_LuxuryPanicHunterPro:
             self.notify(f"⚠️ <b>DB INTEGRITY CRITICAL ERROR</b>: {e}")
 
     def generate_periodic_report(self, period_name, days):
-        """ประมวลผลคำนวณและเก็บบันทึกข้อมูลสรุปการซื้อขายรายสัปดาห์ / รายเดือน"""
         try:
             start_date = datetime.now() - timedelta(days=days)
             with psycopg2.connect(self.db_url) as conn:
@@ -217,7 +213,6 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"Periodic report error: {e}")
 
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
-        """หน้าตารายงานฉบับเต็ม สไตล์ความลักชัวรี่ดึงข้อมูลแม่นยำ 100%"""
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -275,9 +270,8 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"History logging failed: {e}")
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
-        """ระบบสั่งซื้อขายจริง Market Order พร้อมระบบรายงานตรงตามรูปแบบดีไซน์ของคุณ"""
         if side == "buy":
-            amt_val = float(int(amt_val)) # ปรับเศษ THB เป็นจำนวนเต็มป้องกัน API ปฏิเสธ
+            amt_val = float(int(amt_val))
             res = self.bt_auth("POST", "/api/v3/market/place-bid", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
         else:
             amt_val = round(float(amt_val), self.precision)
@@ -408,12 +402,11 @@ class TitanV18_LuxuryPanicHunterPro:
                             if dx['p'] <= s['sl']:
                                 self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
 
-                    # --- [ENTRY LOGIC] แก้ไขตรรกะคณิตศาสตร์ BTC GUARD ให้เปิดรับแรงซื้อขายจริง ---
+                    # --- [ENTRY LOGIC] แก้ไขให้เป็นสายคลาสสิกเพื่อเงินทุน 1 ล้านบาทอย่างสมบูรณ์ ---
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     
-                    # 💡 แก้ไขสูตร: เปรียบเทียบกำลังซื้อปัจจุบันต่อแท่งกับวอลลุ่มเฉลี่ยต่อ 15 นาที เพื่อให้เงื่อนไขมีโอกาสเป็นจริงเมื่อตลาดเกิด Panic
-                    btc_avg_15m = btc_weekly_volume / (7 * 24 * 4) # เฉลี่ยต่อแท่ง 15 นาทีจริงใน 1 สัปดาห์
-                    btc_condition = db_btc['vol'] >= (btc_avg_15m * 1.5) # เกิด Panic Volume มากกว่าปกติ 1.5 เท่า
+                    # ⭐ ปลดล็อกสมการตึงเครียด: ใช้กำลังซื้อของ BTC (ต้องไม่ดิ่งเหวรุนแรง) แทนการบีบโวล์ลุ่ม 1.5 เท่า
+                    btc_condition = db_btc['buy_power'] >= 0.10
 
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
                         total_equity = thb + (coin * dx['p'])
