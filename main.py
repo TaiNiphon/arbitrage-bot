@@ -19,8 +19,8 @@ class TitanV18_LuxuryPanicHunterPro:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- [2] MONEY MANAGEMENT & CONFIG PARAMETERS ---
-        # แนะนำปรับตรงนี้บน Environment Variable ของ Railway ให้เป็น 1000000.0 ด้วยครับ
-        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 1000000.0))
+        # ปรับกลับมาเป็นฐานเงินทุนจริง 2,200 บาท เพื่อให้การคำนวณหน้า Report สวยงามถูกต้องครับ
+        self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2200.0))
         self.buy_rsi_14 = float(os.getenv("BUY_RSI_14", 28.0))
         self.buy_rsi_200 = float(os.getenv("BUY_RSI_200", 48.0))
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", 35.0)) 
@@ -44,7 +44,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: LUXURY IRONCLAD ONLINE</b>\n<i>Status: Core Engines Optimized & Fixed for 1M Capital!</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: LUXURY IRONCLAD ONLINE</b>\n<i>Status: Core Engines Optimized & Fixed for Current Capital!</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -57,7 +57,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute("""CREATE TABLE IF NOT EXISTS bot_state_v18 (
                         slot_id INT PRIMARY KEY, price FLOAT, units FLOAT, sl FLOAT, 
                         max_p FLOAT, order_id TEXT, open_ts BIGINT, status TEXT, source TEXT DEFAULT 'BOT')""")
-                    
+
                     cur.execute("""CREATE TABLE IF NOT EXISTS trade_history (
                         id SERIAL PRIMARY KEY, ts TIMESTAMP DEFAULT NOW(), side TEXT, slot_id INT DEFAULT 0,
                         price FLOAT, units FLOAT, net_pnl_thb FLOAT, status TEXT, source TEXT DEFAULT 'BOT')""")
@@ -91,19 +91,19 @@ class TitanV18_LuxuryPanicHunterPro:
     def sync_manual_trade(self, real_coin_balance, current_price):
         """ระบบตรวจจับความเคลื่อนไหวอัจฉริยะแบบ Real-time แยกแยะสถิติบอทและคนเทรดมือ"""
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
-        
+
         if db_units > 0 and real_coin_balance < (db_units * 0.98): 
             for i, s in self.slots.items():
                 if s['status'] == 'MATCHED':
                     net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                     self.record_history('SELL', i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', 'MANUAL')
-                    
+
                     with psycopg2.connect(self.db_url) as conn:
                         with conn.cursor() as cur:
                             cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
                             accum_pnl = cur.fetchone()[0]
                             if accum_pnl is None: accum_pnl = 0.0
-                    
+
                     now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
                     msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
                     msg += f"📅 <code>{now_str}</code>\n"
@@ -125,7 +125,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute("DELETE FROM bot_state_v18")
                     conn.commit()
             self._load_state()
-            
+
         elif real_coin_balance > (db_units * 1.02) and (real_coin_balance - db_units) * current_price >= 10:
             diff_units = round(real_coin_balance - db_units, self.precision)
             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
@@ -140,7 +140,7 @@ class TitanV18_LuxuryPanicHunterPro:
                         conn.commit()
                 self.record_history('BUY', target_slot, current_price, diff_units, 0.0, 'OPENED', 'MANUAL')
                 self._load_state()
-                
+
                 now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
                 msg = f"🏛️ <b>TITAN V.18.99: ENTRY REPORT</b>\n"
                 msg += f"📅 <code>{now_str}</code>\n"
@@ -184,22 +184,22 @@ class TitanV18_LuxuryPanicHunterPro:
                 with conn.cursor() as cur:
                     cur.execute("SELECT side, net_pnl_thb, source FROM trade_history WHERE ts >= %s", (start_date,))
                     rows = cur.fetchall()
-            
+
             total_trades = len(rows)
             bot_trades = sum(1 for r in rows if r[2] == 'BOT')
             manual_trades = sum(1 for r in rows if r[2] == 'MANUAL')
             total_pnl = sum(float(r[1]) for r in rows if r[1] is not None and r[0] == 'SELL')
-            
+
             sells = [r for r in rows if r[0] == 'SELL']
             wins = sum(1 for r in sells if float(r[1]) > 0)
             win_rate = (wins / len(sells) * 100) if sells else 0.0
-            
+
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("""INSERT INTO periodic_summary (period_type, total_trades, bot_trades, manual_trades, total_pnl, win_rate) 
                                    VALUES (%s, %s, %s, %s, %s, %s)""", (period_name, total_trades, bot_trades, manual_trades, total_pnl, win_rate))
                     conn.commit()
-            
+
             msg = f"📊 <b>TITAN PERIODIC SUMMARY: {period_name}</b>\n"
             msg += f"---------------------------------\n"
             msg += f"🔄 Total Trades Processed: {total_trades} ไม้\n"
@@ -255,7 +255,7 @@ class TitanV18_LuxuryPanicHunterPro:
                 msg += f"🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
-        
+
         msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
@@ -271,28 +271,41 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
         if side == "buy":
-            amt_val = float(int(amt_val))
-            res = self.bt_auth("POST", "/api/v3/market/place-bid", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
+            # --- [SAFETY UPGRADE] ตรวจสอบเงินสดในกระเป๋าจริงแบบ Real-time ก่อนทำการสั่งซื้อ ---
+            try:
+                res_w = self.bt_auth("POST", "/api/v3/market/wallet")
+                real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else 0.0
+            except:
+                real_thb = amt_val
+
+            # ป้องกันปัญหาเศษทศนิยมบานปลายและเงินสดขาดด้วย 2% Buffer Lock
+            safe_buy_amt = min(float(int(amt_val)), real_thb * 0.98)
+            
+            if safe_buy_amt < 500:
+                print(f"Execution Aborted: Calculated buy amount ({safe_buy_amt:.2f} THB) is below Bitkub minimum requirement 500 THB.")
+                return False
+
+            res = self.bt_auth("POST", "/api/v3/market/place-bid", {"sym": self.symbol.lower(), "amt": safe_buy_amt, "typ": "market"})
         else:
             amt_val = round(float(amt_val), self.precision)
             res = self.bt_auth("POST", "/api/v3/market/place-ask", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
-        
+
         if res and res.get('error') == 0:
             time.sleep(3)
             order_id = str(res['result'].get('id'))
-            
+
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
             real_p = price
-            real_u = (amt_val / price) if side == 'buy' else amt_val
-            
+            real_u = (safe_buy_amt / price) if side == 'buy' else amt_val
+
             if info and info.get('result') and float(info['result'].get('rat', 0)) > 0:
                 real_p = float(info['result']['rat'])  
                 real_u = float(info['result']['amt'])  
-            
+
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-                    
+
                     if side == 'buy':
                         sl_val = round(real_p * 0.95, 4)
                         open_time = int(time.time() * 1000)
@@ -300,7 +313,7 @@ class TitanV18_LuxuryPanicHunterPro:
                                        VALUES (%s,%s,%s,%s,%s,%s,%s,'MATCHED',%s)""", (slot_id, real_p, real_u, sl_val, real_p, order_id, open_time, source))
                         conn.commit()
                         self.record_history('BUY', slot_id, real_p, real_u, 0.0, 'OPENED', source)
-                        
+
                         msg = f"🏛️ <b>TITAN V.18.99: ENTRY REPORT</b>\n"
                         msg += f"📅 <code>{now_str}</code>\n"
                         msg += f"---------------------------------\n"
@@ -316,14 +329,14 @@ class TitanV18_LuxuryPanicHunterPro:
                         net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (buy_p * real_u * (1 + self.fee_rate))
                         stat = "PROFIT" if net_pnl > 0 else "LOSS"
                         self.record_history('SELL', slot_id, real_p, real_u, net_pnl, stat, source)
-                        
+
                         cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
                         conn.commit()
-                        
+
                         cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
                         accum_pnl = cur.fetchone()[0]
                         if accum_pnl is None: accum_pnl = 0.0
-                        
+
                         msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
                         msg += f"📅 <code>{now_str}</code>\n"
                         msg += f"---------------------------------\n"
@@ -359,15 +372,15 @@ class TitanV18_LuxuryPanicHunterPro:
                     continue
                 thb = float(res_w['result'].get('THB', 0))
                 coin = float(res_w['result'].get(self.coin_sym, 0))
-                
+
                 dx = self.get_indicator(self.symbol)
                 db_btc = self.get_indicator("BTC_THB")
                 btc_weekly_volume = self.get_btc_weekly_volume()
-                
+
                 if dx and db_btc:
                     self.sync_manual_trade(coin, dx['p'])
                     now = self.get_thai_now()
-                    
+
                     if now.hour != last_h: 
                         self.send_luxury_dashboard(dx, db_btc, btc_weekly_volume, thb, coin, "HOURLY REPORT")
                         last_h = now.hour
@@ -387,7 +400,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     for i, s in self.slots.items():
                         if s['status'] == 'MATCHED':
                             profit = ((dx['p'] * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
-                            
+
                             if dx['p'] > s['max_p']:
                                 s['max_p'] = dx['p']
                                 if profit >= self.lock_profit_pct:
@@ -398,19 +411,17 @@ class TitanV18_LuxuryPanicHunterPro:
                                             with conn.cursor() as cur:
                                                 cur.execute("UPDATE bot_state_v18 SET max_p=%s, sl=%s WHERE slot_id=%s", (s['max_p'], s['sl'], i))
                                                 conn.commit()
-                                                
+
                             if dx['p'] <= s['sl']:
                                 self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
 
-                    # --- [ENTRY LOGIC] แก้ไขให้เป็นสายคลาสสิกเพื่อเงินทุน 1 ล้านบาทอย่างสมบูรณ์ ---
+                    # --- [ENTRY LOGIC] กลไกการแบ่งไม้ล่าส่วนต่างสถิติอย่างปลอดภัย ---
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
-                    
-                    # ⭐ ปลดล็อกสมการตึงเครียด: ใช้กำลังซื้อของ BTC (ต้องไม่ดิ่งเหวรุนแรง) แทนการบีบโวล์ลุ่ม 1.5 เท่า
                     btc_condition = db_btc['buy_power'] >= 0.10
 
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
                         total_equity = thb + (coin * dx['p'])
-                        
+
                         if matched_count == 0:
                             buy_amount = total_equity * 0.45
                         else:
