@@ -280,8 +280,17 @@ class TitanV18_LuxuryPanicHunterPro:
 
             # ป้องกันปัญหาเศษทศนิยมบานปลายและเงินสดขาดด้วย 2% Buffer Lock
             safe_buy_amt = min(float(int(amt_val)), real_thb * 0.98)
-            
+
             if safe_buy_amt < 500:
+                # --- ยิงแจ้งเตือนกรณีเงินช้อนซื้อไม่ถึงเกณฑ์ขั้นต่ำ 500 บาท ---
+                now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+                err_txt = f"⚠️ <b>TITAN SYSTEM WARNING: ORDER ABORTED</b>\n"
+                err_txt += f"📅 <code>{now_str}</code>\n"
+                err_txt += f"---------------------------------\n"
+                err_txt += f"🚫 สั่งซื้อล้มเหลว: ยอดเงินที่จะซื้อ ({safe_buy_amt:,.2f} THB) ต่ำกว่าเกณฑ์ขั้นต่ำ 500 บาทของ Bitkub\n"
+                err_txt += f"💡 แนะนำ: เพิ่มทุนในกระเป๋า หรือตรวจสอบการแบ่งเปอร์เซ็นต์ไม้ในระบบ\n"
+                err_txt += f"---------------------------------\n"
+                self.notify(err_txt)
                 print(f"Execution Aborted: Calculated buy amount ({safe_buy_amt:.2f} THB) is below Bitkub minimum requirement 500 THB.")
                 return False
 
@@ -291,7 +300,7 @@ class TitanV18_LuxuryPanicHunterPro:
             res = self.bt_auth("POST", "/api/v3/market/place-ask", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
 
         if res and res.get('error') == 0:
-            time.sleep(3)
+            time.sleep(5) # ปรับขยายจาก 3 เป็น 5 วินาที เพื่อเพิ่มความเสถียรในการรอให้ Bitkub ออกตั๋วใบเสร็จช่วง Panic Sale
             order_id = str(res['result'].get('id'))
 
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
@@ -354,7 +363,32 @@ class TitanV18_LuxuryPanicHunterPro:
             self._load_state()
             return True
         else:
-            err_msg = res.get('error') if res else 'Unknown Connection Error'
+            # --- [ระบบแจ้งเตือนความผิดพลาดแบบ REAL-TIME เข้า TELEGRAM ที่เพิ่มเข้ามาใหม่] ---
+            err_code = res.get('error') if res else 'Unknown Connection Error'
+            now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+            
+            fail_msg = f"❌ <b>TITAN CRITICAL WARNING: EXECUTION FAILED</b>\n"
+            fail_msg += f"📅 <code>{now_str}</code>\n"
+            fail_msg += f"---------------------------------\n"
+            fail_msg += f"🚨 ตัวบอทไม่สามารถส่งคำสั่ง <b>[{side.upper()}]</b> ไปที่ Bitkub ได้\n"
+            fail_msg += f"🪙 สินทรัพย์: {self.symbol} | สล็อตเป้าหมาย: Slot {slot_id}\n"
+            fail_msg += f"🚫 Bitkub Error Code: <code>{err_code}</code>\n"
+            fail_msg += f"---------------------------------\n"
+            
+            # ทำการแปลผลลัพธ์ Error Code ยอดฮิตเพื่อให้แก้ไขปัญหาได้ทันท่วงที
+            if err_code == 14:
+                fail_msg += f"💡 วิเคราะห์: จำนวนเหรียญไม่เพียงพอสำหรับสั่งขาย หรือทศนิยมเหรียญผิดพลาด\n"
+            elif err_code == 15:
+                fail_msg += f"💡 วิเคราะห์: ยอดเงินสด THB ไม่เพียงพอ (Insufficient Balance)\n"
+            elif err_code == 18:
+                fail_msg += f"💡 วิเคราะห์: ยอดเงินบาทหรือเหรียญต่ำกว่าเกณฑ์ขั้นต่ำ 500 บาท\n"
+            else:
+                fail_msg += f"💡 วิเคราะห์: เกิดข้อผิดพลาดทางเครือข่าย หรือค่า API Keys ได้รับการปฏิเสธสิทธิ์\n"
+                
+            fail_msg += f"---------------------------------\n"
+            fail_msg += f"🔍 <i>โปรดเข้าตรวจสอบกระเป๋าเงินบนแอป Bitkub ด่วนเพื่อตรวจสอบความปลอดภัย</i>"
+            
+            self.notify(fail_msg) # สั่งยิงแจ้งเตือนเข้า Telegram ทันทีให้ผู้ใช้ทราบเรื่อง
             print(f"Execution Error: {err_msg}")
             return False
 
