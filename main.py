@@ -270,24 +270,24 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
         if side == "buy":
-            # --- [SAFETY UPGRADE] ตรวจสอบเงินสดในกระเป๋าจริงแบบ Real-time ก่อนทำการสั่งซื้อ ---
             try:
                 res_w = self.bt_auth("POST", "/api/v3/market/wallet")
                 real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else 0.0
             except:
                 real_thb = amt_val
 
-            # --- [FIXED] บังคับปัดเศษเป็นจำนวนเต็มอินทิเจอร์ (Integer) ป้องกัน Error Code 10 เด็ดขาด ---
-            safe_buy_amt = int(min(float(int(amt_val)), real_thb * 0.98))
+            # --- [FIXED] ป้องกันสัดส่วนชนเพดานวงเงินในกระเป๋าจริง ปัดเป็นเลขจำนวนเต็มบาท และกัน Buffer ไว้ 1% ให้ระบบ Exchange ทำงานราบรื่น ---
+            requested_amt = float(amt_val)
+            max_allowed = real_thb * 0.99
+            safe_buy_amt = int(min(requested_amt, max_allowed))
 
             if safe_buy_amt < 500:
-                # --- ยิงแจ้งเตือนกรณีเงินช้อนซื้อไม่ถึงเกณฑ์ขั้นต่ำ 500 บาท ---
                 now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
                 err_txt = f"⚠️ <b>TITAN SYSTEM WARNING: ORDER ABORTED</b>\n"
                 err_txt += f"📅 <code>{now_str}</code>\n"
                 err_txt += f"---------------------------------\n"
-                err_txt += f"🚫 สั่งซื้อล้มเหลว: ยอดเงินที่จะซื้อ ({safe_buy_amt:,.2f} THB) ต่ำกว่าเกณฑ์ขั้นต่ำ 500 บาทของ Bitkub\n"
-                err_txt += f"💡 แนะนำ: เพิ่มทุนในกระเป๋า หรือตรวจสอบการแบ่งเปอร์เซ็นต์ไม้ในระบบ\n"
+                err_txt += f"🚫 สั่งซื้อล้มเหลว: ยอดเงินที่จะซื้อจริง หลังหัก Buffer ({safe_buy_amt:,.2f} THB) ต่ำกว่าเกณฑ์ขั้นต่ำ 500 บาท\n"
+                err_txt += f"💡 แนะนำ: ทุนในกระเป๋าเหลือน้อยเกินไปสำหรับแบ่งไม้\n"
                 err_txt += f"---------------------------------\n"
                 self.notify(err_txt)
                 print(f"Execution Aborted: Calculated buy amount ({safe_buy_amt:.2f} THB) is below Bitkub minimum requirement 500 THB.")
@@ -299,7 +299,7 @@ class TitanV18_LuxuryPanicHunterPro:
             res = self.bt_auth("POST", "/api/v3/market/place-ask", {"sym": self.symbol.lower(), "amt": amt_val, "typ": "market"})
 
         if res and res.get('error') == 0:
-            time.sleep(5) # ปรับขยายจาก 3 เป็น 5 วินาที เพื่อเพิ่มความเสถียรในการรอให้ Bitkub ออกตั๋วใบเสร็จช่วง Panic Sale
+            time.sleep(5) 
             order_id = str(res['result'].get('id'))
 
             info = self.bt_auth("POST", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
@@ -362,7 +362,6 @@ class TitanV18_LuxuryPanicHunterPro:
             self._load_state()
             return True
         else:
-            # --- [ระบบแจ้งเตือนความผิดพลาดแบบ REAL-TIME เข้า TELEGRAM ที่เพิ่มเข้ามาใหม่] ---
             err_code = res.get('error') if res else 'Unknown Connection Error'
             now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
 
@@ -374,7 +373,6 @@ class TitanV18_LuxuryPanicHunterPro:
             fail_msg += f"🚫 Bitkub Error Code: <code>{err_code}</code>\n"
             fail_msg += f"---------------------------------\n"
 
-            # ทำการแปลผลลัพธ์ Error Code ยอดฮิตเพื่อให้แก้ไขปัญหาได้ทันท่วงที
             if err_code == 14:
                 fail_msg += f"💡 วิเคราะห์: จำนวนเหรียญไม่เพียงพอสำหรับสั่งขาย หรือทศนิยมเหรียญผิดพลาด\n"
             elif err_code == 15:
@@ -387,8 +385,7 @@ class TitanV18_LuxuryPanicHunterPro:
             fail_msg += f"---------------------------------\n"
             fail_msg += f"🔍 <i>โปรดเข้าตรวจสอบกระเป๋าเงินบนแอป Bitkub ด่วนเพื่อตรวจสอบความปลอดภัย</i>"
 
-            self.notify(fail_msg) # สั่งยิงแจ้งเตือนเข้า Telegram ทันทีให้ผู้ใช้ทราบเรื่อง
-            # --- [FIXED] แก้ไขตัวแปรจาก err_msg เป็น err_code เพื่อป้องกันระบบ Crash จาก NameError ---
+            self.notify(fail_msg)
             print(f"Execution Error: {err_code}")
             return False
 
@@ -456,15 +453,15 @@ class TitanV18_LuxuryPanicHunterPro:
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
                         total_equity = thb + (coin * dx['p'])
 
-                        # --- [FIXED] คำนวณเป็นเลขจำนวนเต็มบาท ป้องกันเศษสลึงขาด และล็อกเกณฑ์ขั้นต่ำ 500 บาท ---
+                        # --- [FIXED] เพิ่มสัดส่วนไม้ 1 เป็น 55% หนีโซนเส้นตาย 500 บาท และตั้งเกณฑ์ดักขั้นต่ำของระบบไว้ที่ 550 บาท ---
                         if matched_count == 0:
-                            buy_amount = int(total_equity * 0.45)
-                            if 10 <= buy_amount < 505: 
-                                buy_amount = 505
+                            buy_amount = int(total_equity * 0.55)
+                            if 10 <= buy_amount < 550: 
+                                buy_amount = 550
                         else:
                             buy_amount = int(thb * 0.95)
-                            if 10 <= buy_amount < 505:
-                                buy_amount = 505
+                            if 10 <= buy_amount < 550:
+                                buy_amount = 550
 
                         if buy_amount > self.max_capital_limit:
                             buy_amount = int(self.max_capital_limit)
