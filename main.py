@@ -19,7 +19,6 @@ class TitanV18_LuxuryPanicHunterPro:
         self.db_url = os.getenv("DATABASE_URL")
 
         # --- [2] MONEY MANAGEMENT & CONFIG PARAMETERS ---
-        # ปรับกลับมาเป็นฐานเงินทุนจริง 2,200 บาท เพื่อให้การคำนวณหน้า Report สวยงามถูกต้องครับ
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2200.0))
         self.buy_rsi_14 = float(os.getenv("BUY_RSI_14", 28.0))
         self.buy_rsi_200 = float(os.getenv("BUY_RSI_200", 48.0))
@@ -278,8 +277,8 @@ class TitanV18_LuxuryPanicHunterPro:
             except:
                 real_thb = amt_val
 
-            # ป้องกันปัญหาเศษทศนิยมบานปลายและเงินสดขาดด้วย 2% Buffer Lock
-            safe_buy_amt = min(float(int(amt_val)), real_thb * 0.98)
+            # --- [FIXED] บังคับปัดเศษเป็นจำนวนเต็มอินทิเจอร์ (Integer) ป้องกัน Error Code 10 เด็ดขาด ---
+            safe_buy_amt = int(min(float(int(amt_val)), real_thb * 0.98))
 
             if safe_buy_amt < 500:
                 # --- ยิงแจ้งเตือนกรณีเงินช้อนซื้อไม่ถึงเกณฑ์ขั้นต่ำ 500 บาท ---
@@ -366,7 +365,7 @@ class TitanV18_LuxuryPanicHunterPro:
             # --- [ระบบแจ้งเตือนความผิดพลาดแบบ REAL-TIME เข้า TELEGRAM ที่เพิ่มเข้ามาใหม่] ---
             err_code = res.get('error') if res else 'Unknown Connection Error'
             now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-            
+
             fail_msg = f"❌ <b>TITAN CRITICAL WARNING: EXECUTION FAILED</b>\n"
             fail_msg += f"📅 <code>{now_str}</code>\n"
             fail_msg += f"---------------------------------\n"
@@ -374,7 +373,7 @@ class TitanV18_LuxuryPanicHunterPro:
             fail_msg += f"🪙 สินทรัพย์: {self.symbol} | สล็อตเป้าหมาย: Slot {slot_id}\n"
             fail_msg += f"🚫 Bitkub Error Code: <code>{err_code}</code>\n"
             fail_msg += f"---------------------------------\n"
-            
+
             # ทำการแปลผลลัพธ์ Error Code ยอดฮิตเพื่อให้แก้ไขปัญหาได้ทันท่วงที
             if err_code == 14:
                 fail_msg += f"💡 วิเคราะห์: จำนวนเหรียญไม่เพียงพอสำหรับสั่งขาย หรือทศนิยมเหรียญผิดพลาด\n"
@@ -384,12 +383,13 @@ class TitanV18_LuxuryPanicHunterPro:
                 fail_msg += f"💡 วิเคราะห์: ยอดเงินบาทหรือเหรียญต่ำกว่าเกณฑ์ขั้นต่ำ 500 บาท\n"
             else:
                 fail_msg += f"💡 วิเคราะห์: เกิดข้อผิดพลาดทางเครือข่าย หรือค่า API Keys ได้รับการปฏิเสธสิทธิ์\n"
-                
+
             fail_msg += f"---------------------------------\n"
             fail_msg += f"🔍 <i>โปรดเข้าตรวจสอบกระเป๋าเงินบนแอป Bitkub ด่วนเพื่อตรวจสอบความปลอดภัย</i>"
-            
+
             self.notify(fail_msg) # สั่งยิงแจ้งเตือนเข้า Telegram ทันทีให้ผู้ใช้ทราบเรื่อง
-            print(f"Execution Error: {err_msg}")
+            # --- [FIXED] แก้ไขตัวแปรจาก err_msg เป็น err_code เพื่อป้องกันระบบ Crash จาก NameError ---
+            print(f"Execution Error: {err_code}")
             return False
 
     def run(self):
@@ -456,13 +456,18 @@ class TitanV18_LuxuryPanicHunterPro:
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
                         total_equity = thb + (coin * dx['p'])
 
+                        # --- [FIXED] คำนวณเป็นเลขจำนวนเต็มบาท ป้องกันเศษสลึงขาด และล็อกเกณฑ์ขั้นต่ำ 500 บาท ---
                         if matched_count == 0:
-                            buy_amount = total_equity * 0.45
+                            buy_amount = int(total_equity * 0.45)
+                            if 10 <= buy_amount < 505: 
+                                buy_amount = 505
                         else:
-                            buy_amount = thb * 0.95
+                            buy_amount = int(thb * 0.95)
+                            if 10 <= buy_amount < 505:
+                                buy_amount = 505
 
                         if buy_amount > self.max_capital_limit:
-                            buy_amount = self.max_capital_limit
+                            buy_amount = int(self.max_capital_limit)
 
                         if thb >= buy_amount >= 10:
                             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
