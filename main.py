@@ -11,12 +11,13 @@ from datetime import datetime, timedelta, timezone
 class TitanV18_LuxuryPanicHunterPro:
     def __init__(self):
         # --- [1] API & SYSTEM CONFIG (Railway Dynamic Check) ---
-        self.api_key = os.getenv("BITKUB_KEY")
-        self.api_secret = os.getenv("BITKUB_SECRET")
-        self.tg_token = os.getenv("TELEGRAM_TOKEN")
-        self.tg_chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        self.symbol = os.getenv("SYMBOL", "XRP_THB").upper()
-        self.db_url = os.getenv("DATABASE_URL")
+        # ป้องกัน Error 10 จากช่องว่าง (Whitespace) ที่ซ่อนอยู่ใน Environment Variables
+        self.api_key = str(os.getenv("BITKUB_KEY", "")).strip()
+        self.api_secret = str(os.getenv("BITKUB_SECRET", "")).strip()
+        self.tg_token = str(os.getenv("TELEGRAM_TOKEN", "")).strip()
+        self.tg_chat_id = str(os.getenv("TELEGRAM_CHAT_ID", "")).strip()
+        self.symbol = str(os.getenv("SYMBOL", "XRP_THB")).strip().upper()
+        self.db_url = str(os.getenv("DATABASE_URL", "")).strip()
 
         # --- [2] MONEY MANAGEMENT & CONFIG PARAMETERS ---
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2200.0))
@@ -43,7 +44,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: IRONCLAD TRUE FIXED ONLINE</b>\n<i>Status: Core Engines Patched for API v3 Signature & Error 10 Resolved!</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: IRONCLAD TRUE FIXED ONLINE</b>\n<i>Status: Full Code Restoration & API v3 Error 10 Strict Fix Deployed!</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
@@ -274,7 +275,8 @@ class TitanV18_LuxuryPanicHunterPro:
             except:
                 real_thb = amt_val
 
-            safe_buy_amt = int(min(float(int(amt_val)), real_thb * 0.98))
+            # หักลบค่าธรรมเนียมเบื้องต้นและป้องกันเงินสดไม่พอ
+            safe_buy_amt = min(float(amt_val), real_thb * 0.98)
 
             if safe_buy_amt < 500:
                 now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -288,12 +290,19 @@ class TitanV18_LuxuryPanicHunterPro:
                 print(f"Execution Aborted: Calculated buy amount ({safe_buy_amt:.2f} THB) is below Bitkub minimum requirement 500 THB.")
                 return False
 
-            payload = {"sym": self.symbol.lower(), "amt": int(safe_buy_amt), "typ": "market"}
+            # บังคับปัดเศษทศนิยม 2 ตำแหน่งสำหรับเงินบาท ป้องกัน Json Dump ผิดเพี้ยน
+            payload = {"sym": self.symbol.lower(), "amt": round(float(safe_buy_amt), 2), "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-bid", payload)
-        else:
+
+        elif side == "sell":
+            # บังคับปัดเศษตามความละเอียดเหรียญ (Precision)
             safe_sell_units = round(float(amt_val), self.precision)
             payload = {"sym": self.symbol.lower(), "amt": safe_sell_units, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-ask", payload)
+        
+        else:
+            print("Invalid execution side.")
+            return False
 
         if res and res.get('error') == 0:
             time.sleep(5) 
@@ -302,7 +311,11 @@ class TitanV18_LuxuryPanicHunterPro:
             info_payload = {"sym": self.symbol.lower(), "id": order_id, "sd": side}
             info = self.bt_auth("POST", "/api/v3/market/order-info", info_payload)
             real_p = price
-            real_u = (safe_buy_amt / price) if side == 'buy' else safe_sell_units
+            
+            if side == 'buy':
+                real_u = (safe_buy_amt / price)
+            else:
+                real_u = safe_sell_units
 
             if info and info.get('result') and float(info['result'].get('rat', 0)) > 0:
                 real_p = float(info['result']['rat'])  
@@ -331,7 +344,7 @@ class TitanV18_LuxuryPanicHunterPro:
                         msg += f"---------------------------------\n"
                         msg += f"🔍 <i>Position secured in database ledger.</i>"
                         self.notify(msg)
-                    else:
+                    elif side == 'sell':
                         net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (buy_p * real_u * (1 + self.fee_rate))
                         stat = "PROFIT" if net_pnl > 0 else "LOSS"
                         self.record_history('SELL', slot_id, real_p, real_u, net_pnl, stat, source)
@@ -372,7 +385,7 @@ class TitanV18_LuxuryPanicHunterPro:
             fail_msg += f"---------------------------------\n"
 
             if err_code == 10:
-                fail_msg += f"💡 วิเคราะห์: เกิดข้อผิดพลาดของลายเซ็นต์ดิจิทัล (Invalid Signature) กรุณาตรวจสอบ API Keys / Secret ให้ถูกต้องบน Railway\n"
+                fail_msg += f"💡 วิเคราะห์: เกิดข้อผิดพลาดของลายเซ็นต์ดิจิทัล (Invalid Signature)\nอาจเกิดจากช่องว่างใน API Key หรือทศนิยมเกินขนาดที่ Bitkub รับได้\n"
             elif err_code == 14:
                 fail_msg += f"💡 วิเคราะห์: จำนวนเหรียญไม่เพียงพอสำหรับสั่งขาย หรือทศนิยมเหรียญผิดพลาด\n"
             elif err_code == 15:
@@ -451,7 +464,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     btc_condition = db_btc['buy_power'] >= 0.10
 
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
-                        
+
                         total_equity = thb + (coin * dx['p'])
                         buy_amount = int(total_equity * 0.45)
 
@@ -475,7 +488,7 @@ class TitanV18_LuxuryPanicHunterPro:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=15).json()
             if not res or 'c' not in res: return None
             c = np.array(res['c'], dtype=float); v = np.array(res['v'], dtype=float)
-            
+
             def rsi(prices, period=14):
                 deltas = np.diff(prices)
                 seed = deltas[:period+1]
@@ -518,28 +531,37 @@ class TitanV18_LuxuryPanicHunterPro:
             return float(sum(res['v']))
         except: return 1.0
 
-    def bt_auth(self, method, path, payload=None):
-        """แก้ไขและจัดแจงการ Minify ตัวแปร JSON แบบไร้ช่องว่างอย่างเคร่งครัดตามกฎของ API v3 ป้องกัน Error 10 ลายเซ็นต์หลุด"""
-        ts = str(int(time.time() * 1000))
-        # ใช้การบีบอัดพารามิเตอร์ JSON แบบไม่มีเว้นวรรค (Minify) ป้องกันข้อมูลคีย์ไม่ตรงกับตอนแฮช Signature
-        payload_json = json.dumps(payload, separators=(',', ':'), ensure_ascii=False) if payload else ""
-        
-        sig = hmac.new(
-            self.api_secret.encode('utf-8'), 
-            (ts + method + path + payload_json).encode('utf-8'), 
-            hashlib.sha256
-        ).hexdigest()
-        
-        headers = {
-            'X-BTK-APIKEY': self.api_key, 
-            'X-BTK-TIMESTAMP': ts, 
-            'X-BTK-SIGN': sig, 
-            'Content-Type': 'application/json'
-        }
-        try: 
-            return requests.request(method, f"https://api.bitkub.com{path}", headers=headers, data=payload_json, timeout=15).json()
-        except: 
-            return None
+    def bt_auth(self, method, path, payload=None, retries=3):
+        """แก้ไขโครงสร้างแฮชและ Header เพื่อป้องกัน Error 10 ลายเซ็นต์หลุดโดยสมบูรณ์"""
+        for i in range(retries):
+            try:
+                ts = str(int(time.time() * 1000))
+                # JSON dumps บีบอัดไม่มีช่องว่างเด็ดขาด
+                payload_json = json.dumps(payload, separators=(',', ':'), ensure_ascii=False) if payload else ""
+                
+                # ต่อ String ให้ตรงเป๊ะตามคู่มือ v3 (Timestamp + Method + Path + RequestBody)
+                sig_string = ts + method + path + payload_json
+                sig = hmac.new(
+                    self.api_secret.encode('utf-8'), 
+                    sig_string.encode('utf-8'), 
+                    hashlib.sha256
+                ).hexdigest()
+
+                # เพิ่ม Accept: application/json ตามมาตรฐาน
+                headers = {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'X-BTK-APIKEY': self.api_key, 
+                    'X-BTK-TIMESTAMP': ts, 
+                    'X-BTK-SIGN': sig 
+                }
+                
+                res = requests.request(method, f"https://api.bitkub.com{path}", headers=headers, data=payload_json, timeout=15)
+                return res.json()
+            except Exception as e: 
+                print(f"bt_auth request failed, retrying... {e}")
+                time.sleep(2)
+        return None
 
     def notify(self, message):
         try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, timeout=10)
