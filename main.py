@@ -4,6 +4,7 @@ import time
 import hmac
 import hashlib
 import json
+import math
 import numpy as np
 import psycopg2
 from datetime import datetime, timedelta, timezone
@@ -11,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 class TitanV18_LuxuryPanicHunterPro:
     def __init__(self):
         # --- [1] API & SYSTEM CONFIG (Railway Dynamic Check) ---
-        # ป้องกัน Error 10 จากช่องว่าง (Whitespace) ที่ซ่อนอยู่ใน Environment Variables
         self.api_key = str(os.getenv("BITKUB_KEY", "")).strip()
         self.api_secret = str(os.getenv("BITKUB_SECRET", "")).strip()
         self.tg_token = str(os.getenv("TELEGRAM_TOKEN", "")).strip()
@@ -44,10 +44,15 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: IRONCLAD TRUE FIXED ONLINE</b>\n<i>Status: Full Code Restoration & API v3 Error 10 Strict Fix Deployed!</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: IRONCLAD TRUE FIXED ONLINE</b>\n<i>Status: Full Code Restoration & Real-time Indicator Fix Deployed!</i>")
 
     def get_thai_now(self):
         return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7)))
+
+    def floor_precision(self, val, precision):
+        """ฟังก์ชันปัดเศษลงตามระดับทศนิยม ป้องกันปัญหาขายเหรียญเกินยอดบาลานซ์จริง (Error 14)"""
+        factor = 10 ** precision
+        return math.floor(float(val) * factor) / factor
 
     def _init_db(self):
         try:
@@ -89,67 +94,72 @@ class TitanV18_LuxuryPanicHunterPro:
     def sync_manual_trade(self, real_coin_balance, current_price):
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
 
+        # ตรวจสอบการแอบขายเองผ่านแอปภายนอก (Manual Exit Sync)
         if db_units > 0 and real_coin_balance < (db_units * 0.98): 
-            for i, s in self.slots.items():
-                if s['status'] == 'MATCHED':
-                    net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
-                    self.record_history('SELL', i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', 'MANUAL')
-
-                    with psycopg2.connect(self.db_url) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
-                            accum_pnl = cur.fetchone()[0]
-                            if accum_pnl is None: accum_pnl = 0.0
-
-                    now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-                    msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
-                    msg += f"📅 <code>{now_str}</code>\n"
-                    msg += f"---------------------------------\n"
-                    msg += f"🟢 <b>[SLOT {i}]: [MANUAL] COMPLETE WORK</b>\n"
-                    msg += f"🪙 Closed Asset: {self.symbol}\n"
-                    msg += f"📥 Buy Price    : {s['price']:,.4f} THB\n"
-                    msg += f"⚡ Sell Price   : <b>{current_price:,.4f} THB</b>\n"
-                    msg += f"🪙 Units Traded : {s['units']:.4f} {self.coin_sym}\n"
-                    msg += f"💵 Net PnL (THB): <b>{net_pnl:+,.2f} THB</b>\n"
-                    msg += f"---------------------------------\n"
-                    msg += f"💰 <b>Total Net PnL Accum: {accum_pnl:+,.2f} THB</b>\n"
-                    msg += f"---------------------------------\n"
-                    msg += f"🔍 <i>Manual exit detected via wallet. Database ledger cleared.</i>"
-                    self.notify(msg)
-
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
+                    for i, s in list(self.slots.items()):
+                        if s['status'] == 'MATCHED':
+                            net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
+                            self.record_history('SELL', i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', 'MANUAL')
+                    
                     cur.execute("DELETE FROM bot_state_v18")
                     conn.commit()
+            
+            try:
+                with psycopg2.connect(self.db_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
+                        accum_pnl = cur.fetchone()[0]
+                        if accum_pnl is None: accum_pnl = 0.0
+            except:
+                accum_pnl = 0.0
+
+            now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+            msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
+            msg += f"📅 <code>{now_str}</code>\n"
+            msg += f"---------------------------------\n"
+            msg += f"🟢 <b>[MANUAL SYNC]: EXTERNAL EXIT DETECTED</b>\n"
+            msg += f"🪙 Closed Asset: {self.symbol}\n"
+            msg += f"⚡ Est. Market Price: <b>{current_price:,.4f} THB</b>\n"
+            msg += f"---------------------------------\n"
+            msg += f"💰 <b>Total Net PnL Accum: {accum_pnl:+,.2f} THB</b>\n"
+            msg += f"---------------------------------\n"
+            msg += f"🔍 <i>Manual exit detected via wallet. Database ledger cleared.</i>"
+            self.notify(msg)
             self._load_state()
 
-        elif real_coin_balance > (db_units * 1.02) and (real_coin_balance - db_units) * current_price >= 10:
-            diff_units = round(real_coin_balance - db_units, self.precision)
+        # ตรวจสอบการแอบกดซื้อเองผ่านแอปภายนอก (Manual Entry Sync)
+        elif real_coin_balance > (db_units * 1.02) and (real_coin_balance - db_units) * current_price >= 500:
+            diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
             if self.slots[target_slot]['status'] == 'FREE':
                 sl_val = round(current_price * 0.95, 4)
                 open_time = int(time.time() * 1000)
-                with psycopg2.connect(self.db_url) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
-                                       VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
-                                    (target_slot, current_price, diff_units, sl_val, current_price, open_time))
-                        conn.commit()
-                self.record_history('BUY', target_slot, current_price, diff_units, 0.0, 'OPENED', 'MANUAL')
-                self._load_state()
+                try:
+                    with psycopg2.connect(self.db_url) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
+                                           VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
+                                        (target_slot, current_price, diff_units, sl_val, current_price, open_time))
+                            conn.commit()
+                    self.record_history('BUY', target_slot, current_price, diff_units, 0.0, 'OPENED', 'MANUAL')
+                    self._load_state()
 
-                now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-                msg = f"🏛️ <b>TITAN V.18.99: ENTRY REPORT</b>\n"
-                msg += f"📅 <code>{now_str}</code>\n"
-                msg += f"---------------------------------\n"
-                msg += f"📥 <b>[SLOT {target_slot}]: [MANUAL] ORDER EXECUTED</b>\n"
-                msg += f"🪙 Asset Symbol: {self.symbol}\n"
-                msg += f"💰 Entry Price : {current_price:,.4f} THB\n"
-                msg += f"📊 Filled Units: {diff_units:.4f} {self.coin_sym}\n"
-                msg += f"🛡️ Initial SL  : {sl_val:,.4f} THB\n"
-                msg += f"---------------------------------\n"
-                msg += f"🔍 <i>Manual positioning registered inside local ledger.</i>"
-                self.notify(msg)
+                    now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+                    msg = f"🏛️ <b>TITAN V.18.99: ENTRY REPORT</b>\n"
+                    msg += f"📅 <code>{now_str}</code>\n"
+                    msg += f"---------------------------------\n"
+                    msg += f"📥 <b>[SLOT {target_slot}]: [MANUAL] ORDER REGISTERED</b>\n"
+                    msg += f"🪙 Asset Symbol: {self.symbol}\n"
+                    msg += f"💰 Entry Price : {current_price:,.4f} THB\n"
+                    msg += f"📊 Filled Units: {diff_units:.4f} {self.coin_sym}\n"
+                    msg += f"🛡️ Initial SL  : {sl_val:,.4f} THB\n"
+                    msg += f"---------------------------------\n"
+                    msg += f"🔍 <i>Manual positioning registered inside local ledger.</i>"
+                    self.notify(msg)
+                except Exception as e:
+                    print(f"Manual buy registration error: {e}")
 
     def check_database_integrity(self):
         try:
@@ -267,7 +277,6 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"History logging failed: {e}")
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
-        """ปรับโครงสร้าง Payload คีย์ตรงตาม Spec พารามิเตอร์ของ API v3 ป้องกัน Error 10 ลายเซ็นต์หลุด"""
         if side == "buy":
             try:
                 res_w = self.bt_auth("POST", "/api/v3/market/wallet")
@@ -275,7 +284,6 @@ class TitanV18_LuxuryPanicHunterPro:
             except:
                 real_thb = amt_val
 
-            # หักลบค่าธรรมเนียมเบื้องต้นและป้องกันเงินสดไม่พอ
             safe_buy_amt = min(float(amt_val), real_thb * 0.98)
 
             if safe_buy_amt < 500:
@@ -287,21 +295,18 @@ class TitanV18_LuxuryPanicHunterPro:
                 err_txt += f"💡 แนะนำ: เพิ่มทุนในกระเป๋า หรือตรวจสอบมูลค่าพอร์ตรวม\n"
                 err_txt += f"---------------------------------\n"
                 self.notify(err_txt)
-                print(f"Execution Aborted: Calculated buy amount ({safe_buy_amt:.2f} THB) is below Bitkub minimum requirement 500 THB.")
                 return False
 
-            # บังคับปัดเศษทศนิยม 2 ตำแหน่งสำหรับเงินบาท ป้องกัน Json Dump ผิดเพี้ยน
             payload = {"sym": self.symbol.lower(), "amt": round(float(safe_buy_amt), 2), "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-bid", payload)
 
         elif side == "sell":
-            # บังคับปัดเศษตามความละเอียดเหรียญ (Precision)
-            safe_sell_units = round(float(amt_val), self.precision)
+            # ปรับมาใช้ระบบ Floor Cut ป้องกันปัญหาเศษทศนิยมปัดขึ้นทำให้เกิด Error 14
+            safe_sell_units = self.floor_precision(amt_val, self.precision)
             payload = {"sym": self.symbol.lower(), "amt": safe_sell_units, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-ask", payload)
         
         else:
-            print("Invalid execution side.")
             return False
 
         if res and res.get('error') == 0:
@@ -311,15 +316,15 @@ class TitanV18_LuxuryPanicHunterPro:
             info_payload = {"sym": self.symbol.lower(), "id": order_id, "sd": side}
             info = self.bt_auth("POST", "/api/v3/market/order-info", info_payload)
             real_p = price
-            
-            if side == 'buy':
-                real_u = (safe_buy_amt / price)
-            else:
-                real_u = safe_sell_units
+            real_u = (safe_buy_amt / price) if side == 'buy' else safe_sell_units
 
-            if info and info.get('result') and float(info['result'].get('rat', 0)) > 0:
-                real_p = float(info['result']['rat'])  
-                real_u = float(info['result']['amt'])  
+            # พัฒนาระบบดึงข้อมูลแบบ Fallback Keys ป้องกันปัญหารูปแบบ JSON Bitkub v3 แกว่ง
+            if info and info.get('result'):
+                res_data = info['result']
+                if isinstance(res_data, list) and len(res_data) > 0:
+                    res_data = res_data[0]
+                real_p = float(res_data.get('rate', res_data.get('rat', res_data.get('price', real_p))))
+                real_u = float(res_data.get('amount', res_data.get('amt', res_data.get('quantity', real_u))))
 
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -352,9 +357,12 @@ class TitanV18_LuxuryPanicHunterPro:
                         cur.execute("DELETE FROM bot_state_v18 WHERE slot_id=%s", (slot_id,))
                         conn.commit()
 
-                        cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
-                        accum_pnl = cur.fetchone()[0]
-                        if accum_pnl is None: accum_pnl = 0.0
+                        try:
+                            cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL'")
+                            accum_pnl = cur.fetchone()[0]
+                            if accum_pnl is None: accum_pnl = 0.0
+                        except:
+                            accum_pnl = 0.0
 
                         msg = f"🏛️ <b>TITAN V.18.99: PERFORMANCE REPORT</b>\n"
                         msg += f"📅 <code>{now_str}</code>\n"
@@ -397,9 +405,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
             fail_msg += f"---------------------------------\n"
             fail_msg += f"🔍 <i>โปรดเข้าตรวจสอบกระเป๋าเงินบนแอป Bitkub ด่วนเพื่อตรวจสอบความปลอดภัย</i>"
-
             self.notify(fail_msg)
-            print(f"Execution Error: {err_code}")
             return False
 
     def run(self):
@@ -459,12 +465,11 @@ class TitanV18_LuxuryPanicHunterPro:
                             if dx['p'] <= s['sl']:
                                 self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
 
-                    # --- [ENTRY LOGIC] ระบบคำนวณเงินทุนสอดคล้องกับพอร์ตรวมอย่างสมบูรณ์แบบ ---
+                    # --- [ENTRY LOGIC] ระบบคำนวณเงินทุน ---
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     btc_condition = db_btc['buy_power'] >= 0.10
 
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and btc_condition:
-
                         total_equity = thb + (coin * dx['p'])
                         buy_amount = int(total_equity * 0.45)
 
@@ -483,40 +488,46 @@ class TitanV18_LuxuryPanicHunterPro:
             time.sleep(25)
 
     def get_indicator(self, symbol):
-        """ระบบคำนวณค่า RSI แท้ตรงตามมาตรฐาน TradingView (Wilder's Smoothing) 100%"""
+        """ระบบคำนวณค่า RSI แท้ตรงตามมาตรฐาน TradingView (Wilder's Smoothing) และคำนวณ EMA แท้จริง 100%"""
         try:
-            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=15).json()
-            if not res or 'c' not in res: return None
-            c = np.array(res['c'], dtype=float); v = np.array(res['v'], dtype=float)
+            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=15)
+            if res.status_code != 200: return None
+            data = res.json()
+            if not data or 'c' not in data: return None
+            c = np.array(data['c'], dtype=float); v = np.array(data['v'], dtype=float)
+
+            if len(c) < 200: return None
 
             def rsi(prices, period=14):
+                if len(prices) < period + 1: return 50.0
                 deltas = np.diff(prices)
-                seed = deltas[:period+1]
-                up = seed[seed >= 0].sum() / period
+                seed = deltas[:period]
+                up = seed[seed > 0].sum() / period
                 down = -seed[seed < 0].sum() / period
-                rs = up / (down + 1e-9)
-                rsi_vals = np.zeros_like(prices)
-                rsi_vals[:period+1] = 100. - 100. / (1. + rs)
-
-                for i in range(period+1, len(prices)):
-                    delta = deltas[i-1]
-                    if delta > 0:
-                        upval = delta
-                        downval = 0.
-                    else:
-                        upval = 0.
-                        downval = -delta
+                
+                # ลูปเกลี่ยค่าแบบ Wilder's Smoothing แท้โดยไม่ซ้ำซ้อนตำแหน่งดัชนี
+                for i in range(period, len(deltas)):
+                    delta = deltas[i]
+                    upval = delta if delta > 0 else 0.0
+                    downval = -delta if delta < 0 else 0.0
                     up = (up * (period - 1) + upval) / period
                     down = (down * (period - 1) + downval) / period
-                    rs = up / (down + 1e-9)
-                    rsi_vals[i] = 100. - 100. / (1. + rs)
-                return rsi_vals[-1]
+                
+                rs = up / (down + 1e-9)
+                return 100.0 - (100.0 / (1.0 + rs))
+
+            def ema(prices, period=200):
+                alpha = 2 / (period + 1)
+                ema_val = np.mean(prices[:period])
+                for p in prices[period:]:
+                    ema_val = alpha * p + (1 - alpha) * ema_val
+                return ema_val
 
             return {
                 "p": float(c[-1]), 
                 "r14": float(rsi(c, 14)), 
                 "r200": float(rsi(c, 200)), 
-                "ema": float(np.mean(c[-200:])), 
+                "ema": float(ema(c, 200)), 
                 "vol": float(v[-1]), 
                 "buy_power": float(np.mean(v[-14:]))
             }
@@ -526,20 +537,18 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def get_btc_weekly_volume(self):
         try:
-            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15).json()
-            if not res or 'v' not in res: return 1.0
-            return float(sum(res['v']))
+            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15)
+            if res.status_code != 200: return 1.0
+            data = res.json()
+            if not data or 'v' not in data: return 1.0
+            return float(sum(data['v']))
         except: return 1.0
 
     def bt_auth(self, method, path, payload=None, retries=3):
-        """แก้ไขโครงสร้างแฮชและ Header เพื่อป้องกัน Error 10 ลายเซ็นต์หลุดโดยสมบูรณ์"""
         for i in range(retries):
             try:
                 ts = str(int(time.time() * 1000))
-                # JSON dumps บีบอัดไม่มีช่องว่างเด็ดขาด
                 payload_json = json.dumps(payload, separators=(',', ':'), ensure_ascii=False) if payload else ""
-                
-                # ต่อ String ให้ตรงเป๊ะตามคู่มือ v3 (Timestamp + Method + Path + RequestBody)
                 sig_string = ts + method + path + payload_json
                 sig = hmac.new(
                     self.api_secret.encode('utf-8'), 
@@ -547,7 +556,6 @@ class TitanV18_LuxuryPanicHunterPro:
                     hashlib.sha256
                 ).hexdigest()
 
-                # เพิ่ม Accept: application/json ตามมาตรฐาน
                 headers = {
                     'Accept': 'application/json',
                     'Content-Type': 'application/json',
@@ -557,7 +565,8 @@ class TitanV18_LuxuryPanicHunterPro:
                 }
                 
                 res = requests.request(method, f"https://api.bitkub.com{path}", headers=headers, data=payload_json, timeout=15)
-                return res.json()
+                if res.status_code == 200:
+                    return res.json()
             except Exception as e: 
                 print(f"bt_auth request failed, retrying... {e}")
                 time.sleep(2)
