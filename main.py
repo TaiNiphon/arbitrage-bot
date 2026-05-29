@@ -135,13 +135,18 @@ class TitanV18_LuxuryPanicHunterPro:
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
 
         if db_units > 0 and real_coin_balance < (db_units * 0.98): 
+            # รวบรวมข้อมูลก่อนลบ
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
                     for i, s in list(self.slots.items()):
                         if s['status'] == 'MATCHED' and s['price'] > 0:
                             net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
-                            self.record_history('SELL', i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', 'MANUAL')
+                            # บันทึกลง history ก่อนลบเสมอ
+                            cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
+                                           VALUES ('SELL', %s, %s, %s, %s, %s, 'MANUAL')""", 
+                                           (i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS'))
 
+                    # ลบ state หลังจากบันทึกประวัติแล้ว
                     cur.execute("DELETE FROM bot_state_v18")
                     conn.commit()
 
@@ -164,7 +169,7 @@ class TitanV18_LuxuryPanicHunterPro:
             msg += f"---------------------------------\n"
             msg += f"💰 <b>Total Net PnL Accum: {accum_pnl:+,.2f} THB</b>\n"
             msg += f"---------------------------------\n"
-            msg += f"🔍 <i>Manual exit detected via wallet. Database ledger cleared.</i>"
+            msg += f"🔍 <i>Manual exit detected. Ledger updated & Database synced.</i>"
             self.notify(msg)
             self._load_state()
 
@@ -180,8 +185,10 @@ class TitanV18_LuxuryPanicHunterPro:
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
                                            VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
                                         (target_slot, current_price, diff_units, sl_val, current_price, open_time))
+                            
+                            cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
+                                           VALUES ('BUY', %s, %s, %s, 0.0, 'OPENED', 'MANUAL')""", (target_slot, current_price, diff_units))
                             conn.commit()
-                    self.record_history('BUY', target_slot, current_price, diff_units, 0.0, 'OPENED', 'MANUAL')
                     self._load_state()
 
                     now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -348,21 +355,17 @@ class TitanV18_LuxuryPanicHunterPro:
                 real_thb = amt_val
 
             safe_buy_amt = min(float(amt_val), real_thb * 0.98)
-
-            if safe_buy_amt < 500:
-                return False
+            if safe_buy_amt < 500: return False
 
             buy_amt = round(float(safe_buy_amt), 2)
-            if buy_amt == int(buy_amt):
-                buy_amt = int(buy_amt)
+            if buy_amt == int(buy_amt): buy_amt = int(buy_amt)
 
             payload = {"sym": self.symbol.lower(), "amt": buy_amt, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-bid", payload)
 
         elif side == "sell":
             safe_sell_units = self.floor_precision(amt_val, self.precision)
-            if safe_sell_units == int(safe_sell_units):
-                safe_sell_units = int(safe_sell_units)
+            if safe_sell_units == int(safe_sell_units): safe_sell_units = int(safe_sell_units)
 
             payload = {"sym": self.symbol.lower(), "amt": safe_sell_units, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-ask", payload)
@@ -377,12 +380,11 @@ class TitanV18_LuxuryPanicHunterPro:
             info_payload = {"sym": self.symbol.lower(), "id": order_id, "sd": side}
             info = self.bt_auth("GET", "/api/v3/market/order-info", info_payload)
             real_p = price
-            real_u = (safe_buy_amt / price) if side == 'buy' else safe_sell_units
+            real_u = (amt_val / price) if side == 'buy' else safe_sell_units
 
             if info and info.get('result'):
                 res_data = info['result']
-                if isinstance(res_data, list) and len(res_data) > 0:
-                    res_data = res_data[0]
+                if isinstance(res_data, list) and len(res_data) > 0: res_data = res_data[0]
                 real_p = float(res_data.get('rate', res_data.get('rat', res_data.get('price', real_p))))
                 real_u = float(res_data.get('amount', res_data.get('amt', res_data.get('quantity', real_u))))
 
@@ -398,14 +400,16 @@ class TitanV18_LuxuryPanicHunterPro:
                             self.record_history('BUY', slot_id, real_p, real_u, 0.0, 'MATCHED', source)
 
                         elif side == 'sell':
-                            cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
+                            # บันทึกประวัติก่อนลบ
                             s = self.slots[slot_id]
                             if s['price'] > 0:
                                 net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                             else:
                                 net_pnl = 0.0
                             self.record_history('SELL', slot_id, real_p, real_u, net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', source)
-
+                            
+                            cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
+                        
                         conn.commit()
                 self._load_state()
                 return True
