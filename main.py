@@ -222,6 +222,22 @@ class TitanV18_LuxuryPanicHunterPro:
         except Exception as e:
             self.notify(f"⚠️ <b>DB INTEGRITY CRITICAL ERROR</b>: {e}")
 
+    def get_pnl_stats(self):
+        try:
+            with psycopg2.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT net_pnl_thb FROM trade_history WHERE side='SELL' ORDER BY ts DESC LIMIT 1")
+                    last = cur.fetchone()
+                    last_pnl = last[0] if last else 0.0
+
+                    today = self.get_thai_now().date()
+                    cur.execute("SELECT SUM(net_pnl_thb) FROM trade_history WHERE side='SELL' AND ts::date = %s", (today,))
+                    today_pnl = cur.fetchone()[0]
+                    today_pnl = today_pnl if today_pnl else 0.0
+            return last_pnl, today_pnl
+        except:
+            return 0.0, 0.0
+
     def generate_periodic_report(self, period_name, days):
         try:
             start_date = datetime.now() - timedelta(days=days)
@@ -261,6 +277,8 @@ class TitanV18_LuxuryPanicHunterPro:
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+        
+        last_pnl, today_pnl = self.get_pnl_stats()
 
         if rsi_val <= self.buy_rsi_14: state_msg = "🚨 EXTREME PANIC (BUY ZONE)"
         elif rsi_val <= self.rsi_buy_max: state_msg = "🔥 PANIC SALE"
@@ -291,6 +309,10 @@ class TitanV18_LuxuryPanicHunterPro:
         msg += f"💵 Free Cash (THB) : {thb:,.2f}\n"
         msg += f"🪙 Position Value  : {(coin*p):,.2f}\n"
         msg += f"📈 Absolute Growth : <b>{growth:+.2f}%</b>\n"
+        msg += f"---------------------------------\n"
+        msg += f"🏆 <b>PERFORMANCE METRICS</b>\n"
+        msg += f"💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n"
+        msg += f"💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n"
         msg += f"---------------------------------\n"
 
         for i, s in self.slots.items():
