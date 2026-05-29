@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 class TitanV18_LuxuryPanicHunterPro:
     def __init__(self):
-        # --- [1] API & SYSTEM CONFIG (Railway Dynamic Check) ---
+        # --- [1] API & SYSTEM CONFIG ---
         self.api_key = str(os.getenv("BITKUB_KEY", "")).strip()
         self.api_secret = str(os.getenv("BITKUB_SECRET", "")).strip()
         self.tg_token = str(os.getenv("TELEGRAM_TOKEN", "")).strip()
@@ -295,7 +295,6 @@ class TitanV18_LuxuryPanicHunterPro:
 
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
-                # FIX: ป้องกันหารด้วยศูนย์กรณี slot price = 0
                 if s['price'] > 0:
                     pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
                 else:
@@ -379,7 +378,6 @@ class TitanV18_LuxuryPanicHunterPro:
                         elif side == 'sell':
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                             s = self.slots[slot_id]
-                            # FIX: ป้องกันราคา 0
                             if s['price'] > 0:
                                 net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                             else:
@@ -435,7 +433,6 @@ class TitanV18_LuxuryPanicHunterPro:
 
                     for i, s in self.slots.items():
                         if s['status'] == 'MATCHED':
-                            # FIX: ป้องกันหารด้วยศูนย์
                             if s['price'] > 0:
                                 profit = ((dx['p'] * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
                             else:
