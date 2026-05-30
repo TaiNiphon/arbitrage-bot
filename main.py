@@ -43,7 +43,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION (WITH PARTIAL SELL)</b>\n<i>Status: System Ready & Fully Integrated.</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready & Fully Integrated.</i>")
 
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
         """ฟังก์ชันรายงานการซื้อขายพร้อมสรุปกำไร %"""
@@ -133,40 +133,6 @@ class TitanV18_LuxuryPanicHunterPro:
                 print(f"API Connection Retry {i+1}: {e}")
                 time.sleep(1)
         return None
-
-    def execute_partial_sell(self, slot_id, portion=0.5):
-        """ทำการขายบางส่วนและอัปเดตฐานข้อมูล"""
-        s = self.slots.get(slot_id)
-        if not s or s['status'] != 'MATCHED': return False
-        
-        sell_units = self.floor_precision(s['units'] * portion, self.precision)
-        if (sell_units * s['price']) < 50: return False # Bitkub Min Limit
-
-        payload = {"sym": self.symbol.lower(), "amt": sell_units, "rat": 0, "typ": "market"}
-        res = self.bt_auth("POST", "/api/v3/market/place-ask", payload)
-
-        if res and res.get('error') == 0:
-            # คำนวณ PnL ส่วนที่ขาย
-            cost_basis_sold = (s['price'] * sell_units)
-            real_p = s['price'] # ใช้ราคาเดิมในการคิดกำไรเบื้องต้น
-            net_pnl = (sell_units * real_p * (1 - self.fee_rate)) - (cost_basis_sold * (1 + self.fee_rate))
-            
-            # อัปเดต DB
-            new_units = s['units'] - sell_units
-            try:
-                with psycopg2.connect(self.db_url) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE bot_state_v18 SET units=%s WHERE slot_id=%s", (new_units, slot_id))
-                        cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
-                                       VALUES ('SELL_PARTIAL', %s, %s, %s, %s, %s, 'BOT')""",
-                                    (slot_id, real_p, sell_units, net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS'))
-                        conn.commit()
-                self.slots[slot_id]['units'] = new_units
-                self._send_trade_receipt(f"PARTIAL SELL ({int(portion*100)}%)", slot_id, real_p, sell_units, net_pnl, cost_basis_sold, "BOT")
-                return True
-            except Exception as e:
-                print(f"Partial sell DB error: {e}")
-        return False
 
     def sync_manual_trade(self, real_coin_balance, current_price):
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
@@ -377,17 +343,10 @@ class TitanV18_LuxuryPanicHunterPro:
                     if time.time() - last_month_check >= 2592000:
                         self.generate_periodic_report("MONTHLY SUMMARY", 30)
                         last_month_check = time.time()
-                    
-                    # LOGIC LOOP
                     for i, s in self.slots.items():
                         if s['status'] == 'MATCHED':
                             if s['price'] > 0: profit = ((dx['p'] * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
                             else: profit = 0.0
-                            
-                            # ตรวจสอบกำไรเพื่อ Partial Sell (เช่น กำไรถึง 5% ให้ขาย 50%)
-                            if profit >= 5.0 and s['source'] == 'BOT': 
-                                self.execute_partial_sell(i, 0.5)
-
                             if dx['p'] > s['max_p']:
                                 s['max_p'] = dx['p']
                                 if profit >= self.lock_profit_pct:
@@ -399,7 +358,6 @@ class TitanV18_LuxuryPanicHunterPro:
                                                 cur.execute("UPDATE bot_state_v18 SET max_p=%s, sl=%s WHERE slot_id=%s", (s['max_p'], s['sl'], i))
                                                 conn.commit()
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
-                    
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         total_equity = thb + (coin * dx['p'])
