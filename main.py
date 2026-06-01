@@ -30,6 +30,9 @@ class TitanV18_LuxuryPanicHunterPro:
         self.max_capital_limit = float(os.getenv("MAX_CAPITAL_LIMIT", 1000000.0))
         self.fee_rate = 0.0025 
 
+        # ตัวแปรหน่วงเวลาป้องกันการซื้อซ้อน (Cooldown 5 นาที)
+        self.last_buy_ts = 0
+
         self.slots = {
             1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"},
             2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"}
@@ -43,7 +46,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready & Fully Integrated.</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready, Bugs Fixed & Fully Integrated.</i>")
 
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
         """ฟังก์ชันรายงานการซื้อขายพร้อมสรุปกำไร %"""
@@ -137,7 +140,8 @@ class TitanV18_LuxuryPanicHunterPro:
     def sync_manual_trade(self, real_coin_balance, current_price):
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
 
-        if db_units > 0 and real_coin_balance < (db_units * 0.98): 
+        # แก้ไข Tolerance ให้กว้างขึ้นเป็น 5% เพื่อป้องกัน Ghost Sell จากความคลาดเคลื่อนเล็กน้อย
+        if db_units > 0 and real_coin_balance < (db_units * 0.95): 
             total_cost_basis = 0
             accum_pnl = 0
             with psycopg2.connect(self.db_url) as conn:
@@ -157,7 +161,7 @@ class TitanV18_LuxuryPanicHunterPro:
             self._send_trade_receipt("SELL (MANUAL)", "ALL", current_price, db_units, accum_pnl, total_cost_basis, "MANUAL")
             self._load_state()
 
-        elif real_coin_balance > (db_units * 1.02) and (real_coin_balance - db_units) * current_price >= 500:
+        elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
             diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
             if self.slots[target_slot]['status'] == 'FREE':
@@ -280,23 +284,43 @@ class TitanV18_LuxuryPanicHunterPro:
             time.sleep(5) 
             order_id = str(res['result'].get('id'))
             info = self.bt_auth("GET", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
-            real_p, real_u = price, (amt_val/price) if side == 'buy' else safe_sell_units
+            
+            real_p = price
+            real_u = (amt_val/price) if side == 'buy' else safe_sell_units
+            
             if info and info.get('result'):
                 res_data = info['result']
-                if isinstance(res_data, list) and len(res_data) > 0: res_data = res_data[0]
-                real_p = float(res_data.get('rate', res_data.get('price', real_p)))
-                real_u = float(res_data.get('amount', res_data.get('quantity', real_u)))
+                # แก้ไข 1: รองรับกรณีบิทคับ Match หลายไม้ (รวมข้อมูลทั้งหมด)
+                if isinstance(res_data, list) and len(res_data) > 0:
+                    total_amount = sum(float(item.get('amount', item.get('quantity', 0))) for item in res_data)
+                    total_value = sum(float(item.get('amount', item.get('quantity', 0))) * float(item.get('rate', item.get('price', 0))) for item in res_data)
+                    if total_amount > 0:
+                        real_u = total_amount
+                        real_p = total_value / total_amount
+                elif isinstance(res_data, dict): 
+                    real_p = float(res_data.get('rate', res_data.get('price', real_p)))
+                    real_u = float(res_data.get('amount', res_data.get('quantity', real_u)))
+                    
             try:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
+                            # แก้ไข 2: หัก Fee 0.25% เพื่อให้ยอดใน DB ตรงกับ Wallet ป้องกัน Ghost Sell
+                            actual_units = real_u * (1 - self.fee_rate)
                             sl_val = round(real_p * (1 - self.trail_dist / 100), 4)
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
                                            VALUES (%s, %s, %s, %s, %s, %s, %s, 'MATCHED', %s) 
                                            ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl, max_p=EXCLUDED.max_p, order_id=EXCLUDED.order_id, open_ts=EXCLUDED.open_ts, status=EXCLUDED.status, source=EXCLUDED.source""",
-                                        (slot_id, real_p, real_u, sl_val, real_p, order_id, int(time.time()*1000), source))
-                            self.record_history('BUY', slot_id, real_p, real_u, 0.0, 'MATCHED', source)
+                                        (slot_id, real_p, actual_units, sl_val, real_p, order_id, int(time.time()*1000), source))
+                            
+                            self.record_history('BUY', slot_id, real_p, actual_units, 0.0, 'MATCHED', source)
+                            
+                            # ปรับปรุง: ส่งหน่วยดิบ (real_u) ไปรายงาน เพื่อให้หน้าตาตัวเงินรวมฝั่งซื้อตรงกับเงินจริงไม่โดนทอน 0.25% บนหน้าต่าง Telegram
                             self._send_trade_receipt(f"BUY ({source})", slot_id, real_p, real_u, None, (real_p * real_u), source)
+                            
+                            # อัปเดตเวลาเพื่อให้ระบบจำว่าเพิ่งทำการซื้อไป
+                            self.last_buy_ts = time.time() 
+                            
                         elif side == 'sell':
                             s = self.slots[slot_id]
                             cost_basis = s['price'] * s['units']
@@ -328,6 +352,7 @@ class TitanV18_LuxuryPanicHunterPro:
                 dx = self.get_indicator(self.symbol)
                 db_btc = self.get_indicator("BTC_THB")
                 btc_weekly_volume = self.get_btc_weekly_volume()
+                
                 if dx and db_btc:
                     self.sync_manual_trade(coin, dx['p'])
                     now = self.get_thai_now()
@@ -343,6 +368,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     if time.time() - last_month_check >= 2592000:
                         self.generate_periodic_report("MONTHLY SUMMARY", 30)
                         last_month_check = time.time()
+                        
                     for i, s in self.slots.items():
                         if s['status'] == 'MATCHED':
                             if s['price'] > 0: profit = ((dx['p'] * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100
@@ -358,13 +384,18 @@ class TitanV18_LuxuryPanicHunterPro:
                                                 cur.execute("UPDATE bot_state_v18 SET max_p=%s, sl=%s WHERE slot_id=%s", (s['max_p'], s['sl'], i))
                                                 conn.commit()
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
+                            
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
+                    
+                    # แก้ไข 3: เพิ่ม Cooldown หน่วงเวลา 300 วินาที (5 นาที) เพื่อไม่ให้บอทรัวซื้อ 2 ไม้พร้อมกันในแท่งเทียนเดิม
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
-                        total_equity = thb + (coin * dx['p'])
-                        buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
-                        if buy_amount >= 500 and thb >= buy_amount:
-                            target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
-                            self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
+                        if time.time() - self.last_buy_ts >= 300:
+                            total_equity = thb + (coin * dx['p'])
+                            buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
+                            if buy_amount >= 500 and thb >= buy_amount:
+                                target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
+                                self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
+                                
             except Exception as e:
                 print(f"Main Loop Exception Error: {e}")
                 time.sleep(15)
