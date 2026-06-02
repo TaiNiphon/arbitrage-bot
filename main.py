@@ -138,10 +138,38 @@ class TitanV18_LuxuryPanicHunterPro:
         return None
 
     def sync_manual_trade(self, real_coin_balance, current_price):
+        if current_price <= 0:
+            return
+
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
 
-        # แก้ไข Tolerance ให้กว้างขึ้นเป็น 5% เพื่อป้องกัน Ghost Sell จากความคลาดเคลื่อนเล็กน้อย
+        # --- ป้องกัน Ghost Sell จากกรณี API Wallet สัญญาณหลุดหรือส่งค่าว่างมา ---
         if db_units > 0 and real_coin_balance < (db_units * 0.95): 
+            try:
+                time.sleep(2)  
+                res_b = self.bt_auth("POST", "/api/v3/market/balances")
+                if res_b and 'result' in res_b:
+                    res_data = res_b['result']
+                    confirmed_balance = None
+                    
+                    if isinstance(res_data, list):
+                        coin_info = next((item for item in res_data if str(item.get('symbol', '')).upper() == self.coin_sym), None)
+                        if coin_info:
+                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
+                    elif isinstance(res_data, dict):
+                        coin_info = res_data.get(self.coin_sym, {})
+                        if isinstance(coin_info, dict):
+                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
+                        else:
+                            confirmed_balance = float(coin_info)
+                    
+                    if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
+                        print(f"🛡️ [Ghost Sell Prevented] Balances API confirmed asset safety: {confirmed_balance} {self.coin_sym}")
+                        return
+            except Exception as e:
+                print(f"Error during balance double-check: {e}")
+                return 
+
             total_cost_basis = 0
             accum_pnl = 0
             with psycopg2.connect(self.db_url) as conn:
@@ -288,24 +316,42 @@ class TitanV18_LuxuryPanicHunterPro:
             real_p = price
             real_u = (amt_val/price) if side == 'buy' else safe_sell_units
             
-            if info and info.get('result'):
+            if info and info.get('error') == 0 and info.get('result'):
                 res_data = info['result']
-                # แก้ไข 1: รองรับกรณีบิทคับ Match หลายไม้ (รวมข้อมูลทั้งหมด)
-                if isinstance(res_data, list) and len(res_data) > 0:
+                
+                # --- แกะประวัติย่อยเพื่อหาปริมาณเหรียญและราคาจริงในคำสั่ง Market Order ---
+                if isinstance(res_data, dict):
+                    history = res_data.get('history', [])
+                    if isinstance(history, list) and len(history) > 0:
+                        total_amount = sum(float(item.get('amount', 0)) for item in history)
+                        total_value = sum(float(item.get('amount', 0)) * float(item.get('rate', 0)) for item in history)
+                        if total_amount > 0:
+                            real_u = total_amount
+                            real_p = total_value / total_amount
+                    else:
+                        filled = float(res_data.get('filled', 0))
+                        total = float(res_data.get('total', 0))
+                        if side == 'buy':
+                            if filled > 0:
+                                real_u = filled
+                                real_p = total / filled if total > 0 else price
+                        else:
+                            amount = float(res_data.get('amount', 0))
+                            if amount > 0:
+                                real_u = amount
+                                real_p = total / amount if total > 0 else price
+                                
+                elif isinstance(res_data, list) and len(res_data) > 0:
                     total_amount = sum(float(item.get('amount', item.get('quantity', 0))) for item in res_data)
                     total_value = sum(float(item.get('amount', item.get('quantity', 0))) * float(item.get('rate', item.get('price', 0))) for item in res_data)
                     if total_amount > 0:
                         real_u = total_amount
                         real_p = total_value / total_amount
-                elif isinstance(res_data, dict): 
-                    real_p = float(res_data.get('rate', res_data.get('price', real_p)))
-                    real_u = float(res_data.get('amount', res_data.get('quantity', real_u)))
                     
             try:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
                         if side == 'buy':
-                            # แก้ไข 2: หัก Fee 0.25% เพื่อให้ยอดใน DB ตรงกับ Wallet ป้องกัน Ghost Sell
                             actual_units = real_u * (1 - self.fee_rate)
                             sl_val = round(real_p * (1 - self.trail_dist / 100), 4)
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
@@ -314,11 +360,7 @@ class TitanV18_LuxuryPanicHunterPro:
                                         (slot_id, real_p, actual_units, sl_val, real_p, order_id, int(time.time()*1000), source))
                             
                             self.record_history('BUY', slot_id, real_p, actual_units, 0.0, 'MATCHED', source)
-                            
-                            # ปรับปรุง: ส่งหน่วยดิบ (real_u) ไปรายงาน เพื่อให้หน้าตาตัวเงินรวมฝั่งซื้อตรงกับเงินจริงไม่โดนทอน 0.25% บนหน้าต่าง Telegram
                             self._send_trade_receipt(f"BUY ({source})", slot_id, real_p, real_u, None, (real_p * real_u), source)
-                            
-                            # อัปเดตเวลาเพื่อให้ระบบจำว่าเพิ่งทำการซื้อไป
                             self.last_buy_ts = time.time() 
                             
                         elif side == 'sell':
@@ -387,7 +429,6 @@ class TitanV18_LuxuryPanicHunterPro:
                             
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     
-                    # แก้ไข 3: เพิ่ม Cooldown หน่วงเวลา 300 วินาที (5 นาที) เพื่อไม่ให้บอทรัวซื้อ 2 ไม้พร้อมกันในแท่งเทียนเดิม
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         if time.time() - self.last_buy_ts >= 300:
                             total_equity = thb + (coin * dx['p'])
@@ -408,7 +449,9 @@ class TitanV18_LuxuryPanicHunterPro:
             data = res.json()
             if not data or 'c' not in data: return None
             c = np.array(data['c'], dtype=float); v = np.array(data['v'], dtype=float)
-            if len(c) < 200: return None
+            
+            if len(c) < 200 or float(c[-1]) <= 0: return None
+            
             def rsi(prices, period=14):
                 if len(prices) < period + 1: return 50.0
                 deltas = np.diff(prices)
@@ -434,12 +477,18 @@ class TitanV18_LuxuryPanicHunterPro:
             return None
 
     def get_btc_weekly_volume(self):
+        """แก้ไขเพิ่มโครงสร้างความปลอดภัย ป้องกันจุดพิมพ์ตกและค่า NoneType คืนค่ากลับไปคำนวณแดชบอร์ด"""
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15)
-            if res.status_code != 200: return 1.0
+            if res.status_code != 200: 
+                return 7000000.0  # ปริมาณ Volume ขั้นต่ำเฉลี่ยเชิงสถิติ (Fallback Value)
             data = res.json()
-            return float(sum(data['v'])) if (data and 'v' in data) else 1.0
-        except: return 1.0
+            if data and 'v' in data and len(data['v']) > 0:
+                return float(sum(data['v']))
+            return 7000000.0
+        except Exception as e: 
+            print(f"BTC Volume API Error: {e}")
+            return 7000000.0
 
     def notify(self, message):
         try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, timeout=10)
