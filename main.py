@@ -60,7 +60,8 @@ class TitanV18_LuxuryPanicHunterPro:
         pct = (pnl / cost_basis * 100) if (cost_basis > 0 and pnl is not None) else 0.0
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         
-        msg = f"🏛️ <b>TITAN V.18.99: {action.upper()} RECEIPT</b>\n"
+        # แก้ไขชื่อเวอร์ชันให้ตรงกับระบบ
+        msg = f"🏛️ <b>TITAN V.18.100: {action.upper()} RECEIPT</b>\n"
         msg += f"📅 <code>{now_str}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"🟢 Action: {action.upper()} | Source: {source}\n"
@@ -205,12 +206,17 @@ class TitanV18_LuxuryPanicHunterPro:
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
         p = float(dx['p']); rsi_val = float(dx['r14']); equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
+        
+        # เพิ่มตัวแปรเวลาสั้นเพื่อต่อท้ายข้อความ
+        now_time_str = self.get_thai_now().strftime('%H:%M')
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
+        
         last_pnl, today_pnl = self.get_pnl_stats()
         state_msg = "🚨 EXTREME PANIC (BUY ZONE)" if rsi_val <= self.buy_rsi_14 else ("🔥 PANIC SALE" if rsi_val <= self.rsi_buy_max else ("⚠️ OVERBOUGHT" if rsi_val >= 70 else "↔️ NEUTRAL SIDEWAY"))
         btc_avg_weekly = btc_weekly_volume / 7
         
-        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n"
+        # แก้ไขชื่อเวอร์ชันให้ตรงกับระบบ
+        msg = f"🏛️ <b>TITAN V.18.100: {mode}</b>\n"
         msg += f"📅 <code>{now}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"📈 <b>MARKET ENGINE: {self.symbol}</b>\n"
@@ -248,7 +254,8 @@ class TitanV18_LuxuryPanicHunterPro:
             else:
                 msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
                 
-        msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
+        # แก้ไขจุดที่ข้อความขาดหายไปท้ายสตริงและเพิ่มเวลาปิดท้าย
+        msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>\n<code>({now_time_str})</code>"
         self.notify(msg)
 
     def record_history(self, side, slot_id, price, units, pnl, status, source):
