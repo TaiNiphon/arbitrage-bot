@@ -48,6 +48,13 @@ class TitanV18_LuxuryPanicHunterPro:
         self._load_state()
         self.notify("🏛️ <b>TITAN V.18.100: CRITICAL PATCH FIXED</b>\n<i>Status: Manual Sync Engine Removed. 100% Stable.</i>")
 
+    def _get_trade_sym(self):
+        """ แปลงชื่อเหรียญให้ตรงกับรูปแบบที่ Bitkub V3 Trade API ต้องการ (เช่น THB_XRP) """
+        parts = self.symbol.upper().split('_')
+        if len(parts) == 2 and parts[1] == 'THB':
+            return f"thb_{parts[0].lower()}"
+        return self.symbol.lower()
+
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
         total_value = price * units
         pct = (pnl / cost_basis * 100) if (cost_basis > 0 and pnl is not None) else 0.0
@@ -104,8 +111,8 @@ class TitanV18_LuxuryPanicHunterPro:
                     rows = cur.fetchall()
                     for r in rows:
                         self.slots[r[0]] = {
-                            "status": r[5], "price": r[1], "units": r[2], 
-                            "sl": r[3], "max_p": r[4], "source": r[6]
+                            "status": r[5], "price": float(r[1]), "units": float(r[2]), 
+                            "sl": float(r[3]), "max_p": float(r[4]), "source": r[6]
                         }
         except Exception as e:
             print(f"Load State Error: {e}")
@@ -138,7 +145,6 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def sync_manual_trade(self, real_coin_balance, current_price):
         # --- [CRITICAL PATCH]: ลบลดลอจิกเดาการซื้อมือ/ขายมือออกทั้งหมดอย่างถาวร ---
-        # บอทจะไม่พยายามคาดเดาความคลาดเคลื่อนของ Wallet อีกต่อไป สล็อตจะขยับเมื่อบอทเป็นคนสั่งเท่านั้น
         pass
 
     def check_database_integrity(self):
@@ -197,21 +203,51 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"Periodic report error: {e}")
 
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
-        p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
+        p = float(dx['p']); rsi_val = float(dx['r14']); equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         last_pnl, today_pnl = self.get_pnl_stats()
         state_msg = "🚨 EXTREME PANIC (BUY ZONE)" if rsi_val <= self.buy_rsi_14 else ("🔥 PANIC SALE" if rsi_val <= self.rsi_buy_max else ("⚠️ OVERBOUGHT" if rsi_val >= 70 else "↔️ NEUTRAL SIDEWAY"))
         btc_avg_weekly = btc_weekly_volume / 7
-        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n📅 <code>{now}</code>\n---------------------------------\n📈 <b>MARKET ENGINE: {self.symbol}</b>\n💰 Price : <b>{p:,.4f} THB</b>\n📊 State : {state_msg}\n📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n---------------------------------\n🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n💰 BTC Price : {db_btc['p']:,.0f} THB\n📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n🏹 Buy Power : {db_btc['buy_power']:,.2f}\n📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n---------------------------------\n💰 <b>DYNAMIC FINANCIAL METRICS</b>\n✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n💵 Free Cash (THB) : {thb:,.2f}\n🪙 Position Value  : {(coin*p):,.2f}\n📈 Absolute Growth : <b>{growth:+.2f}%</b>\n---------------------------------\n🏆 <b>PERFORMANCE METRICS</b>\n💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n---------------------------------\n"
+        
+        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n"
+        msg += f"📅 <code>{now}</code>\n"
+        msg += f"---------------------------------\n"
+        msg += f"📈 <b>MARKET ENGINE: {self.symbol}</b>\n"
+        msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
+        msg += f"📊 State : {state_msg}\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
+        msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
+        msg += f"🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n"
+        msg += f"---------------------------------\n"
+        msg += f"🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n"
+        msg += f"📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n"
+        msg += f"💰 BTC Price : {db_btc['p']:,.0f} THB\n"
+        msg += f"📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n"
+        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n"
+        msg += f"📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n"
+        msg += f"---------------------------------\n"
+        msg += f"💰 <b>DYNAMIC FINANCIAL METRICS</b>\n"
+        msg += f"✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n"
+        msg += f"💵 Free Cash (THB) : {thb:,.2f}\n"
+        msg += f"🪙 Position Value  : {(coin*p):,.2f}\n"
+        msg += f"📈 Absolute Growth : <b>{growth:+.2f}%</b>\n"
+        msg += f"---------------------------------\n"
+        msg += f"🏆 <b>PERFORMANCE METRICS</b>\n"
+        msg += f"💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n"
+        msg += f"💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n"
+        msg += f"---------------------------------\n"
+        
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
                 pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n"
+                msg += f"🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             elif s['status'] == 'PENDING_BUY':
                 msg += f"🟡 <b>SLOT {i}: PENDING_BUY (คำสั่งซื้อกำลังส่งรอดึงราคา...)</b>\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
+                
         msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
@@ -226,31 +262,35 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"History logging failed: {e}")
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
+        trade_sym = self._get_trade_sym() # ใช้ตัวแปรชื่อเหรียญที่ถูกแก้ไขแล้ว
+        
         if side == "buy":
             try:
                 res_w = self.bt_auth("POST", "/api/v3/market/wallet")
-                real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else 0.0
-            except: real_thb = amt_val
+                real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else float(amt_val)
+            except: real_thb = float(amt_val)
+            
             safe_buy_amt = min(float(amt_val), real_thb * 0.98)
             if safe_buy_amt < 500: 
-                self.slots[slot_id]['status'] = 'FREE' # คืนสถานะหากเงินไม่พอซื้อ
+                self.slots[slot_id]['status'] = 'FREE'
                 return False
             buy_amt = round(float(safe_buy_amt), 2)
-            payload = {"sym": self.symbol.lower(), "amt": buy_amt, "rat": 0, "typ": "market"}
+            payload = {"sym": trade_sym, "amt": buy_amt, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-bid", payload)
+            
         elif side == "sell":
             safe_sell_units = self.floor_precision(amt_val, self.precision)
-            payload = {"sym": self.symbol.lower(), "amt": safe_sell_units, "rat": 0, "typ": "market"}
+            payload = {"sym": trade_sym, "amt": safe_sell_units, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-ask", payload)
         else: return False
 
         if res and res.get('error') == 0:
             time.sleep(5) 
-            order_id = str(res['result'].get('id'))
-            info = self.bt_auth("GET", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
+            order_id = str(res['result'].get('id', ''))
+            info = self.bt_auth("GET", "/api/v3/market/order-info", {"sym": trade_sym, "id": order_id, "sd": side})
             
-            real_p = price
-            real_u = (amt_val/price) if side == 'buy' else safe_sell_units
+            real_p = float(price)
+            real_u = float(amt_val/price) if side == 'buy' else float(safe_sell_units)
             
             if info and info.get('error') == 0 and info.get('result'):
                 res_data = info['result']
@@ -267,12 +307,12 @@ class TitanV18_LuxuryPanicHunterPro:
                         total = float(res_data.get('total', 0))
                         if side == 'buy' and filled > 0:
                             real_u = filled
-                            real_p = total / filled if total > 0 else price
+                            real_p = total / filled if total > 0 else real_p
                         elif side == 'sell':
                             amount = float(res_data.get('amount', 0))
                             if amount > 0:
                                 real_u = amount
-                                real_p = total / amount if total > 0 else price
+                                real_p = total / amount if total > 0 else real_p
                                 
                 elif isinstance(res_data, list) and len(res_data) > 0:
                     total_amount = sum(float(item.get('amount', item.get('quantity', 0))) for item in res_data)
@@ -293,13 +333,13 @@ class TitanV18_LuxuryPanicHunterPro:
                                         (slot_id, real_p, actual_units, sl_val, real_p, order_id, int(time.time()*1000), source))
                             
                             self.record_history('BUY', slot_id, real_p, actual_units, 0.0, 'MATCHED', source)
-                            self._send_trade_receipt(f"BUY ({source})", slot_id, real_p, real_u, None, (real_p * real_u), source)
+                            self._send_trade_receipt(f"BUY ({source})", slot_id, real_p, actual_units, None, (real_p * actual_units), source)
                             self.last_buy_ts = time.time() 
                             
                         elif side == 'sell':
                             s = self.slots[slot_id]
                             cost_basis = s['price'] * s['units']
-                            net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
+                            net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (cost_basis * (1 + self.fee_rate))
                             self.record_history('SELL', slot_id, real_p, real_u, net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', source)
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                             self._send_trade_receipt(f"SELL ({source})", slot_id, real_p, real_u, net_pnl, cost_basis, source)
@@ -308,11 +348,11 @@ class TitanV18_LuxuryPanicHunterPro:
                 return True
             except Exception as e:
                 print(f"Database ledger sync crash: {e}")
-                self._load_state() # คืนค่าเดิมกรณี DB ล่ม
+                self._load_state() 
                 return False
         else:
             if side == "buy":
-                self.slots[slot_id]['status'] = 'FREE' # ปลดล็อกสล็อตหากยิง API ไม่ผ่าน
+                self.slots[slot_id]['status'] = 'FREE' 
             return False
 
     def run(self):
@@ -364,7 +404,6 @@ class TitanV18_LuxuryPanicHunterPro:
                                                 conn.commit()
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
                             
-                    # ตรวจสอบจำนวนสล็อตที่กำลังทำงานหรือจองไว้
                     occupied_count = sum(1 for s in self.slots.values() if s['status'] in ['MATCHED', 'PENDING_BUY'])
                     
                     if occupied_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
