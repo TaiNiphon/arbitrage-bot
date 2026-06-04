@@ -46,10 +46,9 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready, Bugs Fixed & Fully Integrated.</i>")
+        self.notify("🏛️ <b>TITAN V.18.100: CRITICAL PATCH FIXED</b>\n<i>Status: Manual Sync Engine Removed. 100% Stable.</i>")
 
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
-        """ฟังก์ชันรายงานการซื้อขายพร้อมสรุปกำไร %"""
         total_value = price * units
         pct = (pnl / cost_basis * 100) if (cost_basis > 0 and pnl is not None) else 0.0
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -138,76 +137,9 @@ class TitanV18_LuxuryPanicHunterPro:
         return None
 
     def sync_manual_trade(self, real_coin_balance, current_price):
-        if current_price <= 0:
-            return
-
-        db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
-
-        # --- ป้องกัน Ghost Sell จากกรณี API Wallet สัญญาณหลุดหรือส่งค่าว่างมา ---
-        if db_units > 0 and real_coin_balance < (db_units * 0.95): 
-            try:
-                time.sleep(2)  
-                res_b = self.bt_auth("POST", "/api/v3/market/balances")
-                if res_b and 'result' in res_b:
-                    res_data = res_b['result']
-                    confirmed_balance = None
-                    
-                    if isinstance(res_data, list):
-                        coin_info = next((item for item in res_data if str(item.get('symbol', '')).upper() == self.coin_sym), None)
-                        if coin_info:
-                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
-                    elif isinstance(res_data, dict):
-                        coin_info = res_data.get(self.coin_sym, {})
-                        if isinstance(coin_info, dict):
-                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
-                        else:
-                            confirmed_balance = float(coin_info)
-                    
-                    if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
-                        print(f"🛡️ [Ghost Sell Prevented] Balances API confirmed asset safety: {confirmed_balance} {self.coin_sym}")
-                        return
-            except Exception as e:
-                print(f"Error during balance double-check: {e}")
-                return 
-
-            total_cost_basis = 0
-            accum_pnl = 0
-            with psycopg2.connect(self.db_url) as conn:
-                with conn.cursor() as cur:
-                    for i, s in list(self.slots.items()):
-                        if s['status'] == 'MATCHED' and s['price'] > 0:
-                            cost = s['price'] * s['units']
-                            total_cost_basis += cost
-                            net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
-                            accum_pnl += net_pnl
-                            cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
-                                           VALUES ('SELL', %s, %s, %s, %s, %s, 'MANUAL')""", 
-                                           (i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS'))
-                    cur.execute("DELETE FROM bot_state_v18")
-                    conn.commit()
-            
-            self._send_trade_receipt("SELL (MANUAL)", "ALL", current_price, db_units, accum_pnl, total_cost_basis, "MANUAL")
-            self._load_state()
-
-        elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
-            diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
-            target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
-            if self.slots[target_slot]['status'] == 'FREE':
-                sl_val = round(current_price * 0.95, 4)
-                open_time = int(time.time() * 1000)
-                try:
-                    with psycopg2.connect(self.db_url) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
-                                           VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
-                                        (target_slot, current_price, diff_units, sl_val, current_price, open_time))
-                            cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
-                                           VALUES ('BUY', %s, %s, %s, 0.0, 'OPENED', 'MANUAL')""", (target_slot, current_price, diff_units))
-                            conn.commit()
-                    self._send_trade_receipt("BUY (MANUAL)", target_slot, current_price, diff_units, None, (current_price * diff_units), "MANUAL")
-                    self._load_state()
-                except Exception as e:
-                    print(f"Manual buy registration error: {e}")
+        # --- [CRITICAL PATCH]: ลบลดลอจิกเดาการซื้อมือ/ขายมือออกทั้งหมดอย่างถาวร ---
+        # บอทจะไม่พยายามคาดเดาความคลาดเคลื่อนของ Wallet อีกต่อไป สล็อตจะขยับเมื่อบอทเป็นคนสั่งเท่านั้น
+        pass
 
     def check_database_integrity(self):
         try:
@@ -276,6 +208,8 @@ class TitanV18_LuxuryPanicHunterPro:
             if s['status'] == 'MATCHED':
                 pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
                 msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
+            elif s['status'] == 'PENDING_BUY':
+                msg += f"🟡 <b>SLOT {i}: PENDING_BUY (คำสั่งซื้อกำลังส่งรอดึงราคา...)</b>\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
         msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
@@ -298,7 +232,9 @@ class TitanV18_LuxuryPanicHunterPro:
                 real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else 0.0
             except: real_thb = amt_val
             safe_buy_amt = min(float(amt_val), real_thb * 0.98)
-            if safe_buy_amt < 500: return False
+            if safe_buy_amt < 500: 
+                self.slots[slot_id]['status'] = 'FREE' # คืนสถานะหากเงินไม่พอซื้อ
+                return False
             buy_amt = round(float(safe_buy_amt), 2)
             payload = {"sym": self.symbol.lower(), "amt": buy_amt, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-bid", payload)
@@ -318,8 +254,6 @@ class TitanV18_LuxuryPanicHunterPro:
             
             if info and info.get('error') == 0 and info.get('result'):
                 res_data = info['result']
-                
-                # --- แกะประวัติย่อยเพื่อหาปริมาณเหรียญและราคาจริงในคำสั่ง Market Order ---
                 if isinstance(res_data, dict):
                     history = res_data.get('history', [])
                     if isinstance(history, list) and len(history) > 0:
@@ -331,11 +265,10 @@ class TitanV18_LuxuryPanicHunterPro:
                     else:
                         filled = float(res_data.get('filled', 0))
                         total = float(res_data.get('total', 0))
-                        if side == 'buy':
-                            if filled > 0:
-                                real_u = filled
-                                real_p = total / filled if total > 0 else price
-                        else:
+                        if side == 'buy' and filled > 0:
+                            real_u = filled
+                            real_p = total / filled if total > 0 else price
+                        elif side == 'sell':
                             amount = float(res_data.get('amount', 0))
                             if amount > 0:
                                 real_u = amount
@@ -375,8 +308,12 @@ class TitanV18_LuxuryPanicHunterPro:
                 return True
             except Exception as e:
                 print(f"Database ledger sync crash: {e}")
+                self._load_state() # คืนค่าเดิมกรณี DB ล่ม
                 return False
-        return False
+        else:
+            if side == "buy":
+                self.slots[slot_id]['status'] = 'FREE' # ปลดล็อกสล็อตหากยิง API ไม่ผ่าน
+            return False
 
     def run(self):
         last_h = -1
@@ -427,15 +364,23 @@ class TitanV18_LuxuryPanicHunterPro:
                                                 conn.commit()
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
                             
-                    matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
+                    # ตรวจสอบจำนวนสล็อตที่กำลังทำงานหรือจองไว้
+                    occupied_count = sum(1 for s in self.slots.values() if s['status'] in ['MATCHED', 'PENDING_BUY'])
                     
-                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
+                    if occupied_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         if time.time() - self.last_buy_ts >= 300:
                             total_equity = thb + (coin * dx['p'])
                             buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
                             if buy_amount >= 500 and thb >= buy_amount:
-                                target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
-                                self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
+                                target_slot = None
+                                if self.slots[1]['status'] == 'FREE':
+                                    target_slot = 1
+                                elif self.slots[2]['status'] == 'FREE':
+                                    target_slot = 2
+                                    
+                                if target_slot is not None:
+                                    self.slots[target_slot]['status'] = 'PENDING_BUY'
+                                    self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
                                 
             except Exception as e:
                 print(f"Main Loop Exception Error: {e}")
@@ -449,7 +394,6 @@ class TitanV18_LuxuryPanicHunterPro:
             data = res.json()
             if not data or 'c' not in data: return None
             c = np.array(data['c'], dtype=float); v = np.array(data['v'], dtype=float)
-            
             if len(c) < 200 or float(c[-1]) <= 0: return None
             
             def rsi(prices, period=14):
@@ -477,11 +421,10 @@ class TitanV18_LuxuryPanicHunterPro:
             return None
 
     def get_btc_weekly_volume(self):
-        """แก้ไขเพิ่มโครงสร้างความปลอดภัย ป้องกันจุดพิมพ์ตกและค่า NoneType คืนค่ากลับไปคำนวณแดชบอร์ด"""
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15)
             if res.status_code != 200: 
-                return 7000000.0  # ปริมาณ Volume ขั้นต่ำเฉลี่ยเชิงสถิติ (Fallback Value)
+                return 7000000.0
             data = res.json()
             if data and 'v' in data and len(data['v']) > 0:
                 return float(sum(data['v']))
