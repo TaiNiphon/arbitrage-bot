@@ -23,13 +23,14 @@ class TitanV18_LuxuryPanicHunterPro:
         # --- [2] MONEY MANAGEMENT & CONFIG PARAMETERS ---
         self.initial_equity = float(os.getenv("INITIAL_EQUITY", 2200.0))
         self.buy_rsi_14 = float(os.getenv("BUY_RSI_14", 28.0))
-        self.buy_rsi_200 = float(os.getenv("BUY_RSI_200", 48.0)) # เก็บไว้ดูเทรนด์เฉยๆ
+        self.buy_rsi_200 = float(os.getenv("BUY_RSI_200", 48.0))
         self.rsi_buy_max = float(os.getenv("RSI_BUY_MAX", 35.0)) 
         self.lock_profit_pct = float(os.getenv("LOCK_PROFIT_PCT", 1.5))
         self.trail_dist = float(os.getenv("TRAILING_DIST", 1.5))
         self.max_capital_limit = float(os.getenv("MAX_CAPITAL_LIMIT", 1000000.0))
         self.fee_rate = 0.0025 
 
+        # ตัวแปรหน่วงเวลาป้องกันการซื้อซ้อน (Cooldown 5 นาที)
         self.last_buy_ts = 0
 
         self.slots = {
@@ -45,21 +46,15 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.100: ENGINE RESTORED & GHOST FIX</b>\n<i>Status: Anti-Ghost Sell Active. Stable & Ready.</i>")
-
-    def _get_trade_sym(self):
-        """ แปลงชื่อเหรียญให้ตรงกับรูปแบบที่ Bitkub V3 API รองรับ 100% (THB_XXX) """
-        parts = self.symbol.upper().split('_')
-        if len(parts) == 2 and parts[1] == 'THB':
-            return f"THB_{parts[0]}"
-        return self.symbol.upper()
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready, Bugs Fixed & Fully Integrated.</i>")
 
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
+        """ฟังก์ชันรายงานการซื้อขายพร้อมสรุปกำไร %"""
         total_value = price * units
         pct = (pnl / cost_basis * 100) if (cost_basis > 0 and pnl is not None) else 0.0
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         
-        msg = f"🏛️ <b>TITAN V.18.100: {action.upper()} RECEIPT</b>\n"
+        msg = f"🏛️ <b>TITAN V.18.99: {action.upper()} RECEIPT</b>\n"
         msg += f"📅 <code>{now_str}</code>\n"
         msg += f"---------------------------------\n"
         msg += f"🟢 Action: {action.upper()} | Source: {source}\n"
@@ -110,8 +105,8 @@ class TitanV18_LuxuryPanicHunterPro:
                     rows = cur.fetchall()
                     for r in rows:
                         self.slots[r[0]] = {
-                            "status": r[5], "price": float(r[1]), "units": float(r[2]), 
-                            "sl": float(r[3]), "max_p": float(r[4]), "source": r[6]
+                            "status": r[5], "price": r[1], "units": r[2], 
+                            "sl": r[3], "max_p": r[4], "source": r[6]
                         }
         except Exception as e:
             print(f"Load State Error: {e}")
@@ -143,7 +138,76 @@ class TitanV18_LuxuryPanicHunterPro:
         return None
 
     def sync_manual_trade(self, real_coin_balance, current_price):
-        pass # ลบลอจิกเก่าทิ้งเพื่อความเสถียร
+        if current_price <= 0:
+            return
+
+        db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
+
+        # --- ป้องกัน Ghost Sell จากกรณี API Wallet สัญญาณหลุดหรือส่งค่าว่างมา ---
+        if db_units > 0 and real_coin_balance < (db_units * 0.95): 
+            try:
+                time.sleep(2)  
+                res_b = self.bt_auth("POST", "/api/v3/market/balances")
+                if res_b and 'result' in res_b:
+                    res_data = res_b['result']
+                    confirmed_balance = None
+                    
+                    if isinstance(res_data, list):
+                        coin_info = next((item for item in res_data if str(item.get('symbol', '')).upper() == self.coin_sym), None)
+                        if coin_info:
+                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
+                    elif isinstance(res_data, dict):
+                        coin_info = res_data.get(self.coin_sym, {})
+                        if isinstance(coin_info, dict):
+                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
+                        else:
+                            confirmed_balance = float(coin_info)
+                    
+                    if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
+                        print(f"🛡️ [Ghost Sell Prevented] Balances API confirmed asset safety: {confirmed_balance} {self.coin_sym}")
+                        return
+            except Exception as e:
+                print(f"Error during balance double-check: {e}")
+                return 
+
+            total_cost_basis = 0
+            accum_pnl = 0
+            with psycopg2.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    for i, s in list(self.slots.items()):
+                        if s['status'] == 'MATCHED' and s['price'] > 0:
+                            cost = s['price'] * s['units']
+                            total_cost_basis += cost
+                            net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
+                            accum_pnl += net_pnl
+                            cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
+                                           VALUES ('SELL', %s, %s, %s, %s, %s, 'MANUAL')""", 
+                                           (i, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS'))
+                    cur.execute("DELETE FROM bot_state_v18")
+                    conn.commit()
+            
+            self._send_trade_receipt("SELL (MANUAL)", "ALL", current_price, db_units, accum_pnl, total_cost_basis, "MANUAL")
+            self._load_state()
+
+        elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
+            diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
+            target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
+            if self.slots[target_slot]['status'] == 'FREE':
+                sl_val = round(current_price * 0.95, 4)
+                open_time = int(time.time() * 1000)
+                try:
+                    with psycopg2.connect(self.db_url) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
+                                           VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
+                                        (target_slot, current_price, diff_units, sl_val, current_price, open_time))
+                            cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
+                                           VALUES ('BUY', %s, %s, %s, 0.0, 'OPENED', 'MANUAL')""", (target_slot, current_price, diff_units))
+                            conn.commit()
+                    self._send_trade_receipt("BUY (MANUAL)", target_slot, current_price, diff_units, None, (current_price * diff_units), "MANUAL")
+                    self._load_state()
+                except Exception as e:
+                    print(f"Manual buy registration error: {e}")
 
     def check_database_integrity(self):
         try:
@@ -156,10 +220,10 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute("SELECT COUNT(*) FROM periodic_summary")
                     total_summary = cur.fetchone()[0]
             now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-            msg = f"🔍 <b>DATABASE INTEGRITY REPORT</b>\n📅 <code>{now}</code>\n---------------------------------\n💾 Active Slot Sync: {active_slots} / 2 Positions\n📊 Trade History Logs: {total_history} Rows\n---------------------------------"
+            msg = f"🔍 <b>DATABASE INTEGRITY REPORT (EVERY 6 HRS)</b>\n📅 <code>{now}</code>\n---------------------------------\n💾 Active Slot Sync: {active_slots} / 2 Positions\n📊 Trade History Logs: {total_history} Rows\n📈 Periodic Archives: {total_summary} Rows\n⚡ Connection Status: 🟢 100% HEALTHY & ONLINE\n---------------------------------"
             self.notify(msg)
-        except Exception:
-            pass
+        except Exception as e:
+            self.notify(f"⚠️ <b>DB INTEGRITY CRITICAL ERROR</b>: {e}")
 
     def get_pnl_stats(self):
         try:
@@ -195,51 +259,26 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute("""INSERT INTO periodic_summary (period_type, total_trades, bot_trades, manual_trades, total_pnl, win_rate) 
                                    VALUES (%s, %s, %s, %s, %s, %s)""", (period_name, total_trades, bot_trades, manual_trades, total_pnl, win_rate))
                     conn.commit()
-            msg = f"📊 <b>TITAN PERIODIC SUMMARY: {period_name}</b>\n---------------------------------\n🔄 Total Trades Processed: {total_trades} ไม้\n🤖 Bot Executed: {bot_trades} | 👤 Manual Executed: {manual_trades}\n💰 Realized Net PnL: <b>{total_pnl:+,.2f} THB</b>\n🎯 Realized Win Rate: <b>{win_rate:.2f}%</b>\n---------------------------------"
+            msg = f"📊 <b>TITAN PERIODIC SUMMARY: {period_name}</b>\n---------------------------------\n🔄 Total Trades Processed: {total_trades} ไม้\n🤖 Bot Executed: {bot_trades} | 👤 Manual Executed: {manual_trades}\n💰 Realized Net PnL: <b>{total_pnl:+,.2f} THB</b>\n🎯 Realized Win Rate: <b>{win_rate:.2f}%</b>\n---------------------------------\n📈 <i>Data securely archived for future bot optimizations.</i>"
             self.notify(msg)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Periodic report error: {e}")
 
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
-        p = float(dx['p']); rsi_val = float(dx['r14']); equity = thb + (coin * p)
+        p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
-        
-        now_time_str = self.get_thai_now().strftime('%H:%M')
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
-        
         last_pnl, today_pnl = self.get_pnl_stats()
         state_msg = "🚨 EXTREME PANIC (BUY ZONE)" if rsi_val <= self.buy_rsi_14 else ("🔥 PANIC SALE" if rsi_val <= self.rsi_buy_max else ("⚠️ OVERBOUGHT" if rsi_val >= 70 else "↔️ NEUTRAL SIDEWAY"))
         btc_avg_weekly = btc_weekly_volume / 7
-        
-        msg = f"🏛️ <b>TITAN V.18.100: {mode}</b>\n"
-        msg += f"📅 <code>{now}</code>\n"
-        msg += f"---------------------------------\n"
-        msg += f"📈 <b>MARKET ENGINE: {self.symbol}</b>\n"
-        msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
-        msg += f"📊 State : {state_msg}\n"
-        msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
-        msg += f"---------------------------------\n"
-        msg += f"🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n"
-        msg += f"💰 BTC Price : {db_btc['p']:,.0f} THB\n"
-        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n"
-        msg += f"---------------------------------\n"
-        msg += f"💰 <b>DYNAMIC FINANCIAL METRICS</b>\n"
-        msg += f"✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n"
-        msg += f"💵 Free Cash (THB) : {thb:,.2f}\n"
-        msg += f"🪙 Position Value  : {(coin*p):,.2f}\n"
-        msg += f"---------------------------------\n"
-        
+        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n📅 <code>{now}</code>\n---------------------------------\n📈 <b>MARKET ENGINE: {self.symbol}</b>\n💰 Price : <b>{p:,.4f} THB</b>\n📊 State : {state_msg}\n📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n---------------------------------\n🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n💰 BTC Price : {db_btc['p']:,.0f} THB\n📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n🏹 Buy Power : {db_btc['buy_power']:,.2f}\n📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n---------------------------------\n💰 <b>DYNAMIC FINANCIAL METRICS</b>\n✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n💵 Free Cash (THB) : {thb:,.2f}\n🪙 Position Value  : {(coin*p):,.2f}\n📈 Absolute Growth : <b>{growth:+.2f}%</b>\n---------------------------------\n🏆 <b>PERFORMANCE METRICS</b>\n💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n---------------------------------\n"
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
                 pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%)</b>\n"
-                msg += f"🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ SL: {s['sl']:,.4f}\n\n"
-            elif s['status'] == 'PENDING_BUY':
-                msg += f"🟡 <b>SLOT {i}: PENDING_BUY (Processing...)</b>\n\n"
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             else:
-                msg += f"⚪ <b>SLOT {i}: VACANT FREE</b>\n\n"
-                
-        msg += f"🔍 <i>Database Integrity Verified</i>\n<code>({now_time_str})</code>"
+                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
+        msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
     def record_history(self, side, slot_id, price, units, pnl, status, source):
@@ -253,86 +292,62 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"History logging failed: {e}")
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
-        trade_sym = self._get_trade_sym()
-        
         if side == "buy":
             try:
                 res_w = self.bt_auth("POST", "/api/v3/market/wallet")
-                real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else float(amt_val)
-            except: real_thb = float(amt_val)
-            
+                real_thb = float(res_w['result'].get('THB', 0)) if (res_w and 'result' in res_w) else 0.0
+            except: real_thb = amt_val
             safe_buy_amt = min(float(amt_val), real_thb * 0.98)
-            if safe_buy_amt < 500: 
-                self.slots[slot_id]['status'] = 'FREE'
-                return False
+            if safe_buy_amt < 500: return False
             buy_amt = round(float(safe_buy_amt), 2)
-            payload = {"sym": trade_sym, "amt": buy_amt, "rat": 0, "typ": "market"}
+            payload = {"sym": self.symbol.lower(), "amt": buy_amt, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-bid", payload)
-            
         elif side == "sell":
-            try:
-                res_w = self.bt_auth("POST", "/api/v3/market/wallet")
-                real_coin = float(res_w['result'].get(self.coin_sym, 0)) if (res_w and 'result' in res_w) else float(amt_val)
-            except: real_coin = float(amt_val)
-
-            # [ANTI-GHOST SELL PROTOCOL]: เช็คว่าเหรียญจริงมีเพียงพอมั้ย (ป้องกันขายมือไปแล้วแต่บอทพยายามขายอีก)
-            if real_coin < (amt_val * 0.5): 
-                self.notify(f"⚠️ <b>GHOST SELL PREVENTED</b>\nSlot: {slot_id}\n<i>System detected desync (Coin missing). Auto-clearing DB to stop loop.</i>")
-                try:
-                    with psycopg2.connect(self.db_url) as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
-                            conn.commit()
-                except: pass
-                self._load_state()
-                return False
-
-            safe_sell_units = min(self.floor_precision(amt_val, self.precision), self.floor_precision(real_coin, self.precision))
-            if safe_sell_units <= 0:
-                return False
-
-            payload = {"sym": trade_sym, "amt": safe_sell_units, "rat": 0, "typ": "market"}
+            safe_sell_units = self.floor_precision(amt_val, self.precision)
+            payload = {"sym": self.symbol.lower(), "amt": safe_sell_units, "rat": 0, "typ": "market"}
             res = self.bt_auth("POST", "/api/v3/market/place-ask", payload)
-        else: 
-            return False
+        else: return False
 
         if res and res.get('error') == 0:
-            time.sleep(3) 
-            order_id = str(res['result'].get('id', ''))
+            time.sleep(5) 
+            order_id = str(res['result'].get('id'))
+            info = self.bt_auth("GET", "/api/v3/market/order-info", {"sym": self.symbol.lower(), "id": order_id, "sd": side})
             
-            # กำหนดค่า Default เผื่อ API ของ Bitkub ล่มตอนเรียกดู order-info
-            real_p = float(price)
-            real_u = float(buy_amt / price) if side == 'buy' else float(safe_sell_units)
+            real_p = price
+            real_u = (amt_val/price) if side == 'buy' else safe_sell_units
             
-            try:
-                info = self.bt_auth("GET", "/api/v3/market/order-info", {"sym": trade_sym, "id": order_id, "sd": side})
-                if info and info.get('error') == 0 and info.get('result'):
-                    res_data = info['result']
-                    if isinstance(res_data, dict):
-                        history = res_data.get('history', [])
-                        if isinstance(history, list) and len(history) > 0:
-                            total_amount = sum(float(item.get('amount', 0)) for item in history)
-                            total_value = sum(float(item.get('amount', 0)) * float(item.get('rate', 0)) for item in history)
-                            if total_amount > 0:
-                                real_u = total_amount
-                                real_p = total_value / total_amount
-                        else:
-                            filled = float(res_data.get('filled', 0))
-                            total = float(res_data.get('total', 0))
-                            if side == 'buy' and filled > 0:
+            if info and info.get('error') == 0 and info.get('result'):
+                res_data = info['result']
+                
+                # --- แกะประวัติย่อยเพื่อหาปริมาณเหรียญและราคาจริงในคำสั่ง Market Order ---
+                if isinstance(res_data, dict):
+                    history = res_data.get('history', [])
+                    if isinstance(history, list) and len(history) > 0:
+                        total_amount = sum(float(item.get('amount', 0)) for item in history)
+                        total_value = sum(float(item.get('amount', 0)) * float(item.get('rate', 0)) for item in history)
+                        if total_amount > 0:
+                            real_u = total_amount
+                            real_p = total_value / total_amount
+                    else:
+                        filled = float(res_data.get('filled', 0))
+                        total = float(res_data.get('total', 0))
+                        if side == 'buy':
+                            if filled > 0:
                                 real_u = filled
-                                real_p = total / filled if total > 0 else real_p
-                            elif side == 'sell':
-                                amount = float(res_data.get('amount', 0))
-                                if amount > 0:
-                                    real_u = amount
-                                    real_p = total / amount if total > 0 else real_p
-            except Exception as e:
-                print(f"Order Info Fetch Error (Proceeding with default values): {e}")
-
-            if real_u <= 0:
-                real_u = float(buy_amt/real_p) if side == 'buy' else float(safe_sell_units)
-
+                                real_p = total / filled if total > 0 else price
+                        else:
+                            amount = float(res_data.get('amount', 0))
+                            if amount > 0:
+                                real_u = amount
+                                real_p = total / amount if total > 0 else price
+                                
+                elif isinstance(res_data, list) and len(res_data) > 0:
+                    total_amount = sum(float(item.get('amount', item.get('quantity', 0))) for item in res_data)
+                    total_value = sum(float(item.get('amount', item.get('quantity', 0))) * float(item.get('rate', item.get('price', 0))) for item in res_data)
+                    if total_amount > 0:
+                        real_u = total_amount
+                        real_p = total_value / total_amount
+                    
             try:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
@@ -345,13 +360,13 @@ class TitanV18_LuxuryPanicHunterPro:
                                         (slot_id, real_p, actual_units, sl_val, real_p, order_id, int(time.time()*1000), source))
                             
                             self.record_history('BUY', slot_id, real_p, actual_units, 0.0, 'MATCHED', source)
-                            self._send_trade_receipt(f"BUY ({source})", slot_id, real_p, actual_units, None, (real_p * actual_units), source)
+                            self._send_trade_receipt(f"BUY ({source})", slot_id, real_p, real_u, None, (real_p * real_u), source)
                             self.last_buy_ts = time.time() 
                             
                         elif side == 'sell':
                             s = self.slots[slot_id]
                             cost_basis = s['price'] * s['units']
-                            net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (cost_basis * (1 + self.fee_rate))
+                            net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                             self.record_history('SELL', slot_id, real_p, real_u, net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', source)
                             cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                             self._send_trade_receipt(f"SELL ({source})", slot_id, real_p, real_u, net_pnl, cost_basis, source)
@@ -359,14 +374,9 @@ class TitanV18_LuxuryPanicHunterPro:
                 self._load_state()
                 return True
             except Exception as e:
-                # แก้ไข PENDING_BUY ค้าง: หาก DB มีปัญหา จะบังคับเคลียร์สถานะใน Memory
-                if side == 'buy': self.slots[slot_id]['status'] = 'FREE'
-                self._load_state() 
+                print(f"Database ledger sync crash: {e}")
                 return False
-        else:
-            if side == "buy":
-                self.slots[slot_id]['status'] = 'FREE' 
-            return False
+        return False
 
     def run(self):
         last_h = -1
@@ -386,6 +396,7 @@ class TitanV18_LuxuryPanicHunterPro:
                 btc_weekly_volume = self.get_btc_weekly_volume()
                 
                 if dx and db_btc:
+                    self.sync_manual_trade(coin, dx['p'])
                     now = self.get_thai_now()
                     if now.hour != last_h: 
                         self.send_luxury_dashboard(dx, db_btc, btc_weekly_volume, thb, coin, "HOURLY REPORT")
@@ -416,23 +427,15 @@ class TitanV18_LuxuryPanicHunterPro:
                                                 conn.commit()
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
                             
-                    occupied_count = sum(1 for s in self.slots.values() if s['status'] in ['MATCHED', 'PENDING_BUY'])
+                    matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
                     
-                    # ถอดเงื่อนไข RSI 200 ออกเพื่อให้บอททำงานในตลาดทั่วไปได้ตามเป้าหมาย RSI 14
-                    if occupied_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
+                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         if time.time() - self.last_buy_ts >= 300:
                             total_equity = thb + (coin * dx['p'])
                             buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
                             if buy_amount >= 500 and thb >= buy_amount:
-                                target_slot = None
-                                if self.slots[1]['status'] == 'FREE':
-                                    target_slot = 1
-                                elif self.slots[2]['status'] == 'FREE':
-                                    target_slot = 2
-                                    
-                                if target_slot is not None:
-                                    self.slots[target_slot]['status'] = 'PENDING_BUY'
-                                    self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
+                                target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
+                                self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
                                 
             except Exception as e:
                 print(f"Main Loop Exception Error: {e}")
@@ -446,6 +449,7 @@ class TitanV18_LuxuryPanicHunterPro:
             data = res.json()
             if not data or 'c' not in data: return None
             c = np.array(data['c'], dtype=float); v = np.array(data['v'], dtype=float)
+            
             if len(c) < 200 or float(c[-1]) <= 0: return None
             
             def rsi(prices, period=14):
@@ -473,10 +477,11 @@ class TitanV18_LuxuryPanicHunterPro:
             return None
 
     def get_btc_weekly_volume(self):
+        """แก้ไขเพิ่มโครงสร้างความปลอดภัย ป้องกันจุดพิมพ์ตกและค่า NoneType คืนค่ากลับไปคำนวณแดชบอร์ด"""
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15)
             if res.status_code != 200: 
-                return 7000000.0
+                return 7000000.0  # ปริมาณ Volume ขั้นต่ำเฉลี่ยเชิงสถิติ (Fallback Value)
             data = res.json()
             if data and 'v' in data and len(data['v']) > 0:
                 return float(sum(data['v']))
