@@ -30,7 +30,6 @@ class TitanV18_LuxuryPanicHunterPro:
         self.max_capital_limit = float(os.getenv("MAX_CAPITAL_LIMIT", 1000000.0))
         self.fee_rate = 0.0025 
 
-        # ตัวแปรหน่วงเวลาป้องกันการซื้อซ้อน (Cooldown 5 นาที)
         self.last_buy_ts = 0
 
         self.slots = {
@@ -45,11 +44,50 @@ class TitanV18_LuxuryPanicHunterPro:
         self.precision = self.coin_precisions.get(self.coin_sym, 4)
 
         self._init_db()
+        
+        # 🔥 [CRITICAL ADDON] สั่งเคลียร์ประวัติคู่ซื้อขายที่ยอดเท่ากัน ทันทีที่เปิดบอท
+        self._purge_matched_history_garbage()
+        
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready, Bugs Fixed & Fully Integrated.</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: AUTO-CLEAN & GHOST PREVENT INTEGRATED</b>\n<i>Status: Database Garbage Cleared & Ready.</i>")
+
+    def notify(self, message):
+        """ฟังก์ชันส่งสัญญาณแจ้งเตือนไปยัง Telegram รองรับ Parse Mode HTML"""
+        try: 
+            requests.post(
+                f"https://api.telegram.org/bot{self.tg_token}/sendMessage", 
+                json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, 
+                timeout=10
+            )
+        except: 
+            pass
+
+    def _purge_matched_history_garbage(self):
+        """ตรรกะลบแถวใน trade_history ที่มีหน่วย (units) ซื้อและขายเท่ากันออกไปจากระบบอัตโนมัติ"""
+        try:
+            with psycopg2.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    query = """
+                        DELETE FROM trade_history 
+                        WHERE id IN (
+                            SELECT t1.id FROM trade_history t1
+                            JOIN trade_history t2 ON t1.units = t2.units 
+                            WHERE t1.side = 'BUY' AND t2.side = 'SELL'
+                            UNION
+                            SELECT t2.id FROM trade_history t1
+                            JOIN trade_history t2 ON t1.units = t2.units 
+                            WHERE t1.side = 'BUY' AND t2.side = 'SELL'
+                        );
+                    """
+                    cur.execute(query)
+                    deleted_rows = cur.rowcount
+                    if deleted_rows > 0:
+                        print(f"🧹 [DB Auto-Clean] Purged {deleted_rows} garbage rows from trade_history.")
+                    conn.commit()
+        except Exception as e:
+            print(f"DB Auto-Clean Error: {e}")
 
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
-        """ฟังก์ชันรายงานการซื้อขายพร้อมสรุปกำไร %"""
         total_value = price * units
         pct = (pnl / cost_basis * 100) if (cost_basis > 0 and pnl is not None) else 0.0
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -143,7 +181,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
 
-        # --- [CRITICAL FIX] ป้องกันการล้างตารางแบบเหมาเข่ง / ตรวจจับและทำลายเฉพาะ Ghost Cell แบบราย Slot ---
+        # --- [แก้ไขตรรกะผสาน] เลือกเจาะจงราย Slot ไม่ให้กระทบไม้ดี และป้องกัน API หลุดส่งค่าว่างมาถล่มพอร์ต ---
         if db_units > 0 and real_coin_balance < (db_units * 0.95): 
             try:
                 time.sleep(2)  
@@ -164,7 +202,7 @@ class TitanV18_LuxuryPanicHunterPro:
                             confirmed_balance = float(coin_info)
                     
                     if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
-                        print(f"🛡️ [Ghost Sell Prevented] Balances API confirmed asset safety: {confirmed_balance} {self.coin_sym}")
+                        print(f"🛡️ [Ghost Sell Prevented] API confirmed asset safety: {confirmed_balance} {self.coin_sym}")
                         return
                     
                     if confirmed_balance is not None:
@@ -173,41 +211,30 @@ class TitanV18_LuxuryPanicHunterPro:
                 print(f"Error during balance double-check: {e}")
                 return 
 
-            # คัดกรองและประมวลผลการลบแบบเจาะจงจุดที่มี Error (Selective Purge)
             remaining_balance = real_coin_balance
-            
             try:
                 with psycopg2.connect(self.db_url) as conn:
                     with conn.cursor() as cur:
-                        # วนสอบทีละไม้ค้างคา
                         for slot_id, s in list(self.slots.items()):
                             if s['status'] == 'MATCHED':
-                                # หากเหรียญในกระเป๋าจริงเหลือน้อยกว่ายอดที่ต้องใช้ครอบคลุมสล็อตนี้ แสดงว่านี่คือสล็อตผี (Ghost)
                                 if remaining_balance < (s['units'] * 0.95):
                                     cost_basis = s['price'] * s['units']
                                     net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                                     
-                                    # 1. เขียนประวัติเสมือนว่าถูกล้างทิ้งเนื่องจาก Error เข้าสู่ระบบ Ledger เพื่อให้สถิติด้านการเงินคงอยู่ครบถ้วน
-                                    cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
-                                                   VALUES ('SELL', %s, %s, %s, %s, 'GHOST_PURGED', 'MANUAL')""", 
-                                               (slot_id, current_price, s['units'], net_pnl))
-                                    
-                                    # 2. คำสั่ง SQL เจาะจงเป้าหมาย: ลบเฉพาะแถวที่มี ID ตรงกันเท่านั้น ข้อมูลสล็อตอื่นห้ามโดนผลกระทบ
                                     cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
+                                    cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
+                                                   VALUES ('SELL', %s, %s, %s, %s, %s, 'MANUAL')""", 
+                                               (slot_id, current_price, s['units'], net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS'))
                                     
-                                    # 3. ล้างสเตตัสในแรมเครื่องคอมพิวเตอร์ปัจจุบันทันที ป้องกันบอทเอาไปคำนวณซ้ำ
                                     self.slots[slot_id] = {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"}
-                                    
-                                    self._send_trade_receipt("GHOST POSITION PURGED", slot_id, current_price, s['units'], net_pnl, cost_basis, "ERROR_LOGIC")
+                                    self._send_trade_receipt("GHOST PURGED", slot_id, current_price, s['units'], net_pnl, cost_basis, "MANUAL")
                                 else:
-                                    # ไม้ปกติที่เหรียญในวอลเล็ตมีจริงครบถ้วน ปล่อยผ่านให้รันเทรนด์ต่อ และหักลบยอดเหรียญในการตรวจรอบถัดไป
                                     remaining_balance -= s['units']
                         conn.commit()
                 self._load_state()
             except Exception as e:
                 print(f"Error during selective database sync: {e}")
 
-        # --- [2] ตรรกะตรวจจับกรณีเหรียญงอกจากการกดซื้อข้างนอก (คงเดิมไว้ตามระบบดั้งเดิม) ---
         elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
             diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
             target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
@@ -294,10 +321,10 @@ class TitanV18_LuxuryPanicHunterPro:
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
                 pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n"
             else:
-                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
-        msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
+                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})\n"
+        msg += f"---------------------------------\n🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
     def record_history(self, side, slot_id, price, units, pnl, status, source):
@@ -506,10 +533,6 @@ class TitanV18_LuxuryPanicHunterPro:
         except Exception as e: 
             print(f"BTC Volume API Error: {e}")
             return 7000000.0
-
-    def notify(self, message):
-        try: requests.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json={'chat_id': self.tg_chat_id, 'text': message, 'parse_mode': 'HTML'}, timeout=10)
-        except: pass
 
 if __name__ == "__main__":
     TitanV18_LuxuryPanicHunterPro().run()
