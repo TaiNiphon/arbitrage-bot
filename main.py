@@ -576,4 +576,4 @@ class TitanV18_LuxuryPanicHunterPro:
         except: pass
 
 if __name__ == "__main__":
-    TitanV18_LuxuryPanicHunterPro().run(
+    TitanV18_LuxuryPanicHunterPro().run()
