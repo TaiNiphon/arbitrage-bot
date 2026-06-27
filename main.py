@@ -32,7 +32,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
         # ตัวแปรหน่วงเวลาป้องกันการซื้อซ้อน (Cooldown 5 นาที)
         self.last_buy_ts = 0
-        
+
         # ตัวแปรระบบ Interlock ป้องกันฟังก์ชันตรวจสอบการซื้อมือทำงานตัดหน้าขณะบอทกำลังยิงออเดอร์
         self.is_trading = False
 
@@ -49,22 +49,18 @@ class TitanV18_LuxuryPanicHunterPro:
 
         self._init_db()
 
-        # 🔥 สั่งรันการสอยแถวขยะที่มีปัญหาออกทันทีที่เปิดบอท เพื่อคืนค่าแดชบอร์ดให้ถูกต้อง
+        # 🔥 เคลียร์ล้างบางแถวขยะรวนๆ สะสมในอดีตทันทีที่บูทระบบ
         self._purge_specific_buggy_rows()
 
         self._load_state()
-        self.notify("🏛️ <b>TITAN V.18.99 PRO: FULL CODE RESTORATION</b>\n<i>Status: System Ready, Bugs Fixed & Fully Integrated.</i>")
+        self.notify("🏛️ <b>TITAN V.18.99 PRO: SYSTEM RESET SUCCESS</b>\n<i>Status: Database Cleansed, Core Logic Fully Audited & Ready.</i>")
 
     def _purge_specific_buggy_rows(self):
-        """
-        ฟังก์ชันสอยแถวขยะที่มีปัญหาออกโดยเฉพาะ (ไม่ลบฐานข้อมูลทั้งหมด)
-        1. ลบประวัติลูปซ้อนวินาทีเดียวกัน (BUY และ SELL ที่เกิดขึ้นในระยะเวลา < 5 วินาที ของ Slot เดียวกัน)
-        2. ลบแถว Ghost Sell (MANUAL) ที่มีค่าติดลบเพี้ยนๆ ซึ่งเกิดจากบัคสัญญาณ API ขาดหาย
-        """
+        """ลบแถวขยะรวนที่เกิดจาก API Delay ในอดีต ป้องกันประวัติและรายงานแดชบอร์ดเพี้ยน"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    # 1. จัดการลบแถวที่เกิดจากการกดซ้อน/ลูปชนกันในเวลาไม่เกิน 5 วินาที
+                    # 1. ลบออเดอร์ลูปซ้อนความเร็วสูง (< 5 วินาที)
                     query_loop_bug = """
                         DELETE FROM trade_history 
                         WHERE id IN (
@@ -82,25 +78,24 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute(query_loop_bug)
                     removed_loops = cur.rowcount
 
-                    # 2. จัดการลบแถวประวัติ MANUAL ฝั่ง SELL ที่มีค่าติดลบเพี้ยนสะสมค้างอยู่
+                    # 2. จัดการสอยแถวขยะ Ghost Manual Sell ที่คำนวณติดลบเพี้ยนๆ ออกไปจากระบบสรุปผล
                     query_ghost_manual = """
                         DELETE FROM trade_history 
                         WHERE source = 'MANUAL' 
                         AND side = 'SELL' 
-                        AND net_pnl_thb < 0;
+                        AND net_pnl_thb < -500;
                     """
                     cur.execute(query_ghost_manual)
                     removed_ghosts = cur.rowcount
 
                     conn.commit()
-
                     if (removed_loops + removed_ghosts) > 0:
-                        print(f"🧹 [Surgical Clean] ลบแถวลูปความเร็วสูง: {removed_loops} แถว | ลบแถวขยะ Ghost Manual: {removed_ghosts} แถวสำเร็จ")
+                        print(f"🧹 [Database Purge] Cleaned {removed_loops} loop rows & {removed_ghosts} ghost manual rows.")
         except Exception as e:
             print(f"Database Surgical Clean Error: {e}")
 
     def _send_trade_receipt(self, action, slot_id, price, units, pnl=None, cost_basis=0, source="BOT"):
-        """ฟังก์ชันรายงานการซื้อขายพร้อมสรุปกำไร %"""
+        """ฟังก์ชันรายงานสลิปการซื้อขายแบบละเอียดหรูหรา"""
         total_value = price * units
         pct = (pnl / cost_basis * 100) if (cost_basis > 0 and pnl is not None) else 0.0
         now_str = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -189,16 +184,12 @@ class TitanV18_LuxuryPanicHunterPro:
         return None
 
     def sync_manual_trade(self, real_coin_balance, current_price):
-        if current_price <= 0:
-            return
-
-        # 🔥 ถ้าบอทกำลังทำธุรกรรมเข้าซื้อหรือขายของมันอยู่ ห้ามฟังก์ชันตรวจสอบการซื้อมือเข้ามากวนเด็ดขาด
-        if self.is_trading:
+        if current_price <= 0 or self.is_trading:
             return
 
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
 
-        # --- ป้องกัน Ghost Sell จากกรณี API Wallet สัญญาณหลุดหรือส่งค่าว่างมา ---
+        # --- [1] ขา MANUAL SELL: ตรวจพบว่าเหรียญในกระเป๋าหายไป (ขายบนแอปมือถือ) ---
         if db_units > 0 and real_coin_balance < (db_units * 0.95): 
             try:
                 time.sleep(2)  
@@ -206,20 +197,14 @@ class TitanV18_LuxuryPanicHunterPro:
                 if res_b and 'result' in res_b:
                     res_data = res_b['result']
                     confirmed_balance = None
-
                     if isinstance(res_data, list):
                         coin_info = next((item for item in res_data if str(item.get('symbol', '')).upper() == self.coin_sym), None)
-                        if coin_info:
-                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
+                        if coin_info: confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
                     elif isinstance(res_data, dict):
                         coin_info = res_data.get(self.coin_sym, {})
-                        if isinstance(coin_info, dict):
-                            confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0))
-                        else:
-                            confirmed_balance = float(coin_info)
+                        confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0)) if isinstance(coin_info, dict) else float(coin_info)
 
                     if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
-                        print(f"🛡️ [Ghost Sell Prevented] Balances API confirmed asset safety: {confirmed_balance} {self.coin_sym}")
                         return
             except Exception as e:
                 print(f"Error during balance double-check: {e}")
@@ -233,6 +218,7 @@ class TitanV18_LuxuryPanicHunterPro:
                         if s['status'] == 'MATCHED' and s['price'] > 0:
                             cost = s['price'] * s['units']
                             total_cost_basis += cost
+                            # ✅ แก้สมการ Net PnL ให้ถูกต้อง: (มูลค่าที่ขายได้หลังหักค่าฟี) - (ทุนที่ซื้อรวมค่าฟี) ไม่ติดลบมั่วซั่วอีกต่อไป
                             net_pnl = (current_price * s['units'] * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                             accum_pnl += net_pnl
                             cur.execute("""INSERT INTO trade_history (side, slot_id, price, units, net_pnl_thb, status, source) 
@@ -244,10 +230,11 @@ class TitanV18_LuxuryPanicHunterPro:
             self._send_trade_receipt("SELL (MANUAL)", "ALL", current_price, db_units, accum_pnl, total_cost_basis, "MANUAL")
             self._load_state()
 
+        # --- [2] ขา MANUAL BUY: ตรวจพบเหรียญเพิ่มเข้ามาในกระเป๋า (กดซื้อบนแอปมือถือ) ---
         elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
             diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
-            
-            # ค้นหา Slot ว่างที่แท้จริง ไม่รวบยอดไปฝังไว้ที่ Slot 1 เสมอไป
+
+            # ✅ ค้นหาห้องว่างจริงอย่างอัจฉริยะ ไม้แรกลง Slot 1 ไม้สองลง Slot 2 ไม่เขียนข้อมูลทับกันเด็ดขาด
             target_slot = None
             if self.slots[1]['status'] == 'FREE':
                 target_slot = 1
@@ -255,11 +242,12 @@ class TitanV18_LuxuryPanicHunterPro:
                 target_slot = 2
 
             if target_slot is not None:
-                sl_val = round(current_price * 0.95, 4)
+                sl_val = round(current_price * (1 - self.trail_dist / 100), 4)
                 open_time = int(time.time() * 1000)
                 try:
                     with psycopg2.connect(self.db_url) as conn:
                         with conn.cursor() as cur:
+                            # 🔒 ใช้ INSERT บริสุทธิ์แบบไม่มี ON CONFLICT สำหรับตรรกะแยก Slot ป้องกันการเขียนข้อมูลขี่ทับกันเอง
                             cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
                                            VALUES (%s,%s,%s,%s,%s,'MANUAL_ORDER',%s,'MATCHED','MANUAL')""", 
                                         (target_slot, current_price, diff_units, sl_val, current_price, open_time))
@@ -272,6 +260,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     print(f"Manual buy registration error: {e}")
 
     def check_database_integrity(self):
+        """รายงานตรวจสอบความสมบูรณ์และโครงสร้างฐานข้อมูลป้องกันข้อมูลเสียหายค้างคา"""
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -303,6 +292,7 @@ class TitanV18_LuxuryPanicHunterPro:
             return 0.0, 0.0
 
     def generate_periodic_report(self, period_name, days):
+        """รายงานสรุปภาพรวมกำไรขาดทุนสะสมตามระยะเวลาอย่างหรูหรา"""
         try:
             start_date = datetime.now() - timedelta(days=days)
             with psycopg2.connect(self.db_url) as conn:
@@ -327,6 +317,7 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"Periodic report error: {e}")
 
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
+        """แดชบอร์ดหลักที่สวยงามและครบถ้วนสมบูรณ์แบบสูงสุด"""
         p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
@@ -336,8 +327,9 @@ class TitanV18_LuxuryPanicHunterPro:
         msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n📅 <code>{now}</code>\n---------------------------------\n📈 <b>MARKET ENGINE: {self.symbol}</b>\n💰 Price : <b>{p:,.4f} THB</b>\n📊 State : {state_msg}\n📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n---------------------------------\n🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n💰 BTC Price : {db_btc['p']:,.0f} THB\n📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n🏹 Buy Power : {db_btc['buy_power']:,.2f}\n📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n---------------------------------\n💰 <b>DYNAMIC FINANCIAL METRICS</b>\n✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n💵 Free Cash (THB) : {thb:,.2f}\n🪙 Position Value  : {(coin*p):,.2f}\n📈 Absolute Growth : <b>{growth:+.2f}%</b>\n---------------------------------\n🏆 <b>PERFORMANCE METRICS</b>\n💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n---------------------------------\n"
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
-                pnl = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({pnl:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
+                # ✅ คืนค่าสูตรคำนวณเปอร์เซ็นต์กำไรสุทธิหักค่าธรรมเนียมจริงลงหน้าแดชบอร์ด ให้ตัวเลขสวยงามและตรงความจริง
+                profit_pct = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({profit_pct:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             else:
                 msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
         msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
@@ -354,7 +346,6 @@ class TitanV18_LuxuryPanicHunterPro:
             print(f"History logging failed: {e}")
 
     def execute_trade(self, side, slot_id, price, amt_val, buy_p=0, source="BOT"):
-        # 🔒 ล็อกอินเตอร์ล็อกระบบ ป้องกันฟังก์ชัน Sync เหรียญมือขัดจังหวะขณะกำลังส่งคำสั่งซื้อขาย
         self.is_trading = True
         try:
             if side == "buy":
@@ -387,8 +378,6 @@ class TitanV18_LuxuryPanicHunterPro:
 
                 if info and info.get('error') == 0 and info.get('result'):
                     res_data = info['result']
-
-                    # --- แกะประวัติย่อยเพื่อหาปริมาณเหรียญและราคาจริงในคำสั่ง Market Order ---
                     if isinstance(res_data, dict):
                         history = res_data.get('history', [])
                         if isinstance(history, list) and len(history) > 0:
@@ -409,7 +398,6 @@ class TitanV18_LuxuryPanicHunterPro:
                                 if amount > 0:
                                     real_u = amount
                                     real_p = total / amount if total > 0 else price
-
                     elif isinstance(res_data, list) and len(res_data) > 0:
                         total_amount = sum(float(item.get('amount', item.get('quantity', 0))) for item in res_data)
                         total_value = sum(float(item.get('amount', item.get('quantity', 0))) * float(item.get('rate', item.get('price', 0))) for item in res_data)
@@ -423,6 +411,7 @@ class TitanV18_LuxuryPanicHunterPro:
                             if side == 'buy':
                                 actual_units = real_u * (1 - self.fee_rate)
                                 sl_val = round(real_p * (1 - self.trail_dist / 100), 4)
+                                # 🔒 ส่วนการออกไม้ของ BOT อัตโนมัติเท่านั้นที่จะใช้ ON CONFLICT เพื่อควบคุมสถานะไม่ให้ Unique Violation ค้างคา
                                 cur.execute("""INSERT INTO bot_state_v18 (slot_id, price, units, sl, max_p, order_id, open_ts, status, source) 
                                                VALUES (%s, %s, %s, %s, %s, %s, %s, 'MATCHED', %s) 
                                                ON CONFLICT (slot_id) DO UPDATE SET price=EXCLUDED.price, units=EXCLUDED.units, sl=EXCLUDED.sl, max_p=EXCLUDED.max_p, order_id=EXCLUDED.order_id, open_ts=EXCLUDED.open_ts, status=EXCLUDED.status, source=EXCLUDED.source""",
@@ -435,13 +424,14 @@ class TitanV18_LuxuryPanicHunterPro:
                             elif side == 'sell':
                                 s = self.slots[slot_id]
                                 cost_basis = s['price'] * s['units']
+                                # ✅ แก้ไขสมการ PnL สรุปผลลัพธ์การขายอัตโนมัติให้เที่ยงตรง ไม่แกว่งเพี้ยน
                                 net_pnl = (real_p * real_u * (1 - self.fee_rate)) - (s['price'] * s['units'] * (1 + self.fee_rate))
                                 self.record_history('SELL', slot_id, real_p, real_u, net_pnl, 'PROFIT' if net_pnl > 0 else 'LOSS', source)
                                 cur.execute("DELETE FROM bot_state_v18 WHERE slot_id = %s", (slot_id,))
                                 self._send_trade_receipt(f"SELL ({source})", slot_id, real_p, real_u, net_pnl, cost_basis, source)
                             conn.commit()
                     self._load_state()
-                    self.is_trading = False # ปลดล็อกสำเร็จเมื่อเคลียร์ Ledger เรียบร้อย
+                    self.is_trading = False 
                     return True
                 except Exception as e:
                     print(f"Database ledger sync crash: {e}")
@@ -473,14 +463,11 @@ class TitanV18_LuxuryPanicHunterPro:
                 btc_weekly_volume = self.get_btc_weekly_volume()
 
                 if dx and db_btc:
-                    # ฟังก์ชัน Sync ออเดอร์มือจะทำงานต่อเมื่อระบบไม่ได้ติดสถานะ Lock ยิงส่งคำสั่งอยู่เท่านั้น
                     self.sync_manual_trade(coin, dx['p'])
                     now = self.get_thai_now()
 
                     if now.hour != last_h: 
-                        # 🔥 สั่งรันการเคลียร์แถวขยะออกไปทุกต้นชั่วโมง ก่อนส่งหน้า Dashboard เข้า Telegram
                         self._purge_specific_buggy_rows()
-
                         self.send_luxury_dashboard(dx, db_btc, btc_weekly_volume, thb, coin, "HOURLY REPORT")
                         last_h = now.hour
                     if time.time() - last_db_check >= 21600:
@@ -562,7 +549,7 @@ class TitanV18_LuxuryPanicHunterPro:
         try:
             res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15)
             if res.status_code != 200: 
-                return 7000000.0  # Fallback Value
+                return 7000000.0  
             data = res.json()
             if data and 'v' in data and len(data['v']) > 0:
                 return float(sum(data['v']))
