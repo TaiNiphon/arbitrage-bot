@@ -78,12 +78,12 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute(query_loop_bug)
                     removed_loops = cur.rowcount
 
-                    # 2. จัดการสอยแถวขยะ Ghost Manual Sell ที่คำนวณติดลบเพี้ยนๆ ออกไปจากระบบสรุปผล
+                    # 2. จัดการสอยแถวขยะ Ghost Manual Sell ที่คำนวณติดลบเพี้ยนๆ ออกไปจากระบบสรุปผล (แก้ไขให้ครอบคลุมค่าติดลบทั้งหมด)
                     query_ghost_manual = """
                         DELETE FROM trade_history 
                         WHERE source = 'MANUAL' 
                         AND side = 'SELL' 
-                        AND net_pnl_thb < -500;
+                        AND net_pnl_thb < 0;
                     """
                     cur.execute(query_ghost_manual)
                     removed_ghosts = cur.rowcount
@@ -185,6 +185,10 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def sync_manual_trade(self, real_coin_balance, current_price):
         if current_price <= 0 or self.is_trading:
+            return
+
+        # 🔥 แก้ไขบัค "ซื้อแล้วบอกขายเลย": ข้ามการตรวจเช็ก Manual 45 วินาทีแรกหลังบอทเพิ่งซื้อ เพื่อรอ API Balance อัปเดตให้ตรง
+        if time.time() - self.last_buy_ts < 45:
             return
 
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
@@ -503,8 +507,15 @@ class TitanV18_LuxuryPanicHunterPro:
                             total_equity = thb + (coin * dx['p'])
                             buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
                             if buy_amount >= 500 and thb >= buy_amount:
-                                target_slot = 1 if self.slots[1]['status'] == 'FREE' else 2
-                                self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
+                                # 🔥 แก้ไขบัค "ไปรวมสล็อต 1": บังคับเช็กสถานะ FREE ให้ชัวร์ก่อนยิงคำสั่ง
+                                target_slot = None
+                                if self.slots[1]['status'] == 'FREE':
+                                    target_slot = 1
+                                elif self.slots[2]['status'] == 'FREE':
+                                    target_slot = 2
+                                    
+                                if target_slot is not None:
+                                    self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
 
             except Exception as e:
                 print(f"Main Loop Exception Error: {e}")
