@@ -187,8 +187,8 @@ class TitanV18_LuxuryPanicHunterPro:
         if current_price <= 0 or self.is_trading:
             return
 
-        # 🔥 แก้ไขบัค "ซื้อแล้วบอกขายเลย": ข้ามการตรวจเช็ก Manual 45 วินาทีแรกหลังบอทเพิ่งซื้อ เพื่อรอ API Balance อัปเดตให้ตรง
-        if time.time() - self.last_buy_ts < 45:
+        # 🔥 แก้ไขบัค "ซื้อแล้วบอกขายเลย": ข้ามการตรวจเช็ก Manual 180 วินาทีแรกหลังบอทเพิ่งซื้อ เพื่อรอ API Balance อัปเดตให้ตรง
+        if time.time() - self.last_buy_ts < 180:
             return
 
         db_units = sum(s['units'] for s in self.slots.values() if s['status'] == 'MATCHED')
@@ -196,7 +196,7 @@ class TitanV18_LuxuryPanicHunterPro:
         # --- [1] ขา MANUAL SELL: ตรวจพบว่าเหรียญในกระเป๋าหายไป (ขายบนแอปมือถือ) ---
         if db_units > 0 and real_coin_balance < (db_units * 0.95): 
             try:
-                time.sleep(2)  
+                time.sleep(10)  
                 res_b = self.bt_auth("POST", "/api/v3/market/balances")
                 if res_b and 'result' in res_b:
                     res_data = res_b['result']
@@ -505,7 +505,7 @@ class TitanV18_LuxuryPanicHunterPro:
                     if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         if time.time() - self.last_buy_ts >= 300:
                             total_equity = thb + (coin * dx['p'])
-                            buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
+                            buy_amount = min(int(total_equity * 0.24), int(self.max_capital_limit))
                             if buy_amount >= 500 and thb >= buy_amount:
                                 # 🔥 แก้ไขบัค "ไปรวมสล็อต 1": บังคับเช็กสถานะ FREE ให้ชัวร์ก่อนยิงคำสั่ง
                                 target_slot = None
@@ -513,7 +513,7 @@ class TitanV18_LuxuryPanicHunterPro:
                                     target_slot = 1
                                 elif self.slots[2]['status'] == 'FREE':
                                     target_slot = 2
-                                    
+
                                 if target_slot is not None:
                                     self.execute_trade('buy', target_slot, dx['p'], buy_amount, source="BOT")
 
