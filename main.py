@@ -324,20 +324,53 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
         """แดชบอร์ดหลักที่สวยงามและครบถ้วนสมบูรณ์แบบสูงสุด"""
-        p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
+        p = dx['p']
+        rsi_val = dx['r14']
+        equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         last_pnl, today_pnl = self.get_pnl_stats()
         state_msg = "🚨 EXTREME PANIC (BUY ZONE)" if rsi_val <= self.buy_rsi_14 else ("🔥 PANIC SALE" if rsi_val <= self.rsi_buy_max else ("⚠️ OVERBOUGHT" if rsi_val >= 70 else "↔️ NEUTRAL SIDEWAY"))
         btc_avg_weekly = btc_weekly_volume / 7
-        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n📅 <code>{now}</code>\n---------------------------------\n📈 <b>MARKET ENGINE: {self.symbol}</b>\n💰 Price : <b>{p:,.4f} THB</b>\n📊 State : {state_msg}\n📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n---------------------------------\n🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n💰 BTC Price : {db_btc['p']:,.0f} THB\n📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n🏹 Buy Power : {db_btc['buy_power']:,.2f}\n📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n---------------------------------\n💰 <b>DYNAMIC FINANCIAL METRICS</b>\n✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n💵 Free Cash (THB) : {thb:,.2f}\n🪙 Position Value  : {(coin*p):,.2f}\n📈 Absolute Growth : <b>{growth:+.2f}%</b>\n---------------------------------\n🏆 <b>PERFORMANCE METRICS</b>\n💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n---------------------------------\n"
+        
+        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n"
+        msg += f"📅 <code>{now}</code>\n"
+        msg += f"---------------------------------\n"
+        msg += f"📈 <b>MARKET ENGINE: {self.symbol}</b>\n"
+        msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
+        msg += f"📊 State : {state_msg}\n"
+        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
+        msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
+        msg += f"📊 Vol 15m: {dx['vol']:,.2f} | 🏹 Buy Power: {dx['buy_power']:,.2f}\n"
+        msg += f"🚫 Max Limit: [RSI 14 ≤ {self.rsi_buy_max:.2f} | RSI 200 ≤ {self.buy_rsi_200:.2f}]\n"
+        msg += f"---------------------------------\n"
+        msg += f"🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n"
+        msg += f"📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n"
+        msg += f"💰 BTC Price : {db_btc['p']:,.0f} THB\n"
+        msg += f"📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n"
+        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n"
+        msg += f"📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n"
+        msg += f"---------------------------------\n"
+        msg += f"💰 <b>DYNAMIC FINANCIAL METRICS</b>\n"
+        msg += f"✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n"
+        msg += f"💵 Free Cash (THB) : {thb:,.2f}\n"
+        msg += f"🪙 Position Value  : {(coin*p):,.2f}\n"
+        msg += f"📈 Absolute Growth : <b>{growth:+.2f}%</b>\n"
+        msg += f"---------------------------------\n"
+        msg += f"🏆 <b>PERFORMANCE METRICS</b>\n"
+        msg += f"💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n"
+        msg += f"💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n"
+        msg += f"---------------------------------\n"
+        
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
-                # ✅ คืนค่าสูตรคำนวณเปอร์เซ็นต์กำไรสุทธิหักค่าธรรมเนียมจริงลงหน้าแดชบอร์ด ให้ตัวเลขสวยงามและตรงความจริง
                 profit_pct = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({profit_pct:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({profit_pct:+.2f}%) [{s['source']}]</b>\n"
+                msg += f"📥 Entry Price: {s['price']:,.4f} THB\n"
+                msg += f"🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             else:
-                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
+                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Wait RSI14 ≤ {self.buy_rsi_14} & RSI200 ≤ {self.buy_rsi_200})</b>\n\n"
+                
         msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
