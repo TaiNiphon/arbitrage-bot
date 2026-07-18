@@ -36,6 +36,9 @@ class TitanV18_LuxuryPanicHunterPro:
         # ตัวแปรระบบ Interlock ป้องกันฟังก์ชันตรวจสอบการซื้อมือทำงานตัดหน้าขณะบอทกำลังยิงออเดอร์
         self.is_trading = False
 
+        # 🔥 ตัวแปรนับจำนวนการตรวจเช็กเพื่อป้องกัน API Balance Delay ส่งค่ากวนระบบ
+        self.consecutive_sell_clicks = 0
+
         self.slots = {
             1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"},
             2: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"}
@@ -78,19 +81,9 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute(query_loop_bug)
                     removed_loops = cur.rowcount
 
-                    # 2. จัดการสอยแถวขยะ Ghost Manual Sell ที่คำนวณติดลบเพี้ยนๆ ออกไปจากระบบสรุปผล (แก้ไขให้ครอบคลุมค่าติดลบทั้งหมด)
-                    query_ghost_manual = """
-                        DELETE FROM trade_history 
-                        WHERE source = 'MANUAL' 
-                        AND side = 'SELL' 
-                        AND net_pnl_thb < 0;
-                    """
-                    cur.execute(query_ghost_manual)
-                    removed_ghosts = cur.rowcount
-
                     conn.commit()
-                    if (removed_loops + removed_ghosts) > 0:
-                        print(f"🧹 [Database Purge] Cleaned {removed_loops} loop rows & {removed_ghosts} ghost manual rows.")
+                    if removed_loops > 0:
+                        print(f"🧹 [Database Purge] Cleaned {removed_loops} loop rows.")
         except Exception as e:
             print(f"Database Surgical Clean Error: {e}")
 
@@ -195,6 +188,10 @@ class TitanV18_LuxuryPanicHunterPro:
 
         # --- [1] ขา MANUAL SELL: ตรวจพบว่าเหรียญในกระเป๋าหายไป (ขายบนแอปมือถือ) ---
         if db_units > 0 and real_coin_balance < (db_units * 0.95): 
+            self.consecutive_sell_clicks += 1
+            if self.consecutive_sell_clicks < 8:  # ต้องตรวจเจอติดต่อกันอย่างน้อย 8 รอบสแกน ป้องกันอาการกระตุกของ API ดีเลย์
+                return
+
             try:
                 time.sleep(10)  
                 res_b = self.bt_auth("POST", "/api/v3/market/balances")
@@ -209,6 +206,7 @@ class TitanV18_LuxuryPanicHunterPro:
                         confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0)) if isinstance(coin_info, dict) else float(coin_info)
 
                     if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
+                        self.consecutive_sell_clicks = 0
                         return
             except Exception as e:
                 print(f"Error during balance double-check: {e}")
@@ -231,11 +229,13 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute("DELETE FROM bot_state_v18")
                     conn.commit()
 
+            self.consecutive_sell_clicks = 0
             self._send_trade_receipt("SELL (MANUAL)", "ALL", current_price, db_units, accum_pnl, total_cost_basis, "MANUAL")
             self._load_state()
 
         # --- [2] ขา MANUAL BUY: ตรวจพบเหรียญเพิ่มเข้ามาในกระเป๋า (กดซื้อบนแอปมือถือ) ---
         elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
+            self.consecutive_sell_clicks = 0
             diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
 
             # ✅ ค้นหาห้องว่างจริงอย่างอัจฉริยะ ไม้แรกลง Slot 1 ไม้สองลง Slot 2 ไม่เขียนข้อมูลทับกันเด็ดขาด
@@ -262,6 +262,8 @@ class TitanV18_LuxuryPanicHunterPro:
                     self._load_state()
                 except Exception as e:
                     print(f"Manual buy registration error: {e}")
+        else:
+            self.consecutive_sell_clicks = 0
 
     def check_database_integrity(self):
         """รายงานตรวจสอบความสมบูรณ์และโครงสร้างฐานข้อมูลป้องกันข้อมูลเสียหายค้างคา"""
@@ -501,11 +503,27 @@ class TitanV18_LuxuryPanicHunterPro:
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
 
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
+                    
+                    # ✅ คำนวณมูลค่าไม้ละ 45% ตามโจทย์อย่างเที่ยงตรง
+                    actual_coin_value = coin * dx['p']
+                    total_equity = thb + actual_coin_value
+                    buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
 
-                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
+                    # 🛡️ EXCHANGE-SIDE SAFETY SHIELD (เกราะป้องกันขั้นเด็ดขาดจากการซื้อซ้อนบนกระดานจริง)
+                    allow_buy = True
+                    if matched_count == 0 and actual_coin_value >= 400:
+                        # กระดานจริงมีเหรียญค้างอยู่ แต่วงจรในระบบโดนล้างเป็น 0 (ห้ามซื้อเพิ่มเด็ดขาด ป้องกันบัค API ดีเลย์)
+                        allow_buy = False
+                        print("🛡️ [Safety Shield] Detected existing coins on exchange while DB is empty. Buy blocked to prevent duplication.")
+                    elif matched_count == 1 and actual_coin_value >= (buy_amount * 1.3):
+                        # มีเหรียญจริงบนกระดานครอบคลุมมูลค่า 2 ไม้แล้ว แต่ระบบนึกว่าเพิ่งออกไม้แรก (ห้ามเปิดไม้เพิ่ม)
+                        allow_buy = False
+                        print("🛡️ [Safety Shield] Detected coins equivalent to 2 slots on exchange. Buy blocked to prevent exceeding limit.")
+                    elif matched_count >= 2:
+                        allow_buy = False
+
+                    if allow_buy and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         if time.time() - self.last_buy_ts >= 300:
-                            total_equity = thb + (coin * dx['p'])
-                            buy_amount = min(int(total_equity * 0.24), int(self.max_capital_limit))
                             if buy_amount >= 500 and thb >= buy_amount:
                                 # 🔥 แก้ไขบัค "ไปรวมสล็อต 1": บังคับเช็กสถานะ FREE ให้ชัวร์ก่อนยิงคำสั่ง
                                 target_slot = None
