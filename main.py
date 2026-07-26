@@ -1,3 +1,4 @@
+
 import os
 import requests
 import time
@@ -35,9 +36,6 @@ class TitanV18_LuxuryPanicHunterPro:
 
         # ตัวแปรระบบ Interlock ป้องกันฟังก์ชันตรวจสอบการซื้อมือทำงานตัดหน้าขณะบอทกำลังยิงออเดอร์
         self.is_trading = False
-
-        # 🔥 ตัวแปรนับจำนวนการตรวจเช็กเพื่อป้องกัน API Balance Delay ส่งค่ากวนระบบ
-        self.consecutive_sell_clicks = 0
 
         self.slots = {
             1: {"status": "FREE", "price": 0.0, "units": 0.0, "sl": 0.0, "max_p": 0.0, "source": "BOT"},
@@ -81,9 +79,19 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute(query_loop_bug)
                     removed_loops = cur.rowcount
 
+                    # 2. จัดการสอยแถวขยะ Ghost Manual Sell ที่คำนวณติดลบเพี้ยนๆ ออกไปจากระบบสรุปผล (แก้ไขให้ครอบคลุมค่าติดลบทั้งหมด)
+                    query_ghost_manual = """
+                        DELETE FROM trade_history 
+                        WHERE source = 'MANUAL' 
+                        AND side = 'SELL' 
+                        AND net_pnl_thb < 0;
+                    """
+                    cur.execute(query_ghost_manual)
+                    removed_ghosts = cur.rowcount
+
                     conn.commit()
-                    if removed_loops > 0:
-                        print(f"🧹 [Database Purge] Cleaned {removed_loops} loop rows.")
+                    if (removed_loops + removed_ghosts) > 0:
+                        print(f"🧹 [Database Purge] Cleaned {removed_loops} loop rows & {removed_ghosts} ghost manual rows.")
         except Exception as e:
             print(f"Database Surgical Clean Error: {e}")
 
@@ -188,10 +196,6 @@ class TitanV18_LuxuryPanicHunterPro:
 
         # --- [1] ขา MANUAL SELL: ตรวจพบว่าเหรียญในกระเป๋าหายไป (ขายบนแอปมือถือ) ---
         if db_units > 0 and real_coin_balance < (db_units * 0.95): 
-            self.consecutive_sell_clicks += 1
-            if self.consecutive_sell_clicks < 8:  # ต้องตรวจเจอติดต่อกันอย่างน้อย 8 รอบสแกน ป้องกันอาการกระตุกของ API ดีเลย์
-                return
-
             try:
                 time.sleep(10)  
                 res_b = self.bt_auth("POST", "/api/v3/market/balances")
@@ -206,7 +210,6 @@ class TitanV18_LuxuryPanicHunterPro:
                         confirmed_balance = float(coin_info.get('available', 0)) + float(coin_info.get('reserved', 0)) if isinstance(coin_info, dict) else float(coin_info)
 
                     if confirmed_balance is not None and confirmed_balance >= (db_units * 0.95):
-                        self.consecutive_sell_clicks = 0
                         return
             except Exception as e:
                 print(f"Error during balance double-check: {e}")
@@ -229,13 +232,11 @@ class TitanV18_LuxuryPanicHunterPro:
                     cur.execute("DELETE FROM bot_state_v18")
                     conn.commit()
 
-            self.consecutive_sell_clicks = 0
             self._send_trade_receipt("SELL (MANUAL)", "ALL", current_price, db_units, accum_pnl, total_cost_basis, "MANUAL")
             self._load_state()
 
         # --- [2] ขา MANUAL BUY: ตรวจพบเหรียญเพิ่มเข้ามาในกระเป๋า (กดซื้อบนแอปมือถือ) ---
         elif real_coin_balance > (db_units * 1.05) and (real_coin_balance - db_units) * current_price >= 500:
-            self.consecutive_sell_clicks = 0
             diff_units = self.floor_precision(real_coin_balance - db_units, self.precision)
 
             # ✅ ค้นหาห้องว่างจริงอย่างอัจฉริยะ ไม้แรกลง Slot 1 ไม้สองลง Slot 2 ไม่เขียนข้อมูลทับกันเด็ดขาด
@@ -262,8 +263,6 @@ class TitanV18_LuxuryPanicHunterPro:
                     self._load_state()
                 except Exception as e:
                     print(f"Manual buy registration error: {e}")
-        else:
-            self.consecutive_sell_clicks = 0
 
     def check_database_integrity(self):
         """รายงานตรวจสอบความสมบูรณ์และโครงสร้างฐานข้อมูลป้องกันข้อมูลเสียหายค้างคา"""
@@ -324,53 +323,20 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def send_luxury_dashboard(self, dx, db_btc, btc_weekly_volume, thb, coin, mode="REPORT"):
         """แดชบอร์ดหลักที่สวยงามและครบถ้วนสมบูรณ์แบบสูงสุด"""
-        p = dx['p']
-        rsi_val = dx['r14']
-        equity = thb + (coin * p)
+        p = dx['p']; rsi_val = dx['r14']; equity = thb + (coin * p)
         growth = ((equity - self.initial_equity) / self.initial_equity) * 100
         now = self.get_thai_now().strftime('%d/%m/%Y | ⏰ %H:%M:%S')
         last_pnl, today_pnl = self.get_pnl_stats()
         state_msg = "🚨 EXTREME PANIC (BUY ZONE)" if rsi_val <= self.buy_rsi_14 else ("🔥 PANIC SALE" if rsi_val <= self.rsi_buy_max else ("⚠️ OVERBOUGHT" if rsi_val >= 70 else "↔️ NEUTRAL SIDEWAY"))
         btc_avg_weekly = btc_weekly_volume / 7
-        
-        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n"
-        msg += f"📅 <code>{now}</code>\n"
-        msg += f"---------------------------------\n"
-        msg += f"📈 <b>MARKET ENGINE: {self.symbol}</b>\n"
-        msg += f"💰 Price : <b>{p:,.4f} THB</b>\n"
-        msg += f"📊 State : {state_msg}\n"
-        msg += f"📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n"
-        msg += f"📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n"
-        msg += f"📊 Vol 15m: {dx['vol']:,.2f} | 🏹 Buy Power: {dx['buy_power']:,.2f}\n"
-        msg += f"🚫 Max Limit: [RSI 14 ≤ {self.rsi_buy_max:.2f} | RSI 200 ≤ {self.buy_rsi_200:.2f}]\n"
-        msg += f"---------------------------------\n"
-        msg += f"🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n"
-        msg += f"📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n"
-        msg += f"💰 BTC Price : {db_btc['p']:,.0f} THB\n"
-        msg += f"📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n"
-        msg += f"🏹 Buy Power : {db_btc['buy_power']:,.2f}\n"
-        msg += f"📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n"
-        msg += f"---------------------------------\n"
-        msg += f"💰 <b>DYNAMIC FINANCIAL METRICS</b>\n"
-        msg += f"✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n"
-        msg += f"💵 Free Cash (THB) : {thb:,.2f}\n"
-        msg += f"🪙 Position Value  : {(coin*p):,.2f}\n"
-        msg += f"📈 Absolute Growth : <b>{growth:+.2f}%</b>\n"
-        msg += f"---------------------------------\n"
-        msg += f"🏆 <b>PERFORMANCE METRICS</b>\n"
-        msg += f"💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n"
-        msg += f"💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n"
-        msg += f"---------------------------------\n"
-        
+        msg = f"🏛️ <b>TITAN V.18.99: {mode}</b>\n📅 <code>{now}</code>\n---------------------------------\n📈 <b>MARKET ENGINE: {self.symbol}</b>\n💰 Price : <b>{p:,.4f} THB</b>\n📊 State : {state_msg}\n📈 Trend : {'🌕 BULLISH' if p > dx['ema'] else '🌑 BEARISH'}\n📉 RSI 14: {rsi_val:.2f} | RSI 200: {dx['r200']:.2f}\n🚫 Max Limit: [RSI Max Buy Set: {self.rsi_buy_max:.2f}]\n---------------------------------\n🛡️ <b>BTC-GUARD SAFETY NETWORK</b>\n📈 BTC Trend : {'🌕 BULLISH' if db_btc['p'] > db_btc['ema'] else '🌑 BEARISH'}\n💰 BTC Price : {db_btc['p']:,.0f} THB\n📊 BTC Vol 15m: {db_btc['vol']:,.2f}\n🏹 Buy Power : {db_btc['buy_power']:,.2f}\n📊 Avg Weekly (4h): {btc_avg_weekly:,.2f}\n---------------------------------\n💰 <b>DYNAMIC FINANCIAL METRICS</b>\n✨ Total Net Equity : <b>{equity:,.2f} THB</b>\n💵 Free Cash (THB) : {thb:,.2f}\n🪙 Position Value  : {(coin*p):,.2f}\n📈 Absolute Growth : <b>{growth:+.2f}%</b>\n---------------------------------\n🏆 <b>PERFORMANCE METRICS</b>\n💹 Last Trade PnL  : {last_pnl:+,.2f} THB\n💰 Today's Realized : <b>{today_pnl:+,.2f} THB</b>\n---------------------------------\n"
         for i, s in self.slots.items():
             if s['status'] == 'MATCHED':
+                # ✅ คืนค่าสูตรคำนวณเปอร์เซ็นต์กำไรสุทธิหักค่าธรรมเนียมจริงลงหน้าแดชบอร์ด ให้ตัวเลขสวยงามและตรงความจริง
                 profit_pct = ((p * (1 - self.fee_rate)) / (s['price'] * (1 + self.fee_rate)) - 1) * 100 if s['price'] > 0 else 0.0
-                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({profit_pct:+.2f}%) [{s['source']}]</b>\n"
-                msg += f"📥 Entry Price: {s['price']:,.4f} THB\n"
-                msg += f"🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
+                msg += f"🟢 <b>SLOT {i}: {s['units']:.4f} {self.coin_sym} ({profit_pct:+.2f}%) [{s['source']}]</b>\n🎯 Max Peak: {s['max_p']:,.4f} | 🛡️ Trailing SL: {s['sl']:,.4f}\n\n"
             else:
-                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Wait RSI14 ≤ {self.buy_rsi_14} & RSI200 ≤ {self.buy_rsi_200})</b>\n\n"
-                
+                msg += f"⚪ <b>SLOT {i}: VACANT FREE (Waiting RSI ≤ {self.buy_rsi_14})</b>\n\n"
         msg += f"🔍 <i>Database Integrity Status: Verified & Secured (100% Sync)</i>"
         self.notify(msg)
 
@@ -536,27 +502,11 @@ class TitanV18_LuxuryPanicHunterPro:
                             if dx['p'] <= s['sl']: self.execute_trade('sell', i, dx['p'], s['units'], buy_p=s['price'], source=s['source'])
 
                     matched_count = sum(1 for s in self.slots.values() if s['status'] == 'MATCHED')
-                    
-                    # ✅ คำนวณมูลค่าไม้ละ 45% ตามโจทย์อย่างเที่ยงตรง
-                    actual_coin_value = coin * dx['p']
-                    total_equity = thb + actual_coin_value
-                    buy_amount = min(int(total_equity * 0.45), int(self.max_capital_limit))
 
-                    # 🛡️ EXCHANGE-SIDE SAFETY SHIELD (เกราะป้องกันขั้นเด็ดขาดจากการซื้อซ้อนบนกระดานจริง)
-                    allow_buy = True
-                    if matched_count == 0 and actual_coin_value >= 400:
-                        # กระดานจริงมีเหรียญค้างอยู่ แต่วงจรในระบบโดนล้างเป็น 0 (ห้ามซื้อเพิ่มเด็ดขาด ป้องกันบัค API ดีเลย์)
-                        allow_buy = False
-                        print("🛡️ [Safety Shield] Detected existing coins on exchange while DB is empty. Buy blocked to prevent duplication.")
-                    elif matched_count == 1 and actual_coin_value >= (buy_amount * 1.3):
-                        # มีเหรียญจริงบนกระดานครอบคลุมมูลค่า 2 ไม้แล้ว แต่ระบบนึกว่าเพิ่งออกไม้แรก (ห้ามเปิดไม้เพิ่ม)
-                        allow_buy = False
-                        print("🛡️ [Safety Shield] Detected coins equivalent to 2 slots on exchange. Buy blocked to prevent exceeding limit.")
-                    elif matched_count >= 2:
-                        allow_buy = False
-
-                    if allow_buy and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
+                    if matched_count < 2 and dx['r14'] <= self.buy_rsi_14 and dx['r200'] <= self.buy_rsi_200 and dx['r14'] <= self.rsi_buy_max and db_btc['buy_power'] >= 0.10:
                         if time.time() - self.last_buy_ts >= 300:
+                            total_equity = thb + (coin * dx['p'])
+                            buy_amount = min(int(total_equity * 0.24), int(self.max_capital_limit))
                             if buy_amount >= 500 and thb >= buy_amount:
                                 # 🔥 แก้ไขบัค "ไปรวมสล็อต 1": บังคับเช็กสถานะ FREE ให้ชัวร์ก่อนยิงคำสั่ง
                                 target_slot = None
