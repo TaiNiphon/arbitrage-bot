@@ -175,8 +175,8 @@ class TitanV18_LuxuryPanicHunterPro:
 
                 sig = hmac.new(self.api_secret.encode('utf-8'), sig_string.encode('utf-8'), hashlib.sha256).hexdigest()
                 headers = {'Accept': 'application/json', 'Content-Type': 'application/json', 'X-BTK-APIKEY': self.api_key, 'X-BTK-TIMESTAMP': ts, 'X-BTK-SIGN': sig}
-                if method == "GET": res = requests.request("GET", url, headers=headers, timeout=15)
-                else: res = requests.request(method, url, headers=headers, data=payload_json, timeout=15)
+                if method == "GET": res = requests.request("GET", url, headers=headers, timeout=30)
+                else: res = requests.request(method, url, headers=headers, data=payload_json, timeout=30)
                 return res.json()
             except Exception as e:
                 print(f"API Connection Retry {i+1}: {e}")
@@ -524,7 +524,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def get_indicator(self, symbol):
         try:
-            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=15)
+            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol={symbol}&resolution=15&from={int(time.time())-432000}&to={int(time.time())}", timeout=30)
             if res.status_code != 200: return None
             data = res.json()
             if not data or 'c' not in data: return None
@@ -558,7 +558,7 @@ class TitanV18_LuxuryPanicHunterPro:
 
     def get_btc_weekly_volume(self):
         try:
-            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=15)
+            res = requests.get(f"https://api.bitkub.com/tradingview/history?symbol=BTC_THB&resolution=240&from={int(time.time())-604800}&to={int(time.time())}", timeout=30)
             if res.status_code != 200: 
                 return 7000000.0  
             data = res.json()
